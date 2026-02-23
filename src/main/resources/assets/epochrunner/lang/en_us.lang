@@ -1,0 +1,22 @@
+item.entity_protector.name=Entity Protector
+item.homosapien.entity_protector.name=Entity Protector
+item.homosapien.sabotage_fixer.name=Sabotage Fixer
+item.homosapien.camp_setter.name=Camp Setter
+item.homosapien.modern_citizen_item.name=Modern Citizen Spawn Egg
+item.homosapien.hammer.name=Builder's Hammer
+item.homosapien.multimeter.name=Multimeter
+item.homosapien.blueprint.name=Blueprint
+item.homosapien.command_buck.name=Command Buck
+item.homosapien.gold_wrench.name=Gold Wrench
+item.homosapien.expertise.name=Expertise
+item.homosapien.expertise_power.name=Power Expertise
+item.homosapien.expertise_ag.name=Agricultural Expertise
+item.homosapien.expertise_defense.name=Defense Expertise
+item.homosapien.expertise_resources.name=Resource Expertise
+item.homosapien.patrol_stick.name=Patrol Stick
+
+tile.homosapien.citizen_bed.name=Citizen Bed
+tile.homosapien.district_marker.name=District Marker
+tile.homosapien.scaffold.name=Scaffold
+
+entity.homosapien.modern_citizen.name=Modern Citizen

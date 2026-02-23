@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "  ",
+    " S"
+  ],
+  "key": {
+    "S": {
+      "item": "minecraft:stick"
+    }
+  },
+  "result": {
+    "item": "epochrunner:entity_protector",
+    "count": 1
+  }
+}

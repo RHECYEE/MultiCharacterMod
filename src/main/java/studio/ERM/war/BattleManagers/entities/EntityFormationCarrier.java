@@ -1,0 +1,436 @@
+package studio.ERM.war.BattleManagers.entities;
+
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityCreature;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.SharedMonsterAttributes;
+import net.minecraft.entity.projectile.EntityTippedArrow;
+import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.pathfinding.PathNodeType;
+import net.minecraft.util.DamageSource;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.RayTraceResult;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+import studio.ERM.EpochRunnerMod;
+import studio.ERM.war.BattleManagers.cards.SlotPayload;
+import studio.ERM.war.BattleManagers.cards.UnitCard;
+import studio.ERM.war.BattleManagers.core.SpawnHelper;
+import studio.ERM.war.skins.SkinPoolManager;
+
+import java.util.UUID;
+import studio.ERM.war.BattleManagers.core.UnitCompositionResolver;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * v8 — Formation carrier that releases EntitySoldier instances on dismount.
+ *
+ * Changes from v7:
+ *   - tickRelease() now passes warLevel, card-derived role, and skinKey to SpawnHelper
+ *   - SpawnHelper creates EntitySoldier with proper loadout instead of broken AW2 reflection
+ *   - Puppets' skin keys are transferred to soldiers for visual continuity
+ */
+public class EntityFormationCarrier extends EntityCreature {
+
+    // Ranges
+    private int activationRange = 120;
+    private int releaseRange = 30;
+
+    // Release pacing
+    private int releasePerSecond = 4;
+
+    // Rout
+    private float routHealthThreshold = 0.25F;
+
+    // Orbit debug mode
+    private boolean orbitEnabled = false;
+    private boolean orbitLockPuppets = false;
+    private BlockPos orbitCenter = BlockPos.ORIGIN;
+    private double orbitRadius = 10.0D;
+    private double orbitAngularSpeed = 0.04D;
+    private double orbitAngle = 0.0D;
+
+    // Suppression / volley
+    private BlockPos suppressionTarget = null;
+    private int volleyCooldownTicks = 40;
+    private int volleyBurstCount = 6;
+    private int volleyCooldown = 0;
+
+    // Card + slots
+    private String cardName = "";
+    private int warLevel = 1;
+    private boolean supportsVolley = false;
+
+    private final List<SlotPayload> slotPayloads = new ArrayList<>();
+    private final List<Integer> puppetEntityIds = new ArrayList<>();
+    private final List<Vec3d> slotOffsets = new ArrayList<>();
+
+    // Battle context (server-side)
+    private UUID battleTargetPlayerUuid = null;
+    private BlockPos battleSite = null;
+
+    public EntityFormationCarrier(World worldIn) {
+        super(worldIn);
+        this.setSize(1.2F, 1.9F);
+        this.enablePersistence();
+        this.setPathPriority(PathNodeType.WATER, -1.0F);
+        this.experienceValue = 0;
+    }
+
+    @Override
+    protected void initEntityAI() {
+        // Carrier uses navigation only; no combat AI.
+    }
+
+    @Override
+    protected void applyEntityAttributes() {
+        super.applyEntityAttributes();
+        this.getEntityAttribute(SharedMonsterAttributes.MAX_HEALTH).setBaseValue(40.0D);
+        this.getEntityAttribute(SharedMonsterAttributes.MOVEMENT_SPEED).setBaseValue(0.22D);
+        this.getEntityAttribute(SharedMonsterAttributes.FOLLOW_RANGE).setBaseValue(64.0D);
+    }
+
+    public void configureFromCard(UnitCard card, int warLevel) {
+        if (card == null) return;
+
+        this.cardName = card.getName();
+        this.warLevel = Math.max(1, warLevel);
+        this.supportsVolley = card.supportsVolley();
+
+        this.slotOffsets.clear();
+        this.slotOffsets.addAll(card.getSpacingProfile().buildOffsets(card.getSlotCount()));
+
+        this.slotPayloads.clear();
+        this.slotPayloads.addAll(UnitCompositionResolver.buildSlotPayloads(card, this.warLevel));
+
+        if (!world.isRemote) {
+            spawnPuppets();
+        }
+    }
+
+    public void setSuppressionTarget(BlockPos pos) {
+        this.suppressionTarget = pos;
+    }
+
+    /**
+     * Bind this carrier to a battle so that released units immediately acquire a target and engage.
+     */
+    public void setBattleContext(EntityPlayer player, BlockPos battleSite) {
+        if (world.isRemote) return;
+        this.battleTargetPlayerUuid = (player == null) ? null : player.getUniqueID();
+        this.battleSite = battleSite;
+    }
+
+    public void setMoveTarget(BlockPos target, double speed) {
+        if (target == null || world.isRemote) return;
+
+        this.getNavigator().tryMoveToXYZ(
+            target.getX() + 0.5D,
+            target.getY(),
+            target.getZ() + 0.5D,
+            speed > 0 ? speed / 0.22D : 1.0D
+        );
+    }
+
+    public void setOrbitMode(BlockPos center, double radius, double angularSpeed) {
+        setOrbitMode(center, radius, angularSpeed, false);
+    }
+
+    public void setOrbitMode(BlockPos center, double radius, double angularSpeed, boolean lockPuppets) {
+        this.orbitEnabled = true;
+        this.orbitLockPuppets = lockPuppets;
+        this.orbitCenter = center == null ? BlockPos.ORIGIN : center;
+        this.orbitRadius = Math.max(2.0D, radius);
+
+        double s = angularSpeed;
+        if (Math.abs(s) < 0.001D) {
+            s = (s < 0.0D) ? -0.001D : 0.001D;
+        }
+        this.orbitAngularSpeed = s;
+    }
+
+    public Vec3d rotateOffset(Vec3d offset) {
+        if (offset == null) return Vec3d.ZERO;
+        double yawRad = Math.toRadians(-this.rotationYaw);
+        double cos = Math.cos(yawRad);
+        double sin = Math.sin(yawRad);
+        double x = offset.x * cos - offset.z * sin;
+        double z = offset.x * sin + offset.z * cos;
+        return new Vec3d(x, offset.y, z);
+    }
+
+    @Override
+    public void onUpdate() {
+        super.onUpdate();
+
+        if (world.isRemote) return;
+
+        pruneDeadPuppets();
+
+        Entity nearestPlayer = world.getClosestPlayerToEntity(this, activationRange);
+        if (nearestPlayer == null) {
+            if (orbitEnabled) tickOrbit();
+            return;
+        }
+
+        if (orbitEnabled) tickOrbit();
+
+        // In locked orbit mode, do NOT release and do NOT auto-rout.
+        if (orbitLockPuppets) return;
+
+        // Volley outside release range
+        if (supportsVolley && suppressionTarget != null) {
+            double d = this.getDistance(nearestPlayer);
+            if (d > releaseRange) {
+                tickVolley(nearestPlayer);
+            }
+        }
+
+        // Release inside release range
+        double dist = this.getDistance(nearestPlayer);
+        if (dist <= releaseRange) {
+            tickRelease();
+        }
+
+        // Rout check
+        if (this.getHealth() / this.getMaxHealth() < routHealthThreshold) {
+            despawnAllPuppets();
+            setDead();
+        }
+    }
+
+    private void tickOrbit() {
+        orbitAngle += orbitAngularSpeed;
+        if (orbitAngle > Math.PI * 2) orbitAngle -= Math.PI * 2;
+        if (orbitAngle < 0) orbitAngle += Math.PI * 2;
+
+        double tx = orbitCenter.getX() + 0.5D + Math.cos(orbitAngle) * orbitRadius;
+        double tz = orbitCenter.getZ() + 0.5D + Math.sin(orbitAngle) * orbitRadius;
+
+        this.getNavigator().tryMoveToXYZ(tx, orbitCenter.getY(), tz, 1.0D);
+
+        double dx = -Math.sin(orbitAngle);
+        double dz = Math.cos(orbitAngle);
+        this.rotationYaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0D);
+    }
+
+    private void tickVolley(Entity nearestPlayer) {
+        if (volleyCooldown > 0) {
+            volleyCooldown--;
+            return;
+        }
+
+        Vec3d from = new Vec3d(this.posX, this.posY + this.getEyeHeight(), this.posZ);
+        Vec3d to = new Vec3d(suppressionTarget.getX() + 0.5, suppressionTarget.getY() + 0.5, suppressionTarget.getZ() + 0.5);
+
+        RayTraceResult hit = world.rayTraceBlocks(from, to, false, true, false);
+        if (hit != null && hit.typeOfHit == RayTraceResult.Type.BLOCK) {
+            volleyCooldown = 10;
+            return;
+        }
+
+        for (int i = 0; i < volleyBurstCount; i++) {
+            double scatter = 2.5D;
+            double sx = (rand.nextDouble() - 0.5D) * scatter;
+            double sz = (rand.nextDouble() - 0.5D) * scatter;
+            double sy = (rand.nextDouble() - 0.5D) * 0.6D;
+
+            Vec3d tgt = to.add(sx, sy, sz);
+
+            EntityTippedArrow arrow = new EntityTippedArrow(world);
+            arrow.setPosition(from.x, from.y, from.z);
+
+            double vx = tgt.x - from.x;
+            double vy = tgt.y - from.y;
+            double vz = tgt.z - from.z;
+
+            arrow.shoot(vx, vy, vz, 2.2F, 12.0F);
+            arrow.pickupStatus = net.minecraft.entity.projectile.EntityArrow.PickupStatus.DISALLOWED;
+
+            world.spawnEntity(arrow);
+        }
+
+        volleyCooldown = volleyCooldownTicks;
+    }
+
+    /**
+     * v8 — Release puppets as EntitySoldier instances with full loadout and skin.
+     *
+     * Key changes:
+     *   - Derives role from cardName via SoldierLoadout.roleFromCardName()
+     *   - Passes warLevel and skinKey to SpawnHelper
+     *   - SpawnHelper now creates EntitySoldier (not broken AW2 reflection)
+     */
+    private void tickRelease() {
+        int toRelease = Math.max(1, releasePerSecond / 20);
+        int releasedThisTick = 0;
+
+        // Determine the role from the card name
+        String loadoutRole = SoldierLoadout.roleFromCardName(this.cardName);
+
+        for (int i = 0; i < slotPayloads.size() && releasedThisTick < toRelease; i++) {
+            if (i >= puppetEntityIds.size()) break;
+
+            int puppetId = puppetEntityIds.get(i);
+            Entity p = world.getEntityByID(puppetId);
+            if (!(p instanceof EntitySoldierPuppet)) continue;
+
+            EntitySoldierPuppet puppet = (EntitySoldierPuppet) p;
+            SlotPayload payload = slotPayloads.get(i);
+            BlockPos spawnPos = new BlockPos(p.posX, p.posY, p.posZ);
+
+            // Transfer skin from puppet to soldier
+            String puppetSkin = puppet.getSkinKey();
+
+            try {
+                // Use the extended SpawnHelper that creates EntitySoldier
+                SpawnHelper.spawnPayload(
+                    world, spawnPos,
+                    payload.getId(),
+                    battleTargetPlayerUuid, battleSite,
+                    this.warLevel, loadoutRole, puppetSkin
+                );
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.error("[BattleManagers] Release spawn error for payload {}: {}", payload, t.getMessage());
+            }
+
+            // Remove puppet
+            p.setDead();
+            releasedThisTick++;
+        }
+
+        pruneDeadPuppets();
+
+        // If all puppets are gone, carrier is done.
+        if (puppetEntityIds.isEmpty()) {
+            setDead();
+        }
+    }
+
+    private void spawnPuppets() {
+        despawnAllPuppets();
+
+        int carrierId = this.getEntityId();
+        java.util.Random rng = new java.util.Random(carrierId * 31L + warLevel);
+
+        for (int i = 0; i < slotOffsets.size() && i < slotPayloads.size(); i++) {
+            Vec3d off = slotOffsets.get(i);
+
+            EntitySoldierPuppet puppet = new EntitySoldierPuppet(world);
+            puppet.bindToCarrier(carrierId, i, off);
+
+            // Apply skin from AW2 skin pool
+            try {
+                SkinPoolManager.applySkinForRivalLevel(puppet, warLevel, rng);
+            } catch (Throwable t) {
+                puppet.setTexturePathNoExt("");
+            }
+
+            Vec3d rotated = rotateOffset(off);
+            puppet.setPosition(this.posX + rotated.x, this.posY, this.posZ + rotated.z);
+
+            world.spawnEntity(puppet);
+            puppetEntityIds.add(puppet.getEntityId());
+        }
+    }
+
+    private void pruneDeadPuppets() {
+        if (puppetEntityIds.isEmpty()) return;
+
+        for (int i = puppetEntityIds.size() - 1; i >= 0; i--) {
+            int id = puppetEntityIds.get(i);
+            Entity e = world.getEntityByID(id);
+            if (!(e instanceof EntitySoldierPuppet) || e.isDead) {
+                puppetEntityIds.remove(i);
+            }
+        }
+    }
+
+    private void despawnAllPuppets() {
+        for (int id : new ArrayList<>(puppetEntityIds)) {
+            Entity e = world.getEntityByID(id);
+            if (e != null && !e.isDead) e.setDead();
+        }
+        puppetEntityIds.clear();
+    }
+
+    @Override
+    public boolean attackEntityFrom(DamageSource source, float amount) {
+        boolean result = super.attackEntityFrom(source, amount);
+
+        if (!world.isRemote) {
+            if (amount >= 6.0F && !puppetEntityIds.isEmpty()) {
+                int idx = rand.nextInt(puppetEntityIds.size());
+                Entity e = world.getEntityByID(puppetEntityIds.get(idx));
+                if (e != null && !e.isDead) e.setDead();
+                pruneDeadPuppets();
+            }
+        }
+
+        return result;
+    }
+
+    @Override
+    public void readEntityFromNBT(NBTTagCompound compound) {
+        activationRange = compound.getInteger("bm_activationRange");
+        releaseRange = compound.getInteger("bm_releaseRange");
+        releasePerSecond = compound.getInteger("bm_releasePerSecond");
+        routHealthThreshold = compound.getFloat("bm_routThreshold");
+
+        orbitEnabled = compound.getBoolean("bm_orbitEnabled");
+        orbitCenter = new BlockPos(compound.getInteger("bm_orbitX"), compound.getInteger("bm_orbitY"), compound.getInteger("bm_orbitZ"));
+        orbitRadius = compound.getDouble("bm_orbitRadius");
+        orbitAngularSpeed = compound.getDouble("bm_orbitSpeed");
+        orbitAngle = compound.getDouble("bm_orbitAngle");
+
+        if (compound.hasKey("bm_supX")) {
+            suppressionTarget = new BlockPos(compound.getInteger("bm_supX"), compound.getInteger("bm_supY"), compound.getInteger("bm_supZ"));
+        } else {
+            suppressionTarget = null;
+        }
+
+        volleyCooldownTicks = compound.getInteger("bm_volleyCd");
+        volleyBurstCount = compound.getInteger("bm_volleyBurst");
+        volleyCooldown = compound.getInteger("bm_volleyCur");
+
+        cardName = compound.getString("bm_cardName");
+        warLevel = compound.getInteger("bm_warLevel");
+        supportsVolley = compound.getBoolean("bm_supportsVolley");
+
+        slotPayloads.clear();
+        slotOffsets.clear();
+        puppetEntityIds.clear();
+    }
+
+    @Override
+    public void writeEntityToNBT(NBTTagCompound compound) {
+        compound.setInteger("bm_activationRange", activationRange);
+        compound.setInteger("bm_releaseRange", releaseRange);
+        compound.setInteger("bm_releasePerSecond", releasePerSecond);
+        compound.setFloat("bm_routThreshold", routHealthThreshold);
+
+        compound.setBoolean("bm_orbitEnabled", orbitEnabled);
+        compound.setInteger("bm_orbitX", orbitCenter.getX());
+        compound.setInteger("bm_orbitY", orbitCenter.getY());
+        compound.setInteger("bm_orbitZ", orbitCenter.getZ());
+        compound.setDouble("bm_orbitRadius", orbitRadius);
+        compound.setDouble("bm_orbitSpeed", orbitAngularSpeed);
+        compound.setDouble("bm_orbitAngle", orbitAngle);
+
+        if (suppressionTarget != null) {
+            compound.setInteger("bm_supX", suppressionTarget.getX());
+            compound.setInteger("bm_supY", suppressionTarget.getY());
+            compound.setInteger("bm_supZ", suppressionTarget.getZ());
+        }
+
+        compound.setInteger("bm_volleyCd", volleyCooldownTicks);
+        compound.setInteger("bm_volleyBurst", volleyBurstCount);
+        compound.setInteger("bm_volleyCur", volleyCooldown);
+
+        compound.setString("bm_cardName", cardName == null ? "" : cardName);
+        compound.setInteger("bm_warLevel", warLevel);
+        compound.setBoolean("bm_supportsVolley", supportsVolley);
+    }
+}
