@@ -27,3 +27,13 @@ forge*changelog.txt
 # Libs directory
 /libs
 mcmodsrepo
+
+# Windows reserved + stray build artifacts
+nul
+*.log
+.claude/settings.local.json
+
+# decompiled reference + disabled libs (not mod source)
+/net/
+/libs_disabled/
+*.class

@@ -1,4 +1,4 @@
-package studio.ERM.war.faction;
+package studio.ERM.war.rival;
 
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.math.BlockPos;

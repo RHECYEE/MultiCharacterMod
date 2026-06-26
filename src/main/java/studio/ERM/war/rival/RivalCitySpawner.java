@@ -1,6 +1,6 @@
 package studio.ERM.war.rival;
 
-import co.runed.multicharacter.vehicle.EntityAIPilot;
+import studio.ERM.war.vehicle.EntityAIPilot;
 import com.flansmod.common.driveables.DriveableType;
 import com.flansmod.common.driveables.VehicleType;
 import com.flansmod.common.types.InfoType;
@@ -17,9 +17,10 @@ import net.minecraft.world.World;
 import net.minecraftforge.fml.common.Loader;
 import net.minecraftforge.fml.common.registry.ForgeRegistries;
 import studio.ERM.EpochRunnerMod;
-import studio.ERM.config.RivalCityConfig as ExternalConfig;
-import studio.ERM.war.faction.ProceduralBuildingGenerator;
-import studio.ERM.war.faction.RivalFactionStats;
+// Note: "RivalCityConfig" unqualified refers to studio.ERM.war.rival.RivalCityConfig (local).
+// For external flans vehicle config, we use the fully qualified name below.
+import studio.ERM.war.rival.ProceduralBuildingGenerator;
+import studio.ERM.war.rival.RivalFactionStats;
 
 import java.lang.reflect.Method;
 import java.util.*;
@@ -395,7 +396,7 @@ public class RivalCitySpawner {
 
             shortName = shortName.toLowerCase(Locale.ROOT).replace("flansmod:", "").trim();
 
-            if (ExternalConfig.validateFlansTypeBeforeSpawn && !isValidFlansVehicleTypeSafe(shortName)) {
+            if (studio.ERM.config.RivalCityConfig.validateFlansTypeBeforeSpawn && !isValidFlansVehicleTypeSafe(shortName)) {
                 continue;
             }
 
@@ -408,10 +409,10 @@ public class RivalCitySpawner {
     }
 
     public static String getConfiguredFlansListForLevel(int level) {
-        if (ExternalConfig.flansVehiclesByLevel == null || ExternalConfig.flansVehiclesByLevel.length == 0)
+        if (studio.ERM.config.RivalCityConfig.flansVehiclesByLevel == null || studio.ERM.config.RivalCityConfig.flansVehiclesByLevel.length == 0)
             return null;
-        int idx = Math.max(1, Math.min(level, ExternalConfig.flansVehiclesByLevel.length));
-        return ExternalConfig.flansVehiclesByLevel[idx - 1];
+        int idx = Math.max(1, Math.min(level, studio.ERM.config.RivalCityConfig.flansVehiclesByLevel.length));
+        return studio.ERM.config.RivalCityConfig.flansVehiclesByLevel[idx - 1];
     }
 
     public static boolean isValidFlansVehicleTypeSafe(String shortName) {
@@ -460,7 +461,7 @@ public class RivalCitySpawner {
         EntityAIPilot pilot = new EntityAIPilot(world);
         pilot.setPosition(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
         pilot.setMcmTeam(RivalCityState.RIVAL_FACTION_NAME);
-        pilot.setVehicleTargetingEnabled(ExternalConfig.enableVehicleVsVehicle);
+        pilot.setVehicleTargetingEnabled(studio.ERM.config.RivalCityConfig.enableVehicleVsVehicle);
 
         if (!summoned) {
             pilot.setVehicleType(vehicleShortName);
@@ -536,7 +537,7 @@ public class RivalCitySpawner {
      * Generate a building at an expansion node position.
      */
     public static void generateBuildingAtExpansionNode(World world, RivalCityState state,
-                                                        studio.ERM.war.faction.RivalExpansionManager.ExpansionNode node) {
+                                                        studio.ERM.war.rival.RivalExpansionManager.ExpansionNode node) {
         String type = node.structureType == null ? "" : node.structureType.toUpperCase();
         BlockPos pos = world.getTopSolidOrLiquidBlock(node.position);
 

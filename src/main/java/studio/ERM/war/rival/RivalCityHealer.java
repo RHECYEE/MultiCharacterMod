@@ -126,7 +126,7 @@ public final class RivalCityHealer {
         if (pos == null) return true;
         if (world.isAirBlock(pos)) return true;
         Block b = world.getBlockState(pos).getBlock();
-        return b == Blocks.AIR || b == Blocks.CAVE_AIR || b == Blocks.VOID_AIR;
+        return b == Blocks.AIR;
     }
 
     private static int computeTargetY(World world, BlockPos center, int radius) {

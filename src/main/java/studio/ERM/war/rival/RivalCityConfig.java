@@ -1,8 +1,10 @@
 package studio.ERM.war.rival;
 
+import net.minecraft.util.math.BlockPos;
+
 /**
  * RivalCityConfig - Configuration constants for the rival city system.
- * 
+ *
  * Extracted from the monolithic RivalCityManager for better organization.
  * These values can be modified at runtime or via config files.
  */
@@ -76,14 +78,155 @@ public class RivalCityConfig {
     public static final int REDEVELOP_COOLDOWN_TICKS = 20 * 60 * 2; // 2 minutes
 
     // =====================================================================
+    // CORE PROTECTION CONFIGURATION
+    // =====================================================================
+
+    public static int coreExclusionRadius = 40;
+    public static boolean generateCoreMoat = true;
+    public static int moatRadius = 30;
+    public static int moatWidth = 4;
+    public static int moatDepth = 5;
+    public static boolean generateMoatBridges = true;
+    public static int bridgeWidth = 3;
+    public static boolean alignMainStreetToBridge = true;
+
+    // =====================================================================
+    // CITY ZONES (for main street generation)
+    // =====================================================================
+
+    public enum CityZone {
+        CORE(0, 40),
+        MAIN_STREET(40, 120),
+        RESIDENTIAL(80, 200),
+        INDUSTRIAL(150, 300);
+
+        public final int innerRadius;
+        public final int outerRadius;
+
+        CityZone(int inner, int outer) {
+            this.innerRadius = inner;
+            this.outerRadius = outer;
+        }
+    }
+
+    // =====================================================================
+    // HEAL CONFIGURATION
+    // =====================================================================
+
+    private static final ConfigData CONFIG = new ConfigData();
+
+    public static ConfigData get() {
+        return CONFIG;
+    }
+
+    public static class ConfigData {
+        public int healMaxPlotsPerRun = 5;
+        public int healRadiusBlocks = 8;
+        public int healFillDepth = 4;
+        public int healClearAbove = 10;
+    }
+
+    // =====================================================================
+    // CARRIER PAYLOAD CONFIGURATION (for UnitCompositionResolver)
+    // =====================================================================
+
+    public static String carrierMeleePayload = "aw2:soldier";
+    public static String carrierRangedPayload = "aw2:archer";
+    public static String carrierHeavyPayload = "aw2:elite";
+    public static String carrierSpecialPayload = "aw2:leader";
+
+    /**
+     * Get the carrier payload string for a given war level and role.
+     */
+    public static String getCarrierPayload(int warLevel, String roleName) {
+        if (roleName == null) return carrierMeleePayload;
+        switch (roleName.toUpperCase()) {
+            case "MELEE":   return carrierMeleePayload;
+            case "RANGED":  return carrierRangedPayload;
+            case "HEAVY":   return carrierHeavyPayload;
+            case "SPECIAL": return carrierSpecialPayload;
+            default:        return carrierMeleePayload;
+        }
+    }
+
+    // =====================================================================
     // UTILITY METHODS
     // =====================================================================
+
+    // =====================================================================
+    // PATROL / GARRISON CONFIGURATION
+    // =====================================================================
+
+    /** Number of pilots per foot-patrol squad. */
+    public static int PATROL_SQUAD_SIZE = 3;
+
+    /** City level at which garrison vehicles start appearing. */
+    public static int GARRISON_START_LEVEL = 3;
+
+    /** Extra blend radius (blocks) used when smoothing flattened terrain edges. */
+    public static int FLATTEN_SMOOTH_RADIUS = 8;
+
+    /** Comma-separated patrol weapon registry names per 0-based level index. */
+    public static String[] patrolWeaponsByLevel = {
+            "minecraft:wooden_sword",                 // Level 1
+            "minecraft:stone_sword",                  // Level 2
+            "minecraft:stone_sword,minecraft:bow",    // Level 3
+            "minecraft:iron_sword,minecraft:bow",     // Level 4
+            "minecraft:iron_sword,minecraft:bow",     // Level 5
+            "minecraft:iron_sword,minecraft:bow",     // Level 6
+            "minecraft:diamond_sword,minecraft:bow",  // Level 7
+            "minecraft:diamond_sword,minecraft:bow",  // Level 8
+            "minecraft:diamond_sword,minecraft:bow",  // Level 9
+            "minecraft:diamond_sword,minecraft:bow"   // Level 10
+    };
+
+    /** Pipe-delimited Flans garrison vehicle shortnames per 0-based level index. */
+    public static String[] garrisonVehiclesByLevel = {
+            "jeep",                  // Level 1
+            "jeep",                  // Level 2
+            "jeep|gaz",              // Level 3
+            "jeep|gaz|halftrack",    // Level 4
+            "gaz|halftrack|panzer4", // Level 5
+            "halftrack|panzer4",     // Level 6
+            "panzer4|tiger",         // Level 7
+            "tiger|t34",             // Level 8
+            "tiger|t34|m1a1",        // Level 9
+            "m1a1|t90"               // Level 10
+    };
+
+    /** Weapon registry names available to patrols at the given city level. */
+    public static String[] getPatrolWeaponsForLevel(int level) {
+        int idx = Math.max(0, Math.min(patrolWeaponsByLevel.length - 1, level - 1));
+        String entry = patrolWeaponsByLevel[idx];
+        if (entry == null || entry.isEmpty()) return new String[0];
+        return entry.split(",");
+    }
+
+    /** Flans vehicle shortnames available to garrisons at the given city level. */
+    public static String[] getGarrisonVehiclesForLevel(int level) {
+        if (level < GARRISON_START_LEVEL) return new String[0];
+        int idx = Math.max(0, Math.min(garrisonVehiclesByLevel.length - 1, level - 1));
+        String entry = garrisonVehiclesByLevel[idx];
+        if (entry == null || entry.isEmpty()) return new String[0];
+        return entry.split("\\|");
+    }
 
     /**
      * Recalculate derived values after config changes.
      */
     public static void recalculateDerived() {
         plotSpacing = plotSize + roadWidth;
+    }
+
+    /**
+     * Check if a position is inside the core exclusion zone.
+     */
+    public static boolean isInCoreExclusionZone(BlockPos pos, BlockPos cityCenter) {
+        if (pos == null || cityCenter == null) return false;
+        double dx = pos.getX() - cityCenter.getX();
+        double dz = pos.getZ() - cityCenter.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        return dist < coreExclusionRadius;
     }
 
     /**

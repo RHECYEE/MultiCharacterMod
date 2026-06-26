@@ -57,6 +57,12 @@ public final class SkinTextureCache {
         // Get skin key from entity
         String key = SkinPoolManager.getSkinKey(entity);
         if (key == null || key.isEmpty()) {
+            // UNCONDITIONAL (throttled): if the client sees an empty key, the DataParameter never
+            // synced (or the server never assigned one) -> this is THE reason for a Steve/white blob.
+            logOnce(entity.getClass().getSimpleName() + "|<empty>",
+                    "[ERM-Skins] CLIENT: " + entity.getClass().getSimpleName()
+                            + " has EMPTY skin key on client -> fallback "
+                            + (entity instanceof ISkinnable ? "(entity custom)" : "Steve"));
             // Check if entity has custom fallback
             if (entity instanceof ISkinnable) {
                 return ((ISkinnable) entity).getFallbackTexture();
@@ -64,7 +70,29 @@ public final class SkinTextureCache {
             return FALLBACK_STEVE;
         }
 
-        return getTextureByKey(key);
+        ResourceLocation result = getTextureByKey(key);
+        // UNCONDITIONAL (throttled, once per class|key): shows whether the synced key resolved to a
+        // real dynamic texture or fell back to Steve. If it resolves but still renders white, the
+        // problem is the PNG/model (e.g. 64x32 legacy skin on a 64x64 model), not the key pipeline.
+        logOnce(entity.getClass().getSimpleName() + "|" + key,
+                "[ERM-Skins] CLIENT: " + entity.getClass().getSimpleName()
+                        + " key='" + key + "' -> " + result
+                        + (FALLBACK_STEVE.equals(result) ? "  (FELL BACK TO STEVE)" : ""));
+        return result;
+    }
+
+    private static final java.util.Set<String> LOGGED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Log {@code msg} the first time {@code dedupeKey} is seen; throttles per-entity spam.
+     * Routed through {@link studio.ERM.EpochRunnerMod#logger} (log4j) because, in this runtime,
+     * {@code System.out} does NOT reach latest.log -- so the previous System.out diagnostics were
+     * completely invisible and useless for debugging the white-blob soldiers.
+     */
+    private static void logOnce(String dedupeKey, String msg) {
+        if (LOGGED.add(dedupeKey)) {
+            studio.ERM.EpochRunnerMod.logger.info(msg);
+        }
     }
 
     /**
@@ -133,10 +161,23 @@ public final class SkinTextureCache {
             }
 
             if (image == null) {
-                if (SkinPoolConfig.debugLogging) {
-                    System.err.println("[ERM-Skins] Failed to decode image: " + assetLoc);
-                }
+                studio.ERM.EpochRunnerMod.logger.warn("[ERM-Skins] Failed to decode image: " + assetLoc
+                        + " (entity will render as fallback Steve)");
                 return null;
+            }
+
+            // ROOT-CAUSE FIX for "white blob" soldiers: AW2 skin_pack PNGs are classic 64x32
+            // LEGACY player skins, but our renderer (RenderSkinnable) binds them to a 64x64
+            // ModelBiped. On a 64x64 model the lower-body / right-arm / right-leg quads and the
+            // entire second (hat/jacket) layer sample the BOTTOM half of the texture -- which does
+            // not exist in a 64x32 image -- so those UVs read blank and the entity renders as a
+            // solid white biped. Vanilla skin loading runs every skin through ImageBufferDownload
+            // to upscale legacy 64x32 -> 64x64 (duplicating the arm/leg sections); this path
+            // previously skipped that step entirely. Do the same conversion here.
+            if (image.getHeight() * 2 == image.getWidth()) {
+                BufferedImage converted =
+                        new net.minecraft.client.renderer.ImageBufferDownload().parseUserSkin(image);
+                if (converted != null) image = converted;
             }
 
             // Create dynamic texture
@@ -152,16 +193,19 @@ public final class SkinTextureCache {
             TextureManager texMgr = mc.getTextureManager();
             texMgr.loadTexture(dynKey, dynTex);
 
-            if (SkinPoolConfig.debugLogging) {
-                System.out.println("[ERM-Skins] Loaded texture: " + key + " -> " + dynKey);
-            }
+            // UNCONDITIONAL: confirms the PNG actually decoded + registered, and prints its
+            // dimensions. A 64x32 (legacy) skin rendered on a 64x64 biped model is a common cause
+            // of "white/half-missing" entities even though the texture loads without error.
+            studio.ERM.EpochRunnerMod.logger.info("[ERM-Skins] Loaded texture: " + key + " -> " + dynKey
+                    + " (img " + image.getWidth() + "x" + image.getHeight() + ")");
 
             return dynKey;
 
         } catch (Throwable t) {
-            if (SkinPoolConfig.debugLogging) {
-                System.err.println("[ERM-Skins] Error loading texture '" + key + "': " + t.getMessage());
-            }
+            // Unconditional: this is the client-side reason a soldier shows as a white/Steve
+            // blob -- the skin key was set but its PNG could not be resolved/loaded.
+            studio.ERM.EpochRunnerMod.logger.warn("[ERM-Skins] Error loading texture '" + key + "': " + t,
+                    t);
             return null;
         }
     }

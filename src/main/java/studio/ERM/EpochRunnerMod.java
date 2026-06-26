@@ -25,7 +25,6 @@ import studio.ERM.war.config.*;
 import studio.ERM.war.districts.*;
 import studio.ERM.war.items.*;
 import studio.ERM.war.entities.EntityModernCitizen;
-import studio.ERM.war.network.WarPacketHandler;
 import studio.ERM.items.ItemProtector;
 import studio.ERM.handlers.*;
 
@@ -37,6 +36,7 @@ public class EpochRunnerMod {
     @Mod.Instance(MODID)
     public static EpochRunnerMod instance;
     public static Logger logger;
+    private static boolean loggedAdvancementSanitize = false;
     public static SimpleNetworkWrapper network;
 
     // RESTORED: This allows InvasionHandler and SleepBlocker to function
@@ -45,11 +45,14 @@ public class EpochRunnerMod {
     @SidedProxy(clientSide = "studio.ERM.proxy.ClientProxy", serverSide = "studio.ERM.proxy.CommonProxy")
     public static studio.ERM.proxy.CommonProxy proxy;
 
-    public static Item entity_protector, sabotage_fixer, camp_setter, modern_citizen_item;
+    public static Item entity_protector, sabotage_fixer, camp_setter, modern_citizen_item, air_target_designator;
     public static Block citizen_bed, district_marker, scaffold;
-    
+
     // Job assignment items
     public static Item hammer, multimeter, blueprint, command_buck, gold_wrench;
+
+    // Expertise items (referenced by ItemExpertise.createFromDistrict)
+    public static Item expertise_industry, expertise_agriculture, expertise_defense, expertise_resource;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
@@ -59,20 +62,55 @@ public class EpochRunnerMod {
         try {
             network = NetworkRegistry.INSTANCE.newSimpleChannel("epoch_net");
 
+            // Register tactical war map packets
+            studio.ERM.war.map.net.TacticalWarMapNetwork.init();
+
             // CRITICAL: Register tile entities before blocks that use them
-            GameRegistry.registerTileEntity(studio.ERM.war.districts.TileEntityPowerDistrict.class, 
+            GameRegistry.registerTileEntity(studio.ERM.war.districts.TileEntityPowerDistrict.class,
                 new ResourceLocation(MODID, "power_district"));
-            GameRegistry.registerTileEntity(studio.ERM.war.districts.TileEntityDistrictMarker.class, 
+            GameRegistry.registerTileEntity(studio.ERM.war.districts.TileEntityDistrictMarker.class,
                 new ResourceLocation(MODID, "district_marker"));
 
             // Register entity with proper tracking range
             EntityRegistry.registerModEntity(new ResourceLocation(MODID, "modern_citizen"),
-                    studio.ERM.war.entities.EntityModernCitizen.class, "modern_citizen", 0, instance, 80, 3, true, 0x964B00, 0xFFFFFF);
+                    EntityModernCitizen.class, "modern_citizen", 0, instance, 80, 3, true, 0x964B00, 0xFFFFFF);
 
-            co.runed.multicharacter.MultiCharacterMod.preInit(event);
+            // Air strike designator projectile + smoke marker. These were referenced by
+            // ItemAirTargetDesignator but never registered, so the thrown marker never appeared
+            // on the client and the strike-call particles never rendered. IDs 1/2 (0 = citizen).
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "air_designator"),
+                    studio.ERM.war.items.ItemAirTargetDesignator.EntityAirDesignatorProjectile.class,
+                    "air_designator", 1, instance, 64, 10, true);
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "air_smoke_marker"),
+                    studio.ERM.war.items.ItemAirTargetDesignator.EntitySmokeMarker.class,
+                    "air_smoke_marker", 2, instance, 80, 20, false);
+
+            // Flan's-vehicle pilot/crew AI. It was spawned by many systems (SpawnHelper, raids,
+            // RivalCity patrols/guards) but never registered, so it had no spawn egg and never
+            // synced/rendered to clients. The 10-arg overload auto-creates a spawn egg (olive/black)
+            // — this is the "missing pilot spawn egg". id 3 (0=citizen,1/2=air markers).
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "ai_pilot"),
+                    studio.ERM.war.vehicle.EntityAIPilot.class, "ai_pilot", 3, instance, 64, 3, true, 0x4B5320, 0x1C1C1C);
+
+            // Battle entities. These were spawned by the directors/BattleEngine and HAD client
+            // renderers registered, but the ENTITIES themselves were never registered — so the
+            // server never sent spawn/tracking packets and they were invisible to every client
+            // (no model, no health bar). This is the root cause of "invisible debug guys",
+            // "invisible siege formations", and the airstrike showing nothing. IDs 4-7.
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "soldier"),
+                    studio.ERM.war.BattleManagers.entities.EntitySoldier.class, "soldier", 4, instance, 80, 3, true);
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "soldier_puppet"),
+                    studio.ERM.war.BattleManagers.entities.EntitySoldierPuppet.class, "soldier_puppet", 5, instance, 80, 3, true);
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "formation_carrier"),
+                    studio.ERM.war.BattleManagers.entities.EntityFormationCarrier.class, "formation_carrier", 6, instance, 80, 3, true);
+            EntityRegistry.registerModEntity(new ResourceLocation(MODID, "ghost_aircraft"),
+                    studio.ERM.war.air.EntityGhostAircraft.class, "ghost_aircraft", 7, instance, 160, 3, true);
+
+            // MultiCharacterMod has instance methods - get the instance
+            co.runed.multicharacter.MultiCharacterMod.getInstance().preInit(event);
 
             proxy.preInit(event);
-            
+
             logger.info("[NUCLEAR-LOG] Pre-Init COMPLETE");
         } catch (Exception e) {
             logger.error("[NUCLEAR-LOG] CRITICAL FAILURE IN PRE-INIT", e);
@@ -93,12 +131,40 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.WarTriggerHandler());
             MinecraftForge.EVENT_BUS.register(invasionHandlerInstance);
             MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.SleepBlocker());
-            MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.WorldBackupManager());
+            // WorldBackupManager has private constructor - register class for static @SubscribeEvent if needed
+            // MinecraftForge.EVENT_BUS.register(WorldBackupManager.class);
             MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.ProtectionHandler());
 
-            co.runed.multicharacter.MultiCharacterMod.init(event);
+            // CRITICAL FIX: the battle engine's ONLY server-tick driver. Every comment in the
+            // BattleManagers code calls DeployedBattleTicker "the one authoritative path" that
+            // calls BattleEngine.tick() each server tick -- but it was never actually registered,
+            // so BattleEngine.tick() NEVER ran. Result: phased battles (siege, etc.) froze in their
+            // start() state forever -- no phase advance, no bombardment, no engineer push, no surge,
+            // no troop release from staging carriers. (Debug battles only appeared to work because
+            // their carriers self-tick orbit/release in EntityFormationCarrier.onUpdate.) Registering
+            // it here brings the whole phased-battle system to life.
+            MinecraftForge.EVENT_BUS.register(new studio.ERM.war.BattleManagers.deployed.DeployedBattleTicker());
+            logger.info("[BattleManagers] DeployedBattleTicker registered (battle engine tick driver is LIVE)");
+
+            // CRITICAL FIX: the Flan-gun infantry AI injector. It listens for EntityJoinWorldEvent and
+            // attaches find-ammo + gun-attack AI to any matched NPC holding a gun -- but it was never
+            // registered, so NO entity ever received gun AI (the "lost our custom infantry ammo logic"
+            // regression). With this, ranged soldiers/citizens equipped with Flan guns actually shoot.
+            MinecraftForge.EVENT_BUS.register(new co.runed.multicharacter.handlers.AIInjectionHandler());
+            logger.info("[MCM] AIInjectionHandler registered (Flan-gun infantry AI is LIVE)");
+
+            // CRITICAL FIX: populate the battle-director registry. It was never initialized, so the
+            // map's "Deploy Battle" menu listed ZERO battle types (empty dropdown) and any registry
+            // lookup returned nothing. init() is idempotent and self-guards on `initialized`.
+            studio.ERM.war.BattleManagers.directors.BattleDirectorRegistry.init();
+            logger.info("[BattleManagers] BattleDirectorRegistry initialized ("
+                    + studio.ERM.war.BattleManagers.directors.BattleDirectorRegistry.getAll().size()
+                    + " battle types available in the deploy menu)");
+
+            // MultiCharacterMod has instance methods - get the instance
+            co.runed.multicharacter.MultiCharacterMod.getInstance().init(event);
             proxy.init(event);
-            
+
             logger.info("[NUCLEAR-LOG] Init COMPLETE");
         } catch (Exception e) {
             logger.error("[NUCLEAR-LOG] CRITICAL FAILURE IN INIT", e);
@@ -110,8 +176,78 @@ public class EpochRunnerMod {
         // CRITICAL: Register commands here
         event.registerServerCommand(new studio.ERM.war.CommandWar());
         logger.info("[NUCLEAR-LOG] Command /war registered");
-        
-        co.runed.multicharacter.MultiCharacterMod.serverStarting(event);
+
+        // CRITICAL CRASH FIX: this pack has advancement(s) that reward a recipe which no longer
+        // exists. When such an advancement completes (ANY inventory change can do it), vanilla calls
+        // EntityPlayerMP.unlockRecipes with a null recipe and ForgeHooks.sendRecipeBook NPEs ->
+        // "Ticking player" server crash. We can't edit pack data, so strip the dangling recipe
+        // rewards from every advancement at server start. This permanently kills that recurring crash.
+        sanitizeBrokenAdvancementRecipes(event.getServer());
+
+        // WorldSpawner: load config + register its command. Routed through this @Mod.EventHandler
+        // because FML lifecycle events cannot be handled via @SubscribeEvent on the Forge bus.
+        studio.WorldSpawner.WorldSpawnerModule.onServerStarting(event);
+
+        // MultiCharacterMod uses @EventHandler for serverStart, call instance method
+        co.runed.multicharacter.MultiCharacterMod.getInstance().serverStart(event);
+    }
+
+    /**
+     * Remove recipe rewards that point at non-existent recipes from every loaded advancement. Such a
+     * dangling reward makes vanilla/Forge NPE in ForgeHooks.sendRecipeBook when the advancement is
+     * granted, crashing the server ("Ticking player"). Done reflectively because AdvancementRewards
+     * stores its recipe list in a private final field.
+     */
+    public static void sanitizeBrokenAdvancementRecipes(net.minecraft.server.MinecraftServer server) {
+        if (server == null) return;
+        try {
+            // AdvancementRewards.recipes is private final ResourceLocation[]. Its runtime name differs
+            // between the dev (deobf "recipes") and shipped (SRG "field_192117_d") environments, so try
+            // both. SRG confirmed from MCP stable_39 fields.csv.
+            java.lang.reflect.Field recipesField = null;
+            for (String n : new String[]{"field_192117_d", "recipes"}) {
+                try { recipesField = net.minecraft.advancements.AdvancementRewards.class.getDeclaredField(n); break; }
+                catch (NoSuchFieldException ignored) {}
+            }
+            if (recipesField == null) {
+                logger.warn("[Antigrief] Could not locate AdvancementRewards.recipes field; recipe-book crash guard inactive.");
+                return;
+            }
+            recipesField.setAccessible(true);
+
+            int scanned = 0, fixedAdvancements = 0, droppedRecipes = 0;
+            for (net.minecraft.advancements.Advancement adv : server.getAdvancementManager().getAdvancements()) {
+                scanned++;
+                net.minecraft.advancements.AdvancementRewards rewards = adv.getRewards();
+                if (rewards == null) continue;
+                Object val = recipesField.get(rewards);
+                if (!(val instanceof net.minecraft.util.ResourceLocation[])) continue;
+                net.minecraft.util.ResourceLocation[] recipes = (net.minecraft.util.ResourceLocation[]) val;
+                if (recipes.length == 0) continue;
+
+                java.util.List<net.minecraft.util.ResourceLocation> valid = new java.util.ArrayList<>();
+                for (net.minecraft.util.ResourceLocation rl : recipes) {
+                    if (rl != null && net.minecraft.item.crafting.CraftingManager.getRecipe(rl) != null) {
+                        valid.add(rl);
+                    }
+                }
+                if (valid.size() != recipes.length) {
+                    recipesField.set(rewards, valid.toArray(new net.minecraft.util.ResourceLocation[0]));
+                    fixedAdvancements++;
+                    droppedRecipes += (recipes.length - valid.size());
+                }
+            }
+            // Log once, the first time we actually scan a populated advancement set, so it's clear the
+            // guard ran (and whether anything was dangling).
+            if (scanned > 0 && !loggedAdvancementSanitize) {
+                loggedAdvancementSanitize = true;
+                logger.info("[Antigrief] Advancement recipe-book guard: scanned " + scanned
+                        + " advancement(s), fixed " + fixedAdvancements + " with " + droppedRecipes
+                        + " missing recipe reward(s).");
+            }
+        } catch (Throwable t) {
+            logger.warn("[Antigrief] Advancement recipe sanitize failed (recipe-book crash may persist): " + t);
+        }
     }
 
     @Mod.EventBusSubscriber(modid = MODID)
@@ -128,11 +264,17 @@ public class EpochRunnerMod {
 
         @SubscribeEvent
         public static void registerItems(RegistryEvent.Register<Item> event) {
-            entity_protector = new studio.ERM.items.ItemProtector().setRegistryName("entity_protector").setTranslationKey(MODID + ".entity_protector");
+            // ItemProtector extends ItemBase, whose constructor already calls setRegistryName("homosapien","entity_protector").
+            // Re-setting the registry name here would double-set and crash mod loading, so only the translation key is applied.
+            entity_protector = new studio.ERM.items.ItemProtector().setTranslationKey(MODID + ".entity_protector");
             sabotage_fixer = new studio.ERM.war.items.ItemSabotageFixer().setRegistryName("sabotage_fixer").setTranslationKey(MODID + ".sabotage_fixer");
             camp_setter = new studio.ERM.war.items.ItemCampSetter().setRegistryName("camp_setter").setTranslationKey(MODID + ".camp_setter");
             modern_citizen_item = new studio.ERM.war.items.ItemModernCitizen().setRegistryName("modern_citizen_item").setTranslationKey(MODID + ".modern_citizen_item");
-            
+
+            // Player-callable air strike item. Was implemented but never registered, which is why
+            // all of the player's airstrike items were missing from the game.
+            air_target_designator = new studio.ERM.war.items.ItemAirTargetDesignator().setRegistryName("air_target_designator").setTranslationKey(MODID + ".air_target_designator");
+
             // Job assignment items - simple items that assign jobs when given to citizens
             hammer = new Item().setRegistryName("hammer").setTranslationKey(MODID + ".hammer").setCreativeTab(CreativeTabs.TOOLS).setMaxStackSize(1);
             multimeter = new Item().setRegistryName("multimeter").setTranslationKey(MODID + ".multimeter").setCreativeTab(CreativeTabs.TOOLS).setMaxStackSize(1);
@@ -140,13 +282,21 @@ public class EpochRunnerMod {
             command_buck = new Item().setRegistryName("command_buck").setTranslationKey(MODID + ".command_buck").setCreativeTab(CreativeTabs.COMBAT).setMaxStackSize(1);
             gold_wrench = new Item().setRegistryName("gold_wrench").setTranslationKey(MODID + ".gold_wrench").setCreativeTab(CreativeTabs.TOOLS).setMaxStackSize(1).setMaxDamage(128);
 
+            // Expertise items
+            expertise_industry = new studio.ERM.war.items.ItemExpertise(studio.ERM.war.items.ItemExpertise.ExpertiseKind.INDUSTRY).setRegistryName("expertise_industry").setTranslationKey(MODID + ".expertise_industry");
+            expertise_agriculture = new studio.ERM.war.items.ItemExpertise(studio.ERM.war.items.ItemExpertise.ExpertiseKind.AGRICULTURE).setRegistryName("expertise_agriculture").setTranslationKey(MODID + ".expertise_agriculture");
+            expertise_defense = new studio.ERM.war.items.ItemExpertise(studio.ERM.war.items.ItemExpertise.ExpertiseKind.DEFENSE).setRegistryName("expertise_defense").setTranslationKey(MODID + ".expertise_defense");
+            expertise_resource = new studio.ERM.war.items.ItemExpertise(studio.ERM.war.items.ItemExpertise.ExpertiseKind.RESOURCE).setRegistryName("expertise_resource").setTranslationKey(MODID + ".expertise_resource");
+
             event.getRegistry().registerAll(entity_protector, sabotage_fixer, camp_setter, modern_citizen_item,
-                hammer, multimeter, blueprint, command_buck, gold_wrench);
+                air_target_designator,
+                hammer, multimeter, blueprint, command_buck, gold_wrench,
+                expertise_industry, expertise_agriculture, expertise_defense, expertise_resource);
 
             event.getRegistry().register(new ItemBlock(citizen_bed).setRegistryName("citizen_bed"));
             event.getRegistry().register(new ItemBlock(district_marker).setRegistryName("district_marker"));
             event.getRegistry().register(new ItemBlock(scaffold).setRegistryName("scaffold"));
-            
+
             logger.info("[NUCLEAR-LOG] Items registered: all items including job items (hammer, multimeter, blueprint, command_buck, gold_wrench)");
         }
     }

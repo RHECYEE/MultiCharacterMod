@@ -5,6 +5,8 @@ import net.minecraft.entity.EntityCreature;
 import net.minecraft.entity.EntityLiving;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.ai.EntityAINearestAttackableTarget;
+import net.minecraft.entity.passive.AbstractHorse;
+import net.minecraft.entity.passive.EntityHorse;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
@@ -116,6 +118,15 @@ public final class SpawnHelper {
 
             world.spawnEntity(soldier);
 
+            // Cavalry: mount soldier on a horse
+            if ("CAVALRY".equalsIgnoreCase(role)) {
+                try {
+                    spawnCavalryMount(world, soldier, pos, warLevel);
+                } catch (Throwable t) {
+                    EpochRunnerMod.logger.debug("[SpawnHelper] Could not mount cavalry: {}", t.getMessage());
+                }
+            }
+
             EpochRunnerMod.logger.debug("[SpawnHelper] Spawned EntitySoldier L{} role={} at {}",
                 warLevel, role, pos);
 
@@ -124,6 +135,49 @@ public final class SpawnHelper {
             EpochRunnerMod.logger.error("[SpawnHelper] Failed to spawn EntitySoldier: {}", t.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Spawn a horse and mount the cavalry soldier onto it.
+     * Horse speed and health scale with warLevel.
+     */
+    private static void spawnCavalryMount(World world, EntitySoldier rider, BlockPos pos, int warLevel) {
+        EntityHorse horse = new EntityHorse(world);
+        horse.setPosition(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+
+        // Scale horse stats with war level
+        horse.setGrowingAge(0); // Adult
+        horse.setHorseTamed(true);
+        horse.setHorseSaddled(true);
+
+        // Increase speed and health with level
+        double baseSpeed = 0.225 + (warLevel * 0.008);  // 0.233 at L1, 0.305 at L10
+        double baseHealth = 20.0 + (warLevel * 3.0);    // 23 at L1, 50 at L10
+        double baseJump = 0.5 + (warLevel * 0.03);
+
+        horse.getEntityAttribute(net.minecraft.entity.SharedMonsterAttributes.MOVEMENT_SPEED).setBaseValue(baseSpeed);
+        horse.getEntityAttribute(net.minecraft.entity.SharedMonsterAttributes.MAX_HEALTH).setBaseValue(baseHealth);
+        horse.setHealth((float) baseHealth);
+        try {
+            // JUMP_STRENGTH is protected in AbstractHorse, access via reflection
+            java.lang.reflect.Field jumpField = AbstractHorse.class.getDeclaredField("JUMP_STRENGTH");
+            jumpField.setAccessible(true);
+            net.minecraft.entity.ai.attributes.IAttribute jumpAttr =
+                    (net.minecraft.entity.ai.attributes.IAttribute) jumpField.get(null);
+            horse.getEntityAttribute(jumpAttr).setBaseValue(baseJump);
+        } catch (Throwable ignored) {
+            // If reflection fails, horse uses default jump strength
+        }
+
+        // No drops
+        horse.enablePersistence();
+
+        world.spawnEntity(horse);
+
+        // Mount the soldier on the horse
+        rider.startRiding(horse, true);
+
+        EpochRunnerMod.logger.debug("[SpawnHelper] Cavalry mounted on horse at {}", pos);
     }
 
     // ══════════════════════════════════════════════

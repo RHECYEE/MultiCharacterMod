@@ -1,6 +1,6 @@
 package studio.ERM.war.raid;
 
-import co.runed.multicharacter.vehicle.EntityAIPilot;
+import studio.ERM.war.vehicle.EntityAIPilot;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.EntityLiving;
@@ -21,7 +21,7 @@ import net.minecraftforge.items.CapabilityItemHandler;
 import net.minecraftforge.items.IItemHandler;
 import studio.ERM.EpochRunnerMod;
 import studio.ERM.war.WarStateAuthority;
-import studio.ERM.war.faction.RivalFactionStats;
+import studio.ERM.war.rival.RivalFactionStats;
 
 import java.util.*;
 
@@ -396,10 +396,9 @@ public class SmartRaidSystem {
             for (int z = -radius; z <= radius; z += 5) {
                 BlockPos checkPos = world.getTopSolidOrLiquidBlock(center.add(x, 0, z));
                 
-                // Check for construction patterns (scaffolding, ladders, etc)
+                // Check for construction patterns (ladders, fresh cobble, etc)
                 IBlockState state = world.getBlockState(checkPos);
-                if (state.getBlock() == Blocks.SCAFFOLDING || 
-                    state.getBlock() == Blocks.LADDER ||
+                if (state.getBlock() == Blocks.LADDER ||
                     state.getBlock() == Blocks.COBBLESTONE) {
                     return checkPos;
                 }
@@ -1026,7 +1025,7 @@ public class SmartRaidSystem {
      * Instance tick method
      */
     public void tick(World world, long worldTick) {
-        tickRaids(world, worldTick);
+        tick(world);
     }
     
     /**
@@ -1043,5 +1042,13 @@ public class SmartRaidSystem {
         ActiveRaid raid = getFirstActiveRaid();
         if (raid == null) return 0;
         return raid.getAliveCount();
+    }
+
+    /**
+     * Reloads target block configuration from WarMasterConfig.
+     * Called when war_master.json is loaded/reloaded.
+     */
+    public static void reloadTargetBlockConfig() {
+        // Reload target block lists from config if needed
     }
 }

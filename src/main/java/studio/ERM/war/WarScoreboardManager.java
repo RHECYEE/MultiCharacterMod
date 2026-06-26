@@ -14,6 +14,7 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import studio.ERM.EpochRunnerMod;
+import studio.ERM.handlers.WarTensionManager;
 import studio.ERM.war.rival.RivalCityManager;
 import studio.ERM.war.world.WarWorldData;
 

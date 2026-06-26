@@ -48,6 +48,8 @@ public class RenderGhostAircraft extends Render<EntityGhostAircraft> {
     private static final Map<Integer, EntityPlane> dummyPlanes = new HashMap<>();
     private static final Map<Integer, String> dummyPlaneTypes = new HashMap<>();
     private static final Set<String> loggedTypeFailures = new HashSet<>();
+    // Ghost ids whose dummy plane is being built off the render thread (so we don't schedule twice).
+    private static final Set<Integer> pendingDummy = new HashSet<>();
     private static boolean EVENT_REGISTERED = false;
 
     public RenderGhostAircraft(RenderManager renderManager) {
@@ -86,11 +88,11 @@ public class RenderGhostAircraft extends Render<EntityGhostAircraft> {
         }
     }
 
-    @SubscribeEvent(priority = EventPriority.HIGHEST)
-    
     // RenderWorldLastEvent handler removed. Rendering is handled via the normal entity renderer (doRender).
-
-
+    // NOTE: there must be NO @SubscribeEvent annotation on this private method. A leftover one here
+    // made Forge's EventSubscriberTransformer throw "Cannot apply @SubscribeEvent to private method"
+    // at class-load, so RenderGhostAircraft failed with NoClassDefFoundError and airstrikes never
+    // showed a real Flan plane (the renderer simply could not load). Flan 5.10.0 IS installed.
     private boolean renderGhostFlanModel(EntityGhostAircraft ghost, double x, double y, double z, float entityYaw, float pt) {
         PlaneType type = resolvePlaneType(ghost);
         if (type == null || type.model == null || !(type.model instanceof ModelPlane)) {
@@ -188,31 +190,56 @@ public class RenderGhostAircraft extends Render<EntityGhostAircraft> {
     }
 
     private EntityPlane getOrCreateDummyPlane(EntityGhostAircraft ghost, PlaneType type) {
-        int id = ghost.getEntityId();
-        String shortName = type.shortName;
+        final int id = ghost.getEntityId();
+        final String shortName = type.shortName;
 
         EntityPlane existing = dummyPlanes.get(id);
-        String existingType = dummyPlaneTypes.get(id);
-        if (existing != null && shortName.equals(existingType)) return existing;
+        if (existing != null && shortName.equals(dummyPlaneTypes.get(id))) return existing;
 
-        try {
-            World world = Minecraft.getMinecraft().world;
-            if (world == null) return null;
+        // DO NOT construct the EntityPlane here. We are inside RenderGlobal's entity-render loop, and
+        // Flan's plane constructor spawns seat entities into the world -> mutating the entity list
+        // while it's being iterated -> ConcurrentModificationException crash. Build the dummy off the
+        // render thread (between frames) and render the fallback box until it's ready.
+        if (pendingDummy.add(id)) {
+            final double px = ghost.posX, py = ghost.posY, pz = ghost.posZ;
+            final PlaneType ptype = type;
+            Minecraft.getMinecraft().addScheduledTask(() -> {
+                try {
+                    World world = Minecraft.getMinecraft().world;
+                    if (world != null) {
+                        NBTTagCompound tag = new NBTTagCompound();
+                        tag.setString("Type", shortName);
+                        tag.setString("driveableType", shortName);
+                        tag.setInteger("paintjobID", 0);
+                        DriveableData data = new DriveableData(tag);
+                        EntityPlane plane = new EntityPlane(world, px, py, pz, ptype, data);
+                        removeDummySeats(plane); // we only need the plane object for the model
+                        dummyPlanes.put(id, plane);
+                        dummyPlaneTypes.put(id, shortName);
+                    }
+                } catch (Throwable t) {
+                    EpochRunnerMod.logger.warn("[GHOST-AIR] dummy plane build failed for " + shortName + ": " + t.getMessage());
+                }
+                pendingDummy.remove(id);
+            });
+        }
+        return null;
+    }
 
-            NBTTagCompound tag = new NBTTagCompound();
-            tag.setString("Type", shortName);
-            tag.setString("driveableType", shortName);
-            tag.setInteger("paintjobID", 0);
-
-            DriveableData data = new DriveableData(tag);
-            EntityPlane plane = new EntityPlane(world, ghost.posX, ghost.posY, ghost.posZ, type, data);
-
-            dummyPlanes.put(id, plane);
-            dummyPlaneTypes.put(id, shortName);
-            return plane;
-        } catch (Throwable t) {
-            EpochRunnerMod.logger.error("[GHOST-AIR][RENDER] Failed creating dummy EntityPlane for " + shortName, t);
-            return null;
+    /** Kill the seat entities Flan's plane constructor spawns (reflective; field name varies safely). */
+    private static void removeDummySeats(Object plane) {
+        for (String fieldName : new String[]{"seats", "field_seats"}) {
+            try {
+                java.lang.reflect.Field f = com.flansmod.common.driveables.EntityDriveable.class.getDeclaredField(fieldName);
+                f.setAccessible(true);
+                Object seats = f.get(plane);
+                if (seats instanceof Object[]) {
+                    for (Object s : (Object[]) seats) {
+                        if (s instanceof net.minecraft.entity.Entity) ((net.minecraft.entity.Entity) s).setDead();
+                    }
+                    return;
+                }
+            } catch (Throwable ignored) {}
         }
     }
 

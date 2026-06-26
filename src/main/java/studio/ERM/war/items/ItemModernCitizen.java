@@ -15,8 +15,9 @@ import studio.ERM.war.entities.EntityModernCitizen;
 
 public class ItemModernCitizen extends Item {
     public ItemModernCitizen() {
-        setUnlocalizedName("modern_citizen_spawner");
-        setRegistryName("modern_citizen_spawner");
+        // Registry name ("modern_citizen_item") + translation key are assigned centrally in
+        // EpochRunnerMod.RegistrationHandler.registerItems(). Setting them here too double-set the
+        // registry name and crashed mod loading. The lang files key off "modern_citizen_item".
         setMaxStackSize(16);
     }
 
@@ -27,6 +28,11 @@ public class ItemModernCitizen extends Item {
             EntityModernCitizen citizen = new EntityModernCitizen(world);
             citizen.setPosition(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5);
             world.spawnEntity(citizen);
+
+            // Roll an AW2 skin so the citizen renders a real soldier/civilian texture
+            // instead of the default missing-texture biped. setSkinKey() is DataParameter-backed,
+            // so this propagates to every tracking client automatically.
+            studio.ERM.war.skins.SkinPoolManager.applySkinFromPool(citizen, "soldiers", world.rand);
 
             if (!player.capabilities.isCreativeMode) {
                 player.getHeldItem(hand).shrink(1);
@@ -40,7 +46,7 @@ public class ItemModernCitizen extends Item {
         GameRegistry.addShapelessRecipe(
                 new net.minecraft.util.ResourceLocation("epochrunner", "citizen_recipe"),
                 null,
-                new ItemStack(ModItems.MODERN_CITIZEN),
+                new ItemStack(studio.ERM.EpochRunnerMod.modern_citizen_item),
                 net.minecraft.item.crafting.Ingredient.fromItem(Items.APPLE),
                 net.minecraft.item.crafting.Ingredient.fromItem(Items.BREAD),
                 net.minecraft.item.crafting.Ingredient.fromItem(Item.getItemFromBlock(Blocks.PLANKS))

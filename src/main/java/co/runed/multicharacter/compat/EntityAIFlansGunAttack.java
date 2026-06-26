@@ -17,6 +17,7 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import studio.ERM.war.vehicle.EntityAIPilot;
+import studio.ERM.war.items.ItemInfantryMag;
 
 import java.util.Random;
 
@@ -36,7 +37,9 @@ public class EntityAIFlansGunAttack extends EntityAIBase {
         this.entityHost = host;
         this.moveSpeedAmp = speed;
         this.attackCooldown = delay * 2;
-        this.maxAttackDistanceSq = Math.min(maxDist, 60.0F) * Math.min(maxDist, 60.0F);
+        // Engagement range. Capped generously (was 60) so gun infantry actually trade fire across a
+        // siege field instead of standing around taking the bombardment because the enemy is "too far".
+        this.maxAttackDistanceSq = Math.min(maxDist, 110.0F) * Math.min(maxDist, 110.0F);
         this.setMutexBits(3);
     }
 
@@ -208,6 +211,11 @@ public class EntityAIFlansGunAttack extends EntityAIBase {
             boolean isPlayer = (e instanceof EntityPlayer);
             boolean isPilot = (e instanceof EntityAIPilot);
             boolean isHostileMob = (e instanceof IMob);
+            // War combatants (siege invaders / defenders). The isOnSameTeam() check above already
+            // skips our own side, so this only ever matches the ENEMY army -- which is exactly what
+            // was missing: gun infantry would target stray skeletons/zombies but ignore the actual
+            // invasion force. Scored just under players so the enemy army is engaged over wildlife.
+            boolean isWarSoldier = (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier);
 
             boolean isAggroingPlayerOrUs = false;
             if (e instanceof EntityLiving) {
@@ -218,14 +226,15 @@ public class EntityAIFlansGunAttack extends EntityAIBase {
                 }
             }
 
-            // Engage: players, hostile mobs, pilots, or anything aggroing a player/us
-            if (!(isPlayer || isPilot || isHostileMob || isAggroingPlayerOrUs)) continue;
+            // Engage: players, hostile mobs, pilots, enemy war soldiers, or anything aggroing a player/us
+            if (!(isPlayer || isPilot || isHostileMob || isWarSoldier || isAggroingPlayerOrUs)) continue;
 
             boolean canSee = this.entityHost.canEntityBeSeen(e);
 
             double score = 0.0D;
             if (isPilot) score += 60.0D;
             if (isPlayer) score += 50.0D;
+            if (isWarSoldier) score += 45.0D;
             if (isHostileMob) score += 40.0D;
             if (isAggroingPlayerOrUs) score += 25.0D;
             if (canSee) score += 10.0D;

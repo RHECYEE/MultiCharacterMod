@@ -251,7 +251,7 @@ public class EntityModularCitizen extends EntityCreature {
         if (bedPos == null) return false;
         UUID id = this.getUniqueID();
         BedClaimData data = BedClaimData.get(this.world);
-        boolean ok = data.claim(bedPos, id);
+        boolean ok = data.claimBed(this.world, bedPos, id);
         if (ok) {
             setClaimedBedPos(bedPos);
         }
@@ -262,7 +262,7 @@ public class EntityModularCitizen extends EntityCreature {
         if (this.world.isRemote) return;
         BlockPos bed = getClaimedBedPos();
         if (bed != null) {
-            BedClaimData.get(this.world).unclaim(bed, this.getUniqueID());
+            BedClaimData.get(this.world).unclaimBed(this.world, bed, this.getUniqueID());
         }
         setClaimedBedPos(null);
     }
@@ -580,5 +580,19 @@ public class EntityModularCitizen extends EntityCreature {
             this.getEntityData().setTag(key, c);
         }
         markDirtyData();
+    }
+
+    // --------------------
+    // Sleeping pose
+    // --------------------
+
+    private boolean isSleepingPose = false;
+
+    public void setSleepingPose(boolean sleeping) {
+        this.isSleepingPose = sleeping;
+    }
+
+    public boolean isSleepingPose() {
+        return isSleepingPose;
     }
 }

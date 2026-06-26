@@ -1,4 +1,4 @@
-package co.runed.multicharacter.compat;
+package studio.ERM.war.items;
 
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;

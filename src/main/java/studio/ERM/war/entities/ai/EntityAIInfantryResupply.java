@@ -10,6 +10,7 @@ import net.minecraft.tileentity.TileEntityChest;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.BlockPos;
+import studio.ERM.war.items.ItemInfantryMag;
 
 import java.util.ArrayList;
 import java.util.List;

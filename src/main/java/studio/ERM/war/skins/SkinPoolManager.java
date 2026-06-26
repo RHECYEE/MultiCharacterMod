@@ -184,10 +184,10 @@ public final class SkinPoolManager {
         LinkedHashSet<SkinEntry> unique = new LinkedHashSet<>(matching);
         POOL_CACHE.put(poolName, new ArrayList<>(unique));
 
-        if (SkinPoolConfig.debugLogging) {
-            LOG.info("[ERM-Skins] Pool '{}': {} skins from prefixes '{}'", 
+        // Unconditional: an empty pool here (with non-zero total skins) means the prefixes
+        // don't match the actual AW2 skin filenames -> entities in this pool fall back to Steve.
+        LOG.info("[ERM-Skins] Pool '{}': {} skins from prefixes '{}'",
                 poolName, unique.size(), prefixesRaw);
-        }
     }
 
     /**
@@ -219,9 +219,11 @@ public final class SkinPoolManager {
 
         ALL_SKINS = skins;
 
-        if (SkinPoolConfig.debugLogging) {
-            LOG.info("[ERM-Skins] Loaded {} total skins", skins.size());
-        }
+        // Always log the headline count. A 0 here means the meta file / skin domain is
+        // wrong, so every skinnable entity falls back to Steve -- the "white blob" /
+        // wrong-skin symptom. Unconditional so the cause is always visible in logs.
+        LOG.info("[ERM-Skins] Loaded {} total skins (meta='{}', domain='{}', folder='{}')",
+                skins.size(), SkinPoolConfig.metaFilePath, SkinPoolConfig.skinDomain, SkinPoolConfig.skinFolder);
 
         return skins;
     }
@@ -236,9 +238,8 @@ public final class SkinPoolManager {
         try {
             InputStream is = SkinPoolManager.class.getResourceAsStream(metaPath);
             if (is == null) {
-                if (SkinPoolConfig.debugLogging) {
-                    LOG.warn("[ERM-Skins] Meta file not found: {}", metaPath);
-                }
+                LOG.warn("[ERM-Skins] Meta file NOT found on classpath: {} "
+                        + "(skin pool will be empty -> entities render as default Steve)", metaPath);
                 return result;
             }
 

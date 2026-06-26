@@ -20,7 +20,7 @@ import java.util.Random;
  */
 public final class RivalCityPatrolManager {
 
-    private static final Random rand = RivalCityManager.rand;
+    private static final Random rand = new Random();
     private static final String EMPIRE_TEAM = "empire";
 
     private RivalCityPatrolManager() {}

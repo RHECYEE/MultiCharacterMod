@@ -205,8 +205,8 @@ public class BuildingRestrictionHandler {
             }
             
             // Direct access to MultiCharacter mod
-            co.runed.multicharacter.character.Character activeChar = 
-                co.runed.multicharacter.MultiCharacterMod.getCharacterManager().getActiveCharacter(player);
+            co.runed.multicharacter.character.Character activeChar =
+                co.runed.multicharacter.MultiCharacterMod.getCharacterManager().getActiveCharacter(player.getUniqueID());
             if (activeChar != null) {
                 java.util.List<String> roles = activeChar.getRoles();
                 if (roles != null && !roles.isEmpty()) {

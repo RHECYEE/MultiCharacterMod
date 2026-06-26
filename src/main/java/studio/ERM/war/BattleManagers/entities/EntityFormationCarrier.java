@@ -65,11 +65,19 @@ public class EntityFormationCarrier extends EntityCreature {
 
     private final List<SlotPayload> slotPayloads = new ArrayList<>();
     private final List<Integer> puppetEntityIds = new ArrayList<>();
+    private int initialPuppetCount = 0;
     private final List<Vec3d> slotOffsets = new ArrayList<>();
 
     // Battle context (server-side)
     private UUID battleTargetPlayerUuid = null;
     private BlockPos battleSite = null;
+
+    // When true, this carrier belongs to a director-managed FORMATION (e.g. a siege battle line):
+    // it advances and holds under explicit director orders, commits its troops only once it actually
+    // reaches the objective (battleSite / the breach), and NEVER auto-routs into an every-soldier-
+    // for-himself chase of the player. This is what keeps a siege reading as cohesive army lines
+    // instead of scattered packets that dismount and sprint at the defender.
+    private boolean directorManaged = false;
 
     public EntityFormationCarrier(World worldIn) {
         super(worldIn);
@@ -114,6 +122,22 @@ public class EntityFormationCarrier extends EntityCreature {
         this.suppressionTarget = pos;
     }
 
+    /** Mark this carrier as part of a director-managed formation (see {@link #directorManaged}). */
+    public void setDirectorManaged(boolean managed) {
+        this.directorManaged = managed;
+    }
+
+    /**
+     * Director-driven commit: release up to {@code count} of this carrier's puppets as real soldiers
+     * RIGHT NOW, regardless of player proximity. Lets the SiegeDirector promote only a small "contact
+     * slice" of an otherwise-visual formation when the line reaches the wall, instead of every carrier
+     * dumping its whole squad. Returns the number actually released.
+     */
+    public int releaseContactSlice(int count) {
+        if (world.isRemote || count <= 0) return 0;
+        return releasePuppets(count);
+    }
+
     /**
      * Bind this carrier to a battle so that released units immediately acquire a target and engage.
      */
@@ -125,6 +149,12 @@ public class EntityFormationCarrier extends EntityCreature {
 
     public void setMoveTarget(BlockPos target, double speed) {
         if (target == null || world.isRemote) return;
+
+        // An explicit move order cancels any holding orbit. Without this, tickOrbit() would
+        // override tryMoveToXYZ every tick and the carrier could never actually advance —
+        // a phased director's "release the staging force" order would silently do nothing.
+        this.orbitEnabled = false;
+        this.orbitLockPuppets = false;
 
         this.getNavigator().tryMoveToXYZ(
             target.getX() + 0.5D,
@@ -188,15 +218,41 @@ public class EntityFormationCarrier extends EntityCreature {
             }
         }
 
-        // Release inside release range
+        // Release troops only once the carrier is within melee releaseRange of a player -- i.e. when
+        // the advancing formation actually REACHES the fight. The director (now that BattleEngine
+        // actually ticks again) drives carriers inward each phase via pressToward()/chasePlayer(), so
+        // a staging army on the 80-block ring visibly marches in and deploys when it arrives. (An
+        // earlier "release as soon as a battle is active" trigger dumped soldiers straight onto the
+        // outer ring -- spawning them inside mountainsides where they instantly suffocated, and making
+        // troops pop out of thin air instead of an approaching army. Reverted.) Until then keep the
+        // visible puppet squad sized to the health bar so it doesn't thin out as the carrier is hit.
+        // Director-managed formations (siege battle lines) ignore player proximity entirely: they
+        // hold visual strength and commit troops ONLY when the line reaches its objective (the
+        // breach / battleSite), driven there by the director. They never auto-rout into a chase --
+        // that is what made sieges dissolve into a mob sprinting at the defender.
+        if (directorManaged) {
+            boolean atObjective = battleSite != null
+                    && this.getDistanceSq(battleSite.getX() + 0.5, battleSite.getY(), battleSite.getZ() + 0.5)
+                       <= (double) (releaseRange * releaseRange);
+            if (atObjective) {
+                tickRelease();
+            } else {
+                syncPuppetCountToHealth();
+            }
+            return;
+        }
+
         double dist = this.getDistance(nearestPlayer);
         if (dist <= releaseRange) {
             tickRelease();
+        } else {
+            syncPuppetCountToHealth();
         }
 
-        // Rout check
+        // Rout: convert the survivors of a broken formation into real soldiers for a
+        // last stand instead of deleting the whole squad outright.
         if (this.getHealth() / this.getMaxHealth() < routHealthThreshold) {
-            despawnAllPuppets();
+            releaseSurvivors();
             setDead();
         }
     }
@@ -264,7 +320,12 @@ public class EntityFormationCarrier extends EntityCreature {
      *   - SpawnHelper now creates EntitySoldier (not broken AW2 reflection)
      */
     private void tickRelease() {
-        int toRelease = Math.max(1, releasePerSecond / 20);
+        releasePuppets(Math.max(1, releasePerSecond / 20));
+    }
+
+    /** Release up to {@code max} puppets as real EntitySoldiers. Returns the count actually released. */
+    private int releasePuppets(int max) {
+        int toRelease = Math.max(0, max);
         int releasedThisTick = 0;
 
         // Determine the role from the card name
@@ -307,6 +368,7 @@ public class EntityFormationCarrier extends EntityCreature {
         if (puppetEntityIds.isEmpty()) {
             setDead();
         }
+        return releasedThisTick;
     }
 
     private void spawnPuppets() {
@@ -334,6 +396,8 @@ public class EntityFormationCarrier extends EntityCreature {
             world.spawnEntity(puppet);
             puppetEntityIds.add(puppet.getEntityId());
         }
+
+        this.initialPuppetCount = puppetEntityIds.size();
     }
 
     private void pruneDeadPuppets() {
@@ -356,20 +420,68 @@ public class EntityFormationCarrier extends EntityCreature {
         puppetEntityIds.clear();
     }
 
-    @Override
-    public boolean attackEntityFrom(DamageSource source, float amount) {
-        boolean result = super.attackEntityFrom(source, amount);
+    /**
+     * LOD ranged phase: keep the number of visible puppets proportional to the carrier's
+     * remaining health, so the squad visibly thins as it is damaged instead of members
+     * dying at random. Only culls puppets; never spawns.
+     */
+    private void syncPuppetCountToHealth() {
+        pruneDeadPuppets();
+        if (initialPuppetCount <= 0 || puppetEntityIds.isEmpty()) return;
 
-        if (!world.isRemote) {
-            if (amount >= 6.0F && !puppetEntityIds.isEmpty()) {
-                int idx = rand.nextInt(puppetEntityIds.size());
-                Entity e = world.getEntityByID(puppetEntityIds.get(idx));
-                if (e != null && !e.isDead) e.setDead();
-                pruneDeadPuppets();
+        float ratio = this.getHealth() / this.getMaxHealth();
+        if (ratio < 0F) ratio = 0F;
+        if (ratio > 1F) ratio = 1F;
+
+        int desired = (int) Math.ceil(ratio * initialPuppetCount);
+
+        while (puppetEntityIds.size() > desired) {
+            int last = puppetEntityIds.size() - 1;
+            Entity e = world.getEntityByID(puppetEntityIds.get(last));
+            if (e != null && !e.isDead) e.setDead();
+            puppetEntityIds.remove(last);
+        }
+    }
+
+    /**
+     * Convert any surviving puppets into real EntitySoldiers (last stand) so a broken or
+     * destroyed formation never simply blinks out of existence.
+     */
+    private void releaseSurvivors() {
+        String loadoutRole = SoldierLoadout.roleFromCardName(this.cardName);
+
+        int count = Math.min(puppetEntityIds.size(), slotPayloads.size());
+        for (int i = 0; i < count; i++) {
+            Entity p = world.getEntityByID(puppetEntityIds.get(i));
+            if (!(p instanceof EntitySoldierPuppet)) continue;
+
+            EntitySoldierPuppet puppet = (EntitySoldierPuppet) p;
+            SlotPayload payload = slotPayloads.get(i);
+            BlockPos spawnPos = new BlockPos(p.posX, p.posY, p.posZ);
+
+            try {
+                SpawnHelper.spawnPayload(
+                    world, spawnPos,
+                    payload.getId(),
+                    battleTargetPlayerUuid, battleSite,
+                    this.warLevel, loadoutRole, puppet.getSkinKey()
+                );
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.error("[BattleManagers] Rout release error for payload {}: {}", payload, t.getMessage());
             }
         }
 
-        return result;
+        despawnAllPuppets();
+    }
+
+    @Override
+    public void onDeath(DamageSource cause) {
+        // If the carrier is killed outright (rather than routing), still convert any
+        // survivors to real soldiers so the squad doesn't simply disappear.
+        if (!world.isRemote && !puppetEntityIds.isEmpty()) {
+            releaseSurvivors();
+        }
+        super.onDeath(cause);
     }
 
     @Override

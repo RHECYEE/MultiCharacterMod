@@ -24,6 +24,7 @@ import java.util.*;
 public class RivalCityHealScheduler {
 
     private static final List<HealJob> activeJobs = new ArrayList<>();
+    private static final Random rand = new Random();
 
     /**
      * Schedule a gradual rebuild.
@@ -137,7 +138,7 @@ public class RivalCityHealScheduler {
             }
         }
 
-        Random rand = RivalCityManager.rand;
+        // Use local static Random (RivalCityManager.rand is private)
 
         for (int i = 0; i < toPlace && !job.remaining.isEmpty(); i++) {
             BlockPos pos = job.remaining.remove(0);

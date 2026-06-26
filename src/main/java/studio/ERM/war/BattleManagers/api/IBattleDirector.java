@@ -36,4 +36,12 @@ public interface IBattleDirector {
      * Human-readable name for logs/debug overlays.
      */
     String getDirectorId();
+
+    /**
+     * The resolved outcome of this battle. Only meaningful once {@link #isFinished()} returns true.
+     * Defaults to ABORTED for directors that do not track a specific result.
+     */
+    default BattleOutcome getOutcome() {
+        return BattleOutcome.ABORTED;
+    }
 }

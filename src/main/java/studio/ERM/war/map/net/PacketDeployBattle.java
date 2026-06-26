@@ -48,7 +48,13 @@ public class PacketDeployBattle implements IMessage {
         @Override
         public IMessage onMessage(PacketDeployBattle message, MessageContext ctx) {
             EntityPlayerMP player = ctx.getServerHandler().player;
-            
+            // Real-logger trace: proves a right-click "Deploy" selection reached the server. If the
+            // user reports "can't start battles" and this is ABSENT, the deploy menu (right-click on
+            // the canvas) never sent -- a discoverability/UI issue rather than a battle-engine bug.
+            studio.ERM.EpochRunnerMod.logger.info("[ERM-Map] SERVER: PacketDeployBattle director="
+                    + message.directorId + " at " + message.worldX + "," + message.worldZ
+                    + " by " + player.getName());
+
             // Schedule on main thread
             player.getServerWorld().addScheduledTask(() -> {
                 DeployedBattleManager manager = DeployedBattleManager.get(player.world);

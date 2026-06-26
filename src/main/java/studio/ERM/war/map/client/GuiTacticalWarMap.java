@@ -1,4 +1,861 @@
 package studio.ERM.war.map.client;
 
-public class GuiTacticalWarMap {
+import net.minecraft.block.material.MapColor;
+import net.minecraft.block.state.IBlockState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Gui;
+import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.client.renderer.GlStateManager;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.text.TextFormatting;
+import net.minecraft.world.World;
+import net.minecraft.world.chunk.Chunk;
+import studio.ERM.war.WarClaimHandler;
+import studio.ERM.war.map.net.C2SPacketBatchClaim;
+import studio.ERM.war.map.net.C2SRequestTerritorySync;
+import studio.ERM.war.map.net.TacticalWarMapNetwork;
+
+import java.io.IOException;
+import java.util.*;
+
+/**
+ * Full-screen tactical war map with territory claiming interface.
+ *
+ * Controls:
+ *   - Left-click drag: Pan the map
+ *   - Mouse wheel: Zoom in/out
+ *   - Shift + Left-click drag: Select area to CLAIM territory
+ *   - Shift + Right-click drag: Select area to UNCLAIM territory
+ *   - Right-click: Context menu (deploy battle, recenter, copy coords)
+ *   - ESC: Close
+ *
+ * Territory is visualized as colored chunk overlays with frontline borders.
+ */
+public class GuiTacticalWarMap extends GuiScreen {
+
+    // ==================== View State ====================
+    private int viewCenterX; // world X at center of canvas
+    private int viewCenterZ; // world Z at center of canvas
+
+    private static final int[] ZOOM_LEVELS = {2, 4, 8, 16, 32}; // blocks per pixel
+    private int zoomIndex = 2; // default 8 bpp
+
+    private int canvasSize = 512;
+    private int canvasLeft, canvasTop;
+
+    // Layout constants used by initGui() to keep the map + sidebar on-screen at any GUI scale.
+    private static final int SIDEBAR_WIDTH = 92; // right-hand stats/controls/legend column
+    private static final int LEFT_MARGIN = 12;
+    private static final int RIGHT_MARGIN = 8;
+
+    // ==================== Pan Dragging ====================
+    private boolean panning = false;
+    private int panStartMouseX, panStartMouseY;
+    private int panStartCenterX, panStartCenterZ;
+    private static final int MAX_PAN_RADIUS = 8192;
+
+    // ==================== Territory Claim Selection ====================
+    private boolean claimDragging = false;
+    private boolean unclaimDragging = false;
+    private int selectStartMouseX, selectStartMouseY;
+    private int selectCurrentMouseX, selectCurrentMouseY;
+
+    /** Pending chunks highlighted during current drag (preview). */
+    private final Set<ChunkPos> pendingSelection = new HashSet<>();
+
+    // ==================== Context Menu ====================
+    private final GuiBattleDeployMenu deployMenu = new GuiBattleDeployMenu();
+
+    // ==================== Status Messages ====================
+    private String statusMessage = "";
+    private long statusExpiry = 0;
+
+    // ==================== Colors ====================
+    private static final int COLOR_PLAYER_FILL = 0x3300AA00;    // green, semi-transparent
+    private static final int COLOR_RIVAL_FILL  = 0x33CC0000;    // red, semi-transparent
+    private static final int COLOR_OTHER_FILL  = 0x330066CC;    // blue, semi-transparent
+    private static final int COLOR_CLAIM_PREVIEW  = 0x5500FF00; // bright green preview
+    private static final int COLOR_UNCLAIM_PREVIEW = 0x55FF4444;// red preview
+    private static final int COLOR_BORDER_PLAYER = 0xFF00DD00;  // solid green border
+    private static final int COLOR_BORDER_RIVAL  = 0xFFDD0000;  // solid red border
+    private static final int COLOR_BORDER_OTHER  = 0xFF4488DD;  // solid blue border
+    private static final int COLOR_SELECTION_BOX = 0xAAFFFFFF;  // white selection rectangle
+    private static final int COLOR_BG = 0xFF111122;             // dark background
+    private static final int COLOR_FOG = 0xFF1a1a2e;            // fog of war
+    private static final int COLOR_GRID = 0x22FFFFFF;           // faint chunk grid
+    private static final int COLOR_UNEXPLORED = 0xFF0E0F14;     // chunk not loaded on the client
+
+    // ==================== Real terrain sampling ====================
+    // The map now samples ACTUAL world surface blocks (their vanilla map colours + height relief)
+    // instead of drawing a meaningless green hash. Sampling is comparatively expensive, so the
+    // result is cached and only re-sampled when the view (center / zoom / canvas) actually changes.
+    private static final int TERRAIN_PIXEL_STEP = 2;            // sample one column per 2x2 px block
+    private int[] terrainColors;                                // ARGB per sample cell; 0 = unexplored
+    private int terrainGridW, terrainGridH;
+    private int terrainCacheCenterX, terrainCacheCenterZ, terrainCacheBpp, terrainCacheCanvas;
+    private boolean terrainCacheValid = false;
+
+    public GuiTacticalWarMap() {
+    }
+
+    @Override
+    public void initGui() {
+        super.initGui();
+
+        // Size + place the canvas so it ALWAYS fits the current screen.
+        //
+        // The old code forced canvasSize >= 256 (Math.max(256, ...)). On higher GUI
+        // scales the scaled screen can be smaller than that, which pushed canvasLeft/
+        // canvasTop negative and ran the map (and its sidebar) off-screen -- the
+        // "scaled wrong / doesn't fit the screen" bug. We instead derive the size from
+        // the space actually available after reserving the sidebar column and margins.
+        ScaledResolution sr = new ScaledResolution(mc);
+        int sw = sr.getScaledWidth();
+        int sh = sr.getScaledHeight();
+
+        final int sidebarW = SIDEBAR_WIDTH;   // stats / controls / legend column on the right
+        final int gap = 6;                    // gap between canvas and sidebar
+        final int topMargin = 18;             // room for the title above the canvas
+        final int bottomMargin = 24;          // room for zoom + mode labels below
+
+        int availW = sw - (LEFT_MARGIN + gap + sidebarW + RIGHT_MARGIN);
+        int availH = sh - (topMargin + bottomMargin);
+        int size = Math.min(Math.min(availW, availH), 512);
+        // Tiny-screen guard: never collapse to nothing, but don't exceed what we have.
+        if (size < 64) size = Math.max(64, Math.min(availW, availH));
+        canvasSize = Math.max(64, size);
+
+        // Center the [canvas | gap | sidebar] block horizontally; clamp so nothing
+        // spills off the left/top edges on small screens.
+        int blockW = canvasSize + gap + sidebarW;
+        canvasLeft = Math.max(LEFT_MARGIN, (sw - blockW) / 2);
+        canvasTop = Math.max(topMargin, (sh - canvasSize) / 2);
+
+        // Center on player position
+        if (mc.player != null) {
+            viewCenterX = (int) mc.player.posX;
+            viewCenterZ = (int) mc.player.posZ;
+
+            // Request territory sync from server
+            TacticalWarMapNetwork.sendToServer(new C2SRequestTerritorySync());
+            // Real-logger trace: confirms the GUI constructed + sent its sync request. If we see
+            // this but never see the server-side "C2SRequestTerritorySync received", the C2S packet
+            // is not reaching the server (channel/registration), which would also explain why
+            // claiming "does nothing".
+            studio.ERM.EpochRunnerMod.logger.info("[ERM-Map] initGui: GUI open, requested territory sync (canvas="
+                    + canvasSize + " center=" + viewCenterX + "," + viewCenterZ + ")");
+        }
+    }
+
+    @Override
+    public boolean doesGuiPauseGame() {
+        return false;
+    }
+
+    // ==================== Coordinate Conversion ====================
+
+    private int getBlocksPerPixel() {
+        return ZOOM_LEVELS[Math.max(0, Math.min(zoomIndex, ZOOM_LEVELS.length - 1))];
+    }
+
+    /** Convert screen pixel to world coordinates. */
+    private int[] screenToWorld(int screenX, int screenY) {
+        int bpp = getBlocksPerPixel();
+        int half = canvasSize / 2;
+        int relX = screenX - canvasLeft - half;
+        int relY = screenY - canvasTop - half;
+        return new int[]{
+                viewCenterX + (relX * bpp),
+                viewCenterZ + (relY * bpp)
+        };
+    }
+
+    /** Convert world coordinates to screen pixel. Returns null if off-canvas. */
+    private int[] worldToScreen(int worldX, int worldZ) {
+        int bpp = getBlocksPerPixel();
+        if (bpp == 0) return null;
+        int half = canvasSize / 2;
+        int sx = canvasLeft + half + ((worldX - viewCenterX) / bpp);
+        int sy = canvasTop + half + ((worldZ - viewCenterZ) / bpp);
+        return new int[]{sx, sy};
+    }
+
+    private boolean isOnCanvas(int mouseX, int mouseY) {
+        return mouseX >= canvasLeft && mouseX < canvasLeft + canvasSize
+                && mouseY >= canvasTop && mouseY < canvasTop + canvasSize;
+    }
+
+    // ==================== Mouse Input ====================
+
+    @Override
+    protected void mouseClicked(int mouseX, int mouseY, int mouseButton) throws IOException {
+        // Deploy menu intercepts first
+        if (deployMenu.isOpen()) {
+            if (deployMenu.handleLeftClick(mouseX, mouseY)) return;
+            deployMenu.close();
+        }
+
+        if (!isOnCanvas(mouseX, mouseY)) {
+            super.mouseClicked(mouseX, mouseY, mouseButton);
+            return;
+        }
+
+        if (GuiScreen.isShiftKeyDown()) {
+            // Shift + left-click: start claim selection
+            if (mouseButton == 0) {
+                claimDragging = true;
+                unclaimDragging = false;
+                selectStartMouseX = mouseX;
+                selectStartMouseY = mouseY;
+                selectCurrentMouseX = mouseX;
+                selectCurrentMouseY = mouseY;
+                pendingSelection.clear();
+                updateSelectionPreview();
+                return;
+            }
+            // Shift + right-click: start unclaim selection
+            if (mouseButton == 1) {
+                unclaimDragging = true;
+                claimDragging = false;
+                selectStartMouseX = mouseX;
+                selectStartMouseY = mouseY;
+                selectCurrentMouseX = mouseX;
+                selectCurrentMouseY = mouseY;
+                pendingSelection.clear();
+                updateSelectionPreview();
+                return;
+            }
+        }
+
+        // Normal left-click: start panning
+        if (mouseButton == 0) {
+            panning = true;
+            panStartMouseX = mouseX;
+            panStartMouseY = mouseY;
+            panStartCenterX = viewCenterX;
+            panStartCenterZ = viewCenterZ;
+            return;
+        }
+
+        // Right-click: context menu
+        if (mouseButton == 1) {
+            int[] world = screenToWorld(mouseX, mouseY);
+            int cp = WarMapClientStats.getCommandPoints();
+            int era = WarMapClientStats.getEra();
+            deployMenu.open(mouseX, mouseY, world[0], world[1], cp, era);
+        }
+    }
+
+    @Override
+    protected void mouseClickMove(int mouseX, int mouseY, int clickedMouseButton, long timeSinceLastClick) {
+        // Claim/unclaim drag
+        if (claimDragging || unclaimDragging) {
+            selectCurrentMouseX = mouseX;
+            selectCurrentMouseY = mouseY;
+            updateSelectionPreview();
+            return;
+        }
+
+        // Panning
+        if (panning) {
+            int bpp = getBlocksPerPixel();
+            int dx = mouseX - panStartMouseX;
+            int dy = mouseY - panStartMouseY;
+            viewCenterX = panStartCenterX - (dx * bpp);
+            viewCenterZ = panStartCenterZ - (dy * bpp);
+
+            // Clamp pan distance from player
+            if (mc.player != null) {
+                int px = (int) mc.player.posX;
+                int pz = (int) mc.player.posZ;
+                int ddx = viewCenterX - px;
+                int ddz = viewCenterZ - pz;
+                double dist = Math.sqrt(ddx * (double) ddx + ddz * (double) ddz);
+                if (dist > MAX_PAN_RADIUS) {
+                    double scale = MAX_PAN_RADIUS / dist;
+                    viewCenterX = px + (int) (ddx * scale);
+                    viewCenterZ = pz + (int) (ddz * scale);
+                }
+            }
+        }
+    }
+
+    @Override
+    protected void mouseReleased(int mouseX, int mouseY, int state) {
+        // Finish claim drag
+        if (claimDragging) {
+            claimDragging = false;
+            if (!pendingSelection.isEmpty()) {
+                List<ChunkPos> chunks = new ArrayList<>(pendingSelection);
+                TacticalWarMapNetwork.sendToServer(new C2SPacketBatchClaim(false, chunks));
+                setStatus(TextFormatting.YELLOW + "Claiming " + chunks.size() + " chunks...");
+            }
+            pendingSelection.clear();
+            return;
+        }
+
+        // Finish unclaim drag
+        if (unclaimDragging) {
+            unclaimDragging = false;
+            if (!pendingSelection.isEmpty()) {
+                List<ChunkPos> chunks = new ArrayList<>(pendingSelection);
+                TacticalWarMapNetwork.sendToServer(new C2SPacketBatchClaim(true, chunks));
+                setStatus(TextFormatting.YELLOW + "Unclaiming " + chunks.size() + " chunks...");
+            }
+            pendingSelection.clear();
+            return;
+        }
+
+        // End panning
+        if (panning) {
+            panning = false;
+        }
+
+        super.mouseReleased(mouseX, mouseY, state);
+    }
+
+    @Override
+    public void handleMouseInput() throws IOException {
+        super.handleMouseInput();
+        int scroll = org.lwjgl.input.Mouse.getEventDWheel();
+        if (scroll != 0) {
+            if (deployMenu.isOpen()) {
+                deployMenu.handleScroll(scroll);
+                return;
+            }
+            // Zoom
+            if (scroll > 0 && zoomIndex > 0) {
+                zoomIndex--;
+            } else if (scroll < 0 && zoomIndex < ZOOM_LEVELS.length - 1) {
+                zoomIndex++;
+            }
+        }
+    }
+
+    @Override
+    protected void keyTyped(char typedChar, int keyCode) throws IOException {
+        if (keyCode == 1) { // ESC
+            mc.displayGuiScreen(null);
+            return;
+        }
+        // 'R' to recenter on player
+        if (typedChar == 'r' || typedChar == 'R') {
+            if (mc.player != null) {
+                viewCenterX = (int) mc.player.posX;
+                viewCenterZ = (int) mc.player.posZ;
+            }
+        }
+    }
+
+    // ==================== Selection Preview ====================
+
+    /** Compute which chunks fall within the drag rectangle. */
+    private void updateSelectionPreview() {
+        pendingSelection.clear();
+
+        int x1 = Math.min(selectStartMouseX, selectCurrentMouseX);
+        int y1 = Math.min(selectStartMouseY, selectCurrentMouseY);
+        int x2 = Math.max(selectStartMouseX, selectCurrentMouseX);
+        int y2 = Math.max(selectStartMouseY, selectCurrentMouseY);
+
+        // Convert corners to world coords
+        int[] topLeft = screenToWorld(x1, y1);
+        int[] botRight = screenToWorld(x2, y2);
+
+        // Convert to chunk range
+        int chunkMinX = topLeft[0] >> 4;
+        int chunkMinZ = topLeft[1] >> 4;
+        int chunkMaxX = botRight[0] >> 4;
+        int chunkMaxZ = botRight[1] >> 4;
+
+        // Clamp to max 256 chunks for safety
+        int totalChunks = (chunkMaxX - chunkMinX + 1) * (chunkMaxZ - chunkMinZ + 1);
+        if (totalChunks > 256) {
+            // Shrink selection to fit
+            setStatus(TextFormatting.RED + "Selection too large! Max 256 chunks.");
+            return;
+        }
+
+        for (int cx = chunkMinX; cx <= chunkMaxX; cx++) {
+            for (int cz = chunkMinZ; cz <= chunkMaxZ; cz++) {
+                pendingSelection.add(new ChunkPos(cx, cz));
+            }
+        }
+    }
+
+    // ==================== Rendering ====================
+
+    @Override
+    public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        // Full-screen dark background
+        drawDefaultBackground();
+
+        // Canvas background
+        Gui.drawRect(canvasLeft - 1, canvasTop - 1, canvasLeft + canvasSize + 1, canvasTop + canvasSize + 1, 0xFF333355);
+        Gui.drawRect(canvasLeft, canvasTop, canvasLeft + canvasSize, canvasTop + canvasSize, COLOR_BG);
+
+        // Enable scissor to clip inside canvas
+        enableCanvasScissor();
+
+        // Draw terrain placeholder (colored biome-ish grid)
+        drawTerrainBackground();
+
+        // Draw territory overlay
+        drawTerritoryOverlay();
+
+        // Draw pending claim/unclaim preview
+        if ((claimDragging || unclaimDragging) && !pendingSelection.isEmpty()) {
+            drawSelectionPreview();
+        }
+
+        // Draw selection rectangle outline
+        if (claimDragging || unclaimDragging) {
+            drawSelectionRectangle();
+        }
+
+        // Draw player marker
+        drawPlayerMarker();
+
+        disableCanvasScissor();
+
+        // Draw UI chrome (borders, labels, stats)
+        drawUIChrome(mouseX, mouseY);
+
+        // Draw deploy menu
+        deployMenu.draw(mouseX, mouseY, fontRenderer);
+
+        // Draw status message
+        drawStatusMessage();
+
+        super.drawScreen(mouseX, mouseY, partialTicks);
+    }
+
+    private void drawTerrainBackground() {
+        int bpp = getBlocksPerPixel();
+
+        // Base fill: anything we can't sample (no client world / unloaded chunks) reads as
+        // "unexplored" rather than a green void.
+        Gui.drawRect(canvasLeft, canvasTop, canvasLeft + canvasSize, canvasTop + canvasSize, COLOR_UNEXPLORED);
+
+        World world = mc.world;
+        if (world != null) {
+            if (!terrainCacheValid
+                    || terrainCacheCenterX != viewCenterX || terrainCacheCenterZ != viewCenterZ
+                    || terrainCacheBpp != bpp || terrainCacheCanvas != canvasSize) {
+                rebuildTerrainCache(world, bpp);
+            }
+            renderTerrainCache();
+        }
+
+        // Faint chunk grid for orientation (only when chunks are big enough on-screen to read).
+        drawChunkGrid(bpp);
+    }
+
+    /**
+     * Re-sample the visible world into {@link #terrainColors}. Each cell takes the surface block's
+     * vanilla map colour (so grass is green, water blue, sand tan, stone grey, paths/roads/rails
+     * show through, etc.) and shades it by height relative to the cell to the north for relief --
+     * the same technique vanilla maps use. Only loaded client chunks can be sampled; everything else
+     * stays "unexplored". Comparatively expensive, so this runs only when the view changes.
+     */
+    private void rebuildTerrainCache(World world, int bpp) {
+        int step = TERRAIN_PIXEL_STEP;
+        int gw = (canvasSize + step - 1) / step;
+        int gh = gw; // canvas is square
+        int[] colors = new int[gw * gh];
+        int[] heights = new int[gw * gh];
+        int half = canvasSize / 2;
+        BlockPos.MutableBlockPos mp = new BlockPos.MutableBlockPos();
+
+        try {
+            // Pass 1 — base map colour + surface height per cell.
+            for (int gy = 0; gy < gh; gy++) {
+                for (int gx = 0; gx < gw; gx++) {
+                    int idx = gy * gw + gx;
+                    int px = gx * step + step / 2;
+                    int py = gy * step + step / 2;
+                    int wx = viewCenterX + (px - half) * bpp;
+                    int wz = viewCenterZ + (py - half) * bpp;
+
+                    Chunk chunk = world.getChunkProvider().getLoadedChunk(wx >> 4, wz >> 4);
+                    if (chunk == null) { colors[idx] = 0; heights[idx] = -1; continue; }
+
+                    int top = chunk.getHeightValue(wx & 15, wz & 15);
+                    int rgb = 0, surfaceY = -1;
+                    for (int i = 0, y = top - 1; i < 8 && y > 0; i++, y--) {
+                        mp.setPos(wx, y, wz);
+                        IBlockState st = chunk.getBlockState(mp);
+                        MapColor m = st.getMapColor(world, mp);
+                        if (m != null && m != MapColor.AIR) { rgb = m.colorValue; surfaceY = y; break; }
+                    }
+                    colors[idx] = rgb;      // 0 => unexplored / no colour found
+                    heights[idx] = surfaceY;
+                }
+            }
+
+            // Pass 2 — relief shading vs. the north neighbour, and bake in full alpha.
+            for (int gy = 0; gy < gh; gy++) {
+                for (int gx = 0; gx < gw; gx++) {
+                    int idx = gy * gw + gx;
+                    int rgb = colors[idx];
+                    if (rgb == 0) continue; // leave unexplored as 0
+                    int h = heights[idx];
+                    int hN = (gy > 0) ? heights[idx - gw] : h;
+                    int shade = 1;
+                    if (h >= 0 && hN >= 0) {
+                        if (h > hN) shade = 2;
+                        else if (h < hN) shade = 0;
+                    }
+                    colors[idx] = shadeColor(rgb, shade);
+                }
+            }
+        } catch (Throwable t) {
+            // Never let terrain sampling crash the map; fall back to a flat unexplored canvas.
+            java.util.Arrays.fill(colors, 0);
+        }
+
+        terrainColors = colors;
+        terrainGridW = gw;
+        terrainGridH = gh;
+        terrainCacheCenterX = viewCenterX;
+        terrainCacheCenterZ = viewCenterZ;
+        terrainCacheBpp = bpp;
+        terrainCacheCanvas = canvasSize;
+        terrainCacheValid = true;
+    }
+
+    private void renderTerrainCache() {
+        if (terrainColors == null) return;
+        int step = TERRAIN_PIXEL_STEP;
+        int right = canvasLeft + canvasSize;
+        int bottom = canvasTop + canvasSize;
+        for (int gy = 0; gy < terrainGridH; gy++) {
+            int sy = canvasTop + gy * step;
+            if (sy >= bottom) break;
+            int ey = Math.min(sy + step, bottom);
+            int rowBase = gy * terrainGridW;
+            for (int gx = 0; gx < terrainGridW; gx++) {
+                int c = terrainColors[rowBase + gx];
+                if (c == 0) continue; // unexplored -> show the base fill
+                int sx = canvasLeft + gx * step;
+                if (sx >= right) break;
+                Gui.drawRect(sx, sy, Math.min(sx + step, right), ey, c);
+            }
+        }
+    }
+
+    /** Faint chunk-boundary grid, drawn only when a chunk spans enough pixels to read cleanly. */
+    private void drawChunkGrid(int bpp) {
+        int chunkPx = 16 / bpp;
+        if (chunkPx < 8) return;
+        int half = canvasSize / 2;
+        int worldLeft = viewCenterX - (half * bpp);
+        int worldTop = viewCenterZ - (half * bpp);
+        int worldRight = viewCenterX + (half * bpp);
+        int worldBottom = viewCenterZ + (half * bpp);
+
+        int firstX = Math.floorDiv(worldLeft, 16) * 16;
+        for (int wx = firstX; wx <= worldRight; wx += 16) {
+            int sx = canvasLeft + half + (wx - viewCenterX) / bpp;
+            if (sx < canvasLeft || sx >= canvasLeft + canvasSize) continue;
+            Gui.drawRect(sx, canvasTop, sx + 1, canvasTop + canvasSize, COLOR_GRID);
+        }
+        int firstZ = Math.floorDiv(worldTop, 16) * 16;
+        for (int wz = firstZ; wz <= worldBottom; wz += 16) {
+            int sy = canvasTop + half + (wz - viewCenterZ) / bpp;
+            if (sy < canvasTop || sy >= canvasTop + canvasSize) continue;
+            Gui.drawRect(canvasLeft, sy, canvasLeft + canvasSize, sy + 1, COLOR_GRID);
+        }
+    }
+
+    /** Shade a base map-colour RGB by relief level: 0 = in shadow, 1 = flat, 2 = lit. */
+    private static int shadeColor(int rgb, int shade) {
+        int mul = (shade == 0) ? 185 : (shade == 2 ? 255 : 220);
+        int r = (((rgb >> 16) & 0xFF) * mul) / 255;
+        int g = (((rgb >> 8) & 0xFF) * mul) / 255;
+        int b = ((rgb & 0xFF) * mul) / 255;
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    private void drawTerritoryOverlay() {
+        Map<ChunkPos, String> snapshot = ClientTerritoryCache.getSnapshot();
+        if (snapshot.isEmpty()) return;
+
+        int bpp = getBlocksPerPixel();
+        int chunkPixelSize = Math.max(1, 16 / bpp);
+        String playerId = mc.player != null ? mc.player.getUniqueID().toString() : "";
+
+        // First pass: fill
+        for (Map.Entry<ChunkPos, String> entry : snapshot.entrySet()) {
+            ChunkPos cp = entry.getKey();
+            String owner = entry.getValue();
+            if ("NEUTRAL".equals(owner)) continue;
+
+            int chunkWorldX = cp.x << 4;
+            int chunkWorldZ = cp.z << 4;
+            int[] scr = worldToScreen(chunkWorldX, chunkWorldZ);
+            if (scr == null) continue;
+
+            int sx = scr[0];
+            int sy = scr[1];
+            int ex = sx + chunkPixelSize;
+            int ey = sy + chunkPixelSize;
+
+            if (ex < canvasLeft || sx >= canvasLeft + canvasSize) continue;
+            if (ey < canvasTop || sy >= canvasTop + canvasSize) continue;
+
+            int fillColor = colorForOwnerFill(owner, playerId);
+            Gui.drawRect(sx, sy, ex, ey, fillColor);
+        }
+
+        // Second pass: borders (frontline effect - only draw edges where neighbor differs)
+        if (chunkPixelSize >= 3) {
+            for (Map.Entry<ChunkPos, String> entry : snapshot.entrySet()) {
+                ChunkPos cp = entry.getKey();
+                String owner = entry.getValue();
+                if ("NEUTRAL".equals(owner)) continue;
+
+                int chunkWorldX = cp.x << 4;
+                int chunkWorldZ = cp.z << 4;
+                int[] scr = worldToScreen(chunkWorldX, chunkWorldZ);
+                if (scr == null) continue;
+
+                int sx = scr[0];
+                int sy = scr[1];
+                int ex = sx + chunkPixelSize;
+                int ey = sy + chunkPixelSize;
+
+                if (ex < canvasLeft || sx >= canvasLeft + canvasSize) continue;
+                if (ey < canvasTop || sy >= canvasTop + canvasSize) continue;
+
+                int borderColor = colorForOwnerBorder(owner, playerId);
+
+                // Check neighbors - only draw border if neighbor has different owner
+                String northOwner = snapshot.getOrDefault(new ChunkPos(cp.x, cp.z - 1), "NEUTRAL");
+                String southOwner = snapshot.getOrDefault(new ChunkPos(cp.x, cp.z + 1), "NEUTRAL");
+                String westOwner = snapshot.getOrDefault(new ChunkPos(cp.x - 1, cp.z), "NEUTRAL");
+                String eastOwner = snapshot.getOrDefault(new ChunkPos(cp.x + 1, cp.z), "NEUTRAL");
+
+                if (!owner.equals(northOwner)) {
+                    Gui.drawRect(sx, sy, ex, sy + 1, borderColor); // top
+                }
+                if (!owner.equals(southOwner)) {
+                    Gui.drawRect(sx, ey - 1, ex, ey, borderColor); // bottom
+                }
+                if (!owner.equals(westOwner)) {
+                    Gui.drawRect(sx, sy, sx + 1, ey, borderColor); // left
+                }
+                if (!owner.equals(eastOwner)) {
+                    Gui.drawRect(ex - 1, sy, ex, ey, borderColor); // right
+                }
+            }
+        }
+    }
+
+    private void drawSelectionPreview() {
+        int bpp = getBlocksPerPixel();
+        int chunkPixelSize = Math.max(1, 16 / bpp);
+        int previewColor = claimDragging ? COLOR_CLAIM_PREVIEW : COLOR_UNCLAIM_PREVIEW;
+
+        for (ChunkPos cp : pendingSelection) {
+            int chunkWorldX = cp.x << 4;
+            int chunkWorldZ = cp.z << 4;
+            int[] scr = worldToScreen(chunkWorldX, chunkWorldZ);
+            if (scr == null) continue;
+
+            int sx = scr[0];
+            int sy = scr[1];
+            int ex = sx + chunkPixelSize;
+            int ey = sy + chunkPixelSize;
+
+            if (ex < canvasLeft || sx >= canvasLeft + canvasSize) continue;
+            if (ey < canvasTop || sy >= canvasTop + canvasSize) continue;
+
+            Gui.drawRect(sx, sy, ex, ey, previewColor);
+        }
+    }
+
+    private void drawSelectionRectangle() {
+        int x1 = Math.min(selectStartMouseX, selectCurrentMouseX);
+        int y1 = Math.min(selectStartMouseY, selectCurrentMouseY);
+        int x2 = Math.max(selectStartMouseX, selectCurrentMouseX);
+        int y2 = Math.max(selectStartMouseY, selectCurrentMouseY);
+
+        // Draw dashed rectangle outline
+        int color = claimDragging ? 0xAA00FF00 : 0xAAFF4444;
+        Gui.drawRect(x1, y1, x2, y1 + 1, color); // top
+        Gui.drawRect(x1, y2 - 1, x2, y2, color); // bottom
+        Gui.drawRect(x1, y1, x1 + 1, y2, color); // left
+        Gui.drawRect(x2 - 1, y1, x2, y2, color); // right
+
+        // Chunk count label
+        String label = (claimDragging ? "CLAIM: " : "UNCLAIM: ") + pendingSelection.size() + " chunks";
+        if (claimDragging) {
+            int cost = pendingSelection.size() * WarClaimHandler.CLAIM_COST_BASE;
+            label += " (" + cost + " CP)";
+        }
+        fontRenderer.drawStringWithShadow(label, x1 + 2, y1 - 10, claimDragging ? 0xFF00FF00 : 0xFFFF4444);
+    }
+
+    private void drawPlayerMarker() {
+        if (mc.player == null) return;
+
+        int px = (int) mc.player.posX;
+        int pz = (int) mc.player.posZ;
+        int[] scr = worldToScreen(px, pz);
+        if (scr == null) return;
+
+        int sx = scr[0];
+        int sy = scr[1];
+
+        if (sx < canvasLeft || sx >= canvasLeft + canvasSize) return;
+        if (sy < canvasTop || sy >= canvasTop + canvasSize) return;
+
+        // Draw a small white diamond for the player
+        Gui.drawRect(sx - 1, sy - 3, sx + 2, sy + 4, 0xFFFFFFFF);
+        Gui.drawRect(sx - 3, sy - 1, sx + 4, sy + 2, 0xFFFFFFFF);
+        Gui.drawRect(sx, sy - 2, sx + 1, sy + 3, 0xFF00CCFF);
+        Gui.drawRect(sx - 2, sy, sx + 3, sy + 1, 0xFF00CCFF);
+    }
+
+    private void drawUIChrome(int mouseX, int mouseY) {
+        ScaledResolution sr = new ScaledResolution(mc);
+        int sw = sr.getScaledWidth();
+
+        // Title
+        String title = TextFormatting.GOLD + "" + TextFormatting.BOLD + "TACTICAL MAP";
+        int titleWidth = fontRenderer.getStringWidth(title);
+        fontRenderer.drawStringWithShadow(title, (sw - titleWidth) / 2, canvasTop - 14, 0xFFFFFFFF);
+
+        // Zoom level
+        String zoomStr = TextFormatting.GRAY + "Zoom: " + TextFormatting.WHITE + getBlocksPerPixel() + " bpp";
+        fontRenderer.drawStringWithShadow(zoomStr, canvasLeft, canvasTop + canvasSize + 4, 0xFFFFFFFF);
+
+        // World coordinates at cursor
+        if (isOnCanvas(mouseX, mouseY)) {
+            int[] world = screenToWorld(mouseX, mouseY);
+            String coords = TextFormatting.GRAY + "X: " + TextFormatting.WHITE + world[0]
+                    + TextFormatting.GRAY + "  Z: " + TextFormatting.WHITE + world[1];
+            int coordsWidth = fontRenderer.getStringWidth(coords);
+            fontRenderer.drawStringWithShadow(coords, canvasLeft + canvasSize - coordsWidth,
+                    canvasTop + canvasSize + 4, 0xFFFFFFFF);
+        }
+
+        // Sidebar stats
+        int sideX = canvasLeft + canvasSize + 6;
+        int sideY = canvasTop;
+
+        fontRenderer.drawStringWithShadow(TextFormatting.GOLD + "" + TextFormatting.BOLD + "Stats", sideX, sideY, 0xFFFFFFFF);
+        sideY += 14;
+
+        Integer cp = WarMapClientStats.getCommandPointsOrNull();
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "CP: " + TextFormatting.GOLD +
+                (cp != null ? cp : "?"), sideX, sideY, 0xFFFFFFFF);
+        sideY += 12;
+
+        Integer era = WarMapClientStats.getEraOrNull();
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Era: " + TextFormatting.AQUA +
+                (era != null ? era : "?"), sideX, sideY, 0xFFFFFFFF);
+        sideY += 12;
+
+        Integer ad = WarMapClientStats.getAirDefenseOrNull();
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Air Def: " + TextFormatting.GREEN +
+                (ad != null ? ad + "%" : "?"), sideX, sideY, 0xFFFFFFFF);
+        sideY += 20;
+
+        // Controls help
+        fontRenderer.drawStringWithShadow(TextFormatting.GOLD + "" + TextFormatting.BOLD + "Controls", sideX, sideY, 0xFFFFFFFF);
+        sideY += 14;
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Drag: Pan", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Scroll: Zoom", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.GREEN + "Shift+Drag:", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.GREEN + "  Claim Land", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.RED + "Shift+RClick:", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.RED + "  Unclaim Land", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "R: Recenter", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "RClick: Deploy", sideX, sideY, 0xFFFFFFFF);
+        sideY += 10;
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "ESC: Close", sideX, sideY, 0xFFFFFFFF);
+
+        // Legend
+        sideY += 20;
+        fontRenderer.drawStringWithShadow(TextFormatting.GOLD + "" + TextFormatting.BOLD + "Legend", sideX, sideY, 0xFFFFFFFF);
+        sideY += 14;
+        Gui.drawRect(sideX, sideY, sideX + 8, sideY + 8, 0xFF00AA00);
+        fontRenderer.drawStringWithShadow(TextFormatting.GREEN + " Your Land", sideX + 10, sideY, 0xFFFFFFFF);
+        sideY += 12;
+        Gui.drawRect(sideX, sideY, sideX + 8, sideY + 8, 0xFFCC0000);
+        fontRenderer.drawStringWithShadow(TextFormatting.RED + " Rival Land", sideX + 10, sideY, 0xFFFFFFFF);
+        sideY += 12;
+        Gui.drawRect(sideX, sideY, sideX + 8, sideY + 8, 0xFF4488DD);
+        fontRenderer.drawStringWithShadow(TextFormatting.BLUE + " Other Land", sideX + 10, sideY, 0xFFFFFFFF);
+
+        // Mode indicator if shift held
+        if (GuiScreen.isShiftKeyDown()) {
+            String mode = TextFormatting.YELLOW + "" + TextFormatting.BOLD + "[TERRITORY MODE] "
+                    + TextFormatting.RESET + TextFormatting.GRAY + "Drag to select chunks";
+            int modeWidth = fontRenderer.getStringWidth(mode);
+            fontRenderer.drawStringWithShadow(mode, (sw - modeWidth) / 2, canvasTop + canvasSize + 16, 0xFFFFFFFF);
+        }
+    }
+
+    private void drawStatusMessage() {
+        if (statusMessage.isEmpty() || System.currentTimeMillis() > statusExpiry) {
+            statusMessage = "";
+            return;
+        }
+
+        ScaledResolution sr = new ScaledResolution(mc);
+        int sw = sr.getScaledWidth();
+        int msgWidth = fontRenderer.getStringWidth(statusMessage);
+        fontRenderer.drawStringWithShadow(statusMessage, (sw - msgWidth) / 2, canvasTop - 26, 0xFFFFFFFF);
+    }
+
+    // ==================== Scissor (canvas clipping) ====================
+
+    private void enableCanvasScissor() {
+        ScaledResolution sr = new ScaledResolution(mc);
+        int scale = sr.getScaleFactor();
+        int realX = canvasLeft * scale;
+        int realY = (sr.getScaledHeight() - canvasTop - canvasSize) * scale;
+        int realW = canvasSize * scale;
+        int realH = canvasSize * scale;
+
+        GlStateManager.pushMatrix();
+        org.lwjgl.opengl.GL11.glEnable(org.lwjgl.opengl.GL11.GL_SCISSOR_TEST);
+        org.lwjgl.opengl.GL11.glScissor(realX, realY, realW, realH);
+    }
+
+    private void disableCanvasScissor() {
+        org.lwjgl.opengl.GL11.glDisable(org.lwjgl.opengl.GL11.GL_SCISSOR_TEST);
+        GlStateManager.popMatrix();
+    }
+
+    // ==================== Helpers ====================
+
+    private int colorForOwnerFill(String owner, String playerId) {
+        if (playerId.equals(owner) || "PLAYER".equals(owner)) return COLOR_PLAYER_FILL;
+        if ("RIVAL".equals(owner)) return COLOR_RIVAL_FILL;
+        return COLOR_OTHER_FILL;
+    }
+
+    private int colorForOwnerBorder(String owner, String playerId) {
+        if (playerId.equals(owner) || "PLAYER".equals(owner)) return COLOR_BORDER_PLAYER;
+        if ("RIVAL".equals(owner)) return COLOR_BORDER_RIVAL;
+        return COLOR_BORDER_OTHER;
+    }
+
+    private void setStatus(String msg) {
+        statusMessage = msg;
+        statusExpiry = System.currentTimeMillis() + 3000;
+    }
 }

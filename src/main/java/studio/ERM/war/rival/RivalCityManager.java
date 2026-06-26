@@ -11,12 +11,13 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import studio.ERM.EpochRunnerMod;
-import studio.ERM.config.RivalCityConfig as ExternalConfig;
+// External config uses FQN: studio.ERM.config.RivalCityConfig
+// Unqualified RivalCityConfig refers to studio.ERM.war.rival.RivalCityConfig
 import studio.ERM.war.WarMapOverlay;
-import studio.ERM.war.WarWorldData;
-import studio.ERM.war.faction.ProceduralBuildingGenerator;
-import studio.ERM.war.faction.RivalExpansionManager;
-import studio.ERM.war.faction.RivalFactionStats;
+import studio.ERM.war.world.WarWorldData;
+import studio.ERM.war.rival.ProceduralBuildingGenerator;
+import studio.ERM.war.rival.RivalExpansionManager;
+import studio.ERM.war.rival.RivalFactionStats;
 
 import java.util.*;
 
@@ -39,7 +40,10 @@ public class RivalCityManager {
 
     // Legacy static fields for backwards compatibility
     private static BlockPos rivalCityCenter = null;
-    private static int rivalCityLevel = 1;
+    // TESTING DEFAULT: start at the max war level (10) so sieges immediately field modern troops
+    // (Flan-gun infantry at L8-10 per WarWeaponsConfig), hostile CAS, and the heavier waves. An
+    // actual rival city still overrides this with its real level once one is generated/loaded.
+    private static int rivalCityLevel = 10;
     private static int rivalCitySize = 48;
     private static boolean isInitialized = false;
     private static boolean isGenerating = false;
@@ -197,15 +201,15 @@ public class RivalCityManager {
 
                 processRedevelopmentQueue(world, state, time);
 
-                if (ExternalConfig.enableFlansVehicles
+                if (studio.ERM.config.RivalCityConfig.enableFlansVehicles
                         && state.stats.willCommitVehicles()
-                        && state.level >= ExternalConfig.flansVehiclesStartLevel) {
+                        && state.level >= studio.ERM.config.RivalCityConfig.flansVehiclesStartLevel) {
                     try {
                         int vehicleCount = Math.min(
-                                ExternalConfig.flansVehiclesPassive,
+                                studio.ERM.config.RivalCityConfig.flansVehiclesPassive,
                                 state.stats.getVehicleTier()
                         );
-                        RivalCitySpawner.spawnRivalFlansVehicles(world, state, 
+                        RivalCitySpawner.spawnRivalFlansVehicles(world, state,
                                 RivalCitySpawner.getBoostedFlansVehicleCountForLevel(state.level, vehicleCount));
                     } catch (Throwable t) {
                         EpochRunnerMod.logger.error("[RIVAL] Passive Flan spawn error.", t);
@@ -264,6 +268,56 @@ public class RivalCityManager {
         }
     }
 
+    /**
+     * Seed a rival city at a randomized distance from the player (Rival City module).
+     *
+     * Fixes two long-standing /war rival city bugs:
+     *   1. It USED to drop the city on the player's head (center = player position), so the
+     *      "spawned where I was standing" complaint. We now offset by min/maxSpawnDistance.
+     *   2. It never registered chunk ownership, so rival land never appeared on the tactical
+     *      war map. We now call claimChunksForRival() which sets each chunk's owner to RIVAL,
+     *      so getAllChunkOwners() (and the map overlay) actually see the territory.
+     *
+     * Returns the chosen center, or null on failure.
+     */
+    public static BlockPos seedCityAtDistance(World world, EntityPlayer player, int level) {
+        if (world == null || player == null || world.isRemote) return null;
+        if (isGenerating) return null;
+
+        isGenerating = true;
+        try {
+            // Command path tracks the city under the shared "RIVAL" key, matching the
+            // pre-existing /war rival city / status lookups (getNearestCity, etc.).
+            RivalCityState state = getOrCreateCity(world, "RIVAL");
+
+            double angle = rand.nextDouble() * Math.PI * 2.0;
+            int span = Math.max(1, RivalCityConfig.maxSpawnDistance - RivalCityConfig.minSpawnDistance);
+            int distance = RivalCityConfig.minSpawnDistance + rand.nextInt(span);
+            int x = (int) (player.posX + Math.cos(angle) * distance);
+            int z = (int) (player.posZ + Math.sin(angle) * distance);
+            int y = world.getTopSolidOrLiquidBlock(new BlockPos(x, 0, z)).getY();
+
+            state.center = new BlockPos(x, y, z);
+            state.level = Math.max(1, level);
+            state.size = Math.max(64, state.size);
+            state.currentRingRadius = 0;
+            state.clearStructures();
+
+            state.stats.initializeForLevel(state.level);
+            state.expansionManager.initialize(world, state.center);
+            updateLegacyFields(state);
+
+            RivalCityGenerator.generateCityLevel(world, state, state.level);
+            claimChunksForRival(world, state);   // registers RIVAL chunk ownership -> shows on map
+            RivalCitySpawner.spawnRivalNPCs(world, state);
+            WarMapOverlay.setRivalCityMarker(state.center, state.level);
+
+            return state.center;
+        } finally {
+            isGenerating = false;
+        }
+    }
+
     // =====================================================================
     // GROW / LEVEL COMMANDS
     // =====================================================================
@@ -317,9 +371,9 @@ public class RivalCityManager {
             RivalCityGenerator.generateCityLevel(world, state, state.level);
             claimChunksForRival(world, state);
 
-            if (ExternalConfig.enableFlansVehicles && state.level >= ExternalConfig.flansVehiclesStartLevel) {
+            if (studio.ERM.config.RivalCityConfig.enableFlansVehicles && state.level >= studio.ERM.config.RivalCityConfig.flansVehiclesStartLevel) {
                 try {
-                    int count = Math.min(ExternalConfig.flansVehiclesPerGrowth, Math.max(1, state.stats.getVehicleTier() + 1));
+                    int count = Math.min(studio.ERM.config.RivalCityConfig.flansVehiclesPerGrowth, Math.max(1, state.stats.getVehicleTier() + 1));
                     RivalCitySpawner.spawnRivalFlansVehicles(world, state, 
                             RivalCitySpawner.getBoostedFlansVehicleCountForLevel(state.level, count));
                 } catch (Throwable t) {
@@ -466,7 +520,7 @@ public class RivalCityManager {
     public static void reset() {
         rivalCitiesByDim.clear();
         rivalCityCenter = null;
-        rivalCityLevel = 1;
+        rivalCityLevel = 10; // testing default (see field declaration)
         rivalCitySize = 48;
         currentRingRadius = 0;
         isInitialized = false;
@@ -759,11 +813,11 @@ public class RivalCityManager {
             for (int i = 0; i < 3; i++) RivalCitySpawner.spawnRivalNPCs(world, state);
             RivalCityConfig.npcsPerLevel = old;
 
-            if (ExternalConfig.enableFlansVehicles && state.stats.willCommitVehicles() &&
-                    state.level >= ExternalConfig.flansVehiclesStartLevel) {
-                RivalCitySpawner.spawnRivalFlansVehicles(world, state, 
-                        RivalCitySpawner.getBoostedFlansVehicleCountForLevel(state.level, 
-                                Math.max(2, ExternalConfig.flansVehiclesPerGrowth)));
+            if (studio.ERM.config.RivalCityConfig.enableFlansVehicles && state.stats.willCommitVehicles() &&
+                    state.level >= studio.ERM.config.RivalCityConfig.flansVehiclesStartLevel) {
+                RivalCitySpawner.spawnRivalFlansVehicles(world, state,
+                        RivalCitySpawner.getBoostedFlansVehicleCountForLevel(state.level,
+                                Math.max(2, studio.ERM.config.RivalCityConfig.flansVehiclesPerGrowth)));
             }
 
             state.stats.consumeForRaid(state.stats.getReinforcementWaveSize(), 0);

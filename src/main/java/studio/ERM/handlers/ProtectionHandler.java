@@ -1,10 +1,12 @@
 package studio.ERM.handlers;
 
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockBed;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.item.EntityItem;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Blocks;
+import net.minecraft.util.EnumFacing;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
 import net.minecraft.tileentity.TileEntity;
@@ -131,8 +133,12 @@ public class ProtectionHandler extends WorldSavedData {
 
             // --- 4. RESTORATION ---
             if (world.isAirBlock(pos) || currentState.getBlock() != savedState.getBlock()) {
-                if (world.getBlockState(pos).getBlock() != Blocks.AIR) { world.setBlockToAir(pos); }
-                world.setBlockState(pos, savedState, 3);
+                // Beds: place with flag 2 (client-only, NO neighbour update) and don't pre-air the
+                // slot, so restoring one half can't trigger BlockBed validation that pops the other
+                // half. Both halves are protected, so each is restored independently into a whole bed.
+                boolean isBed = savedState.getBlock() instanceof BlockBed;
+                if (!isBed && world.getBlockState(pos).getBlock() != Blocks.AIR) { world.setBlockToAir(pos); }
+                world.setBlockState(pos, savedState, isBed ? 2 : 3);
 
                 if (protectedNBT.containsKey(pos)) {
                     TileEntity te = world.getTileEntity(pos);
@@ -151,24 +157,60 @@ public class ProtectionHandler extends WorldSavedData {
         }
     }
 
+    /** True if this exact block is under protector-stick protection (so antigrief must not touch it). */
+    public static boolean isProtected(World world, BlockPos pos) {
+        if (world == null || pos == null) return false;
+        try {
+            return get(world).protectedStates.containsKey(pos.toImmutable());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     public static void toggleProtection(EntityPlayer player, BlockPos pos) {
         ProtectionHandler instance = get(player.world);
         BlockPos immutablePos = pos.toImmutable();
+        // Multiblock (bed): the head + foot are one object. Protecting/restoring only the clicked half
+        // leaves the other half unprotected and BlockBed's own neighbour validation then pops the
+        // restored half right back off -> the "buggy half bed". Always handle BOTH halves together.
+        BlockPos other = bedOtherHalf(player.world, immutablePos);
 
         if (instance.protectedStates.containsKey(immutablePos)) {
-            instance.protectedStates.remove(immutablePos);
-            instance.protectedNBT.remove(immutablePos);
+            instance.unprotectBlock(immutablePos);
+            if (other != null) instance.unprotectBlock(other.toImmutable());
             player.sendMessage(new TextComponentString(TextFormatting.RED + "Protection Disabled."));
         } else {
-            IBlockState state = player.world.getBlockState(pos);
-            instance.protectedStates.put(immutablePos, state);
-            TileEntity te = player.world.getTileEntity(pos);
-            if (te != null) {
-                instance.protectedNBT.put(immutablePos, te.writeToNBT(new NBTTagCompound()));
-            }
+            instance.protectBlock(player.world, immutablePos);
+            if (other != null) instance.protectBlock(player.world, other.toImmutable());
             player.sendMessage(new TextComponentString(TextFormatting.GREEN + "Protection Enabled."));
         }
         instance.markDirty();
+    }
+
+    private void protectBlock(World world, BlockPos pos) {
+        BlockPos p = pos.toImmutable();
+        protectedStates.put(p, world.getBlockState(p));
+        TileEntity te = world.getTileEntity(p);
+        if (te != null) protectedNBT.put(p, te.writeToNBT(new NBTTagCompound()));
+    }
+
+    private void unprotectBlock(BlockPos pos) {
+        BlockPos p = pos.toImmutable();
+        protectedStates.remove(p);
+        protectedNBT.remove(p);
+    }
+
+    /** The linked half of a bed (head&lt;-&gt;foot), or null if {@code pos} is not a bed. */
+    private static BlockPos bedOtherHalf(World world, BlockPos pos) {
+        try {
+            IBlockState s = world.getBlockState(pos);
+            if (!(s.getBlock() instanceof BlockBed)) return null;
+            EnumFacing facing = s.getValue(BlockBed.FACING);
+            boolean isHead = s.getValue(BlockBed.PART) == BlockBed.EnumPartType.HEAD;
+            return isHead ? pos.offset(facing.getOpposite()) : pos.offset(facing);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     @Override

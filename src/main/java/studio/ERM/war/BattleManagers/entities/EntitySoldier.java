@@ -69,6 +69,11 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     private int idleTicks = 0;
     private static final int MAX_IDLE_TICKS = 6000; // 5 minutes with no target → despawn
 
+    // ── Friendly-fire shield ──
+    // Set true transiently while an allied blast detonates nearby so friendly tanks/airstrikes
+    // don't mow down their own infantry. Player-caused explosives are unaffected.
+    private boolean explosionShield = false;
+
     public EntitySoldier(World worldIn) {
         super(worldIn);
         this.setSize(0.6F, 1.8F);
@@ -123,14 +128,17 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
             } catch (Throwable ignored) {}
         }
 
-        // Don't attack EntitySoldierPuppet or EntityFormationCarrier
+        // Don't attack EntitySoldierPuppet or EntityFormationCarrier (friendly formation units)
         if (target instanceof EntitySoldierPuppet || target instanceof EntityFormationCarrier) return false;
 
         // Don't attack AW2 empire faction NPCs
         if (isAW2EmpireNPC(target)) return false;
 
-        // Attack everything else that's alive (players handled above, hostile mobs, non-empire NPCs)
-        return false; // Only attack players and explicitly hostile things
+        // Don't attack passive animals (cows, sheep, horses, etc.)
+        if (target instanceof net.minecraft.entity.passive.EntityAnimal) return false;
+
+        // Attack everything else: hostile mobs, non-empire NPCs, other entities
+        return true;
     }
 
     /**
@@ -183,7 +191,7 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         double follow = 28.0 + (lv * 2.0);
 
         this.getEntityAttribute(SharedMonsterAttributes.MAX_HEALTH).setBaseValue(health);
-        this.setHealth((float) health);
+        // Current health is set by the caller (full on spawn, preserved on reload).
         this.getEntityAttribute(SharedMonsterAttributes.MOVEMENT_SPEED).setBaseValue(speed);
         this.getEntityAttribute(SharedMonsterAttributes.ATTACK_DAMAGE).setBaseValue(damage);
         this.getEntityAttribute(SharedMonsterAttributes.FOLLOW_RANGE).setBaseValue(follow);
@@ -224,6 +232,17 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         } else {
             idleTicks = 0;
         }
+    }
+
+    public void setExplosionShield(boolean shielded) {
+        this.explosionShield = shielded;
+    }
+
+    @Override
+    public boolean attackEntityFrom(DamageSource source, float amount) {
+        // Ignore friendly blast splash while shielded (allied tank/airstrike detonations).
+        if (explosionShield && source.isExplosion()) return false;
+        return super.attackEntityFrom(source, amount);
     }
 
     // ══════════════════════════════════════
@@ -324,6 +343,7 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         this.dataManager.set(DW_SKIN_KEY, skinKey != null ? skinKey : "");
 
         applyLevelScaling();
+        this.setHealth(this.getMaxHealth());
         SoldierLoadout.equip(this, this.warLevel, this.unitRole);
     }
 
@@ -372,6 +392,13 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         this.idleTicks = tag.getInteger("erm_idle");
 
         applyLevelScaling();
+
+        // Restore the saved current health (clamped to the level-scaled max) so reloading
+        // a chunk doesn't silently heal damaged soldiers back to full.
+        float savedHealth = tag.getFloat("Health");
+        if (savedHealth > 0.0F) {
+            this.setHealth(Math.min(savedHealth, this.getMaxHealth()));
+        }
     }
 
     @Override

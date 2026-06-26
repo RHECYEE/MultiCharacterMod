@@ -95,14 +95,14 @@ public class DeployedBattleManager extends WorldSavedData {
         }
 
         // Check player era/level + CP (server authoritative).
-        // IMPORTANT: this mod currently treats CP/Era as a global "player faction" resource
-        // keyed under "PLAYER" (not per-uuid). Commands and UI expect that.
+        // CP/Era live in the per-player-UUID bucket -- the SAME bucket that /war cp grants to,
+        // that WarClaimHandler spends from, that the air designator spends from, that the
+        // tactical map HUD displays, AND that this class's own refund path (releaseBattle) pays
+        // back into. The old code read the legacy "PLAYER" bucket here, so a GUI battle deploy
+        // checked a CP pool that /war cp and the map never touch -> "Not enough CP" even when the
+        // map clearly showed plenty, and any refund landed in a different bucket than the charge.
         WarWorldData warData = WarWorldData.get(world);
-        WarWorldData.FactionStats stats = warData.getStats("PLAYER");
-        if (stats == null) {
-            // Legacy fallback (older saves / older code paths)
-            stats = warData.getStats(player.getUniqueID().toString());
-        }
+        WarWorldData.FactionStats stats = warData.getStats(player.getUniqueID().toString());
         if (stats == null) {
             return DeployResult.failure("War stats not initialized");
         }

@@ -61,6 +61,10 @@ public class EntityAIFindClaimBed extends EntityAIBase {
                     BlockPos head = BedClaimData.normalizeToBedHead(citizen.world, cur.toImmutable());
                     if (head == null) continue;
 
+                    // Only consider a COMPLETE, claimable two-block bed. Skipping this let a citizen
+                    // lock onto a half-bed it could never claim, so it kept reporting "need a bed".
+                    if (BedClaimData.resolveHeadAndFoot(citizen.world, head) == null) continue;
+
                     if (data.isClaimedByOther(citizen.world, head, self)) continue;
 
                     double d = citizen.getDistanceSq(head);
@@ -72,12 +76,15 @@ public class EntityAIFindClaimBed extends EntityAIBase {
             }
         }
 
-        if (bestHead != null) {
-            if (data.claimBed(citizen.world, bestHead, self)) {
-                citizen.setAssignedBed(bestHead);
-            }
+        boolean claimed = false;
+        if (bestHead != null && data.claimBed(citizen.world, bestHead, self)) {
+            citizen.setAssignedBed(bestHead);
+            claimed = true;
         }
 
-        cooldown = 200;
+        // If we got a bed, relax for a while. If we DIDN'T (no free bed found, or we lost a same-tick
+        // race for the nearest bed with another citizen), retry soon so every citizen settles onto its
+        // own bed quickly instead of being stuck "needs a bed" for 10s at a time.
+        cooldown = claimed ? 200 : 40;
     }
 }

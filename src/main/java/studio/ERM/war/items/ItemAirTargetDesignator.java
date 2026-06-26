@@ -17,7 +17,7 @@ import net.minecraft.world.World;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import studio.ERM.EpochRunnerMod;
-import studio.ERM.war.WarWorldData;
+import studio.ERM.war.world.WarWorldData;
 import studio.ERM.war.air.AirStrikeController;
 
 import javax.annotation.Nullable;
@@ -30,17 +30,23 @@ import java.util.List;
  */
 public class ItemAirTargetDesignator extends Item {
 
+    // Aircraft types MUST be real Flan's content-pack ShortNames, otherwise the client cannot
+    // resolve a PlaneType and the ghost aircraft renders as an invisible/placeholder box
+    // (see RenderGhostAircraft.resolvePlaneType). The previous list used made-up names
+    // (p51/b17/f16/f4phantom/b2/sr71/ac130) that exist in no installed pack -- that is why
+    // most designator strikes "did damage but showed no plane". These are verified against the
+    // installed WW2 + Modern Warfare packs.
     public enum StrikePackage {
-        RECON_FLYOVER(1, "Recon Flyover", 5, 0, "bf109"),
-        LIGHT_STRAFE(2, "Light Strafe", 10, 10, "p51"),
-        BOMBING_RUN(3, "Bombing Run", 20, 20, "b17"),
-        HEAVY_STRAFE(4, "Heavy Strafe", 25, 25, "a10"),
-        PRECISION_STRIKE(5, "Precision Strike", 35, 30, "f16"),
-        NAPALM_RUN(6, "Napalm Run", 40, 35, "f4phantom"),
-        CLUSTER_BOMB(7, "Cluster Bomb", 50, 40, "b52"),
-        CARPET_BOMBING(8, "Carpet Bombing", 65, 50, "b2"),
-        TACTICAL_NUKE(9, "Tactical Strike", 80, 60, "sr71"),
-        STRATEGIC_STRIKE(10, "Strategic Strike", 100, 75, "ac130");
+        RECON_FLYOVER(1, "Recon Flyover", 5, 0, "BF109"),
+        LIGHT_STRAFE(2, "Light Strafe", 10, 10, "Mustang"),
+        BOMBING_RUN(3, "Bombing Run", 20, 20, "Lancaster"),
+        HEAVY_STRAFE(4, "Heavy Strafe", 25, 25, "A10"),
+        PRECISION_STRIKE(5, "Precision Strike", 35, 30, "tornado"),
+        NAPALM_RUN(6, "Napalm Run", 40, 35, "SU25"),
+        CLUSTER_BOMB(7, "Cluster Bomb", 50, 40, "B52"),
+        CARPET_BOMBING(8, "Carpet Bombing", 65, 50, "B52"),
+        TACTICAL_NUKE(9, "Tactical Strike", 80, 60, "f22"),
+        STRATEGIC_STRIKE(10, "Strategic Strike", 100, 75, "B52");
 
         public final int level;
         public final String name;
@@ -106,7 +112,7 @@ public class ItemAirTargetDesignator extends Item {
         boolean bypassRequirements = player.isCreative();
 
         // Get air defense from player NBT (AirDefenseHandler stores it there)
-        int playerAirDefense = studio.ERM.handlers.AirDefenseHandler.getScore(player);
+        int playerAirDefense = studio.ERM.war.AirDefenseHandler.getScore(player);
 
         if (!bypassRequirements) {
             if (playerAirDefense < pkg.minAirDefense) {

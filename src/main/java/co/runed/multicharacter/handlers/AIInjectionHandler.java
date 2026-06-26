@@ -6,6 +6,7 @@ import com.flansmod.common.guns.ItemGun;
 import net.minecraft.entity.EntityCreature;
 import net.minecraft.entity.EntityList;
 import net.minecraft.entity.ai.EntityAITasks;
+import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.event.entity.EntityJoinWorldEvent;
@@ -23,11 +24,15 @@ public class AIInjectionHandler {
             ResourceLocation id = EntityList.getKey(npc);
             String regName = (id != null) ? id.toString() : "";
 
-            // Check for AW2 Combat NPCs or Wither Skeletons
+            // Gun infantry are AW2 Combat NPCs, Wither Skeletons, and our own battle EntitySoldier.
+            // (Modern/Modular CITIZENS are deliberately NOT gun users -- per the design they are
+            // civilian workers; the gun role belongs to AW2 soldiers / EntitySoldier. They were
+            // briefly added here and that was wrong, so they're excluded again.)
             boolean isAW2Soldier = regName.contains("ancientwarfare") && regName.contains("combat");
             boolean isSkeleton = regName.contains("wither_skeleton");
+            boolean isErmInfantry = npc instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier;
 
-            if (isAW2Soldier || isSkeleton) {
+            if (isAW2Soldier || isSkeleton || isErmInfantry) {
 
                 // CRITICAL FIX: DO NOT RENAME THE ENTITY.
                 // Setting a custom name tag breaks AW2 icons and AI orders.
@@ -51,15 +56,35 @@ public class AIInjectionHandler {
                         if (entry.action instanceof EntityAIFlansGunAttack) return;
                     }
 
-                    // Priority 2: Find Ammo (Runs if ammo is empty)
-                    npc.tasks.addTask(2, new EntityAIFindAmmo(npc));
+                    // CRITICAL: gun infantry must NOT drop their weapon/armour on death. Besides being
+                    // correct (no farming a battlefield of free Flan guns), this kills a hard crash:
+                    // a dropped gun the player picks up fires a broken pack advancement
+                    // (minecraft:inventory_changed -> recipe reward -> ForgeHooks.sendRecipeBook NPE),
+                    // which was crashing the server mid-siege as soldiers died and dropped guns.
+                    for (EntityEquipmentSlot slot : EntityEquipmentSlot.values()) {
+                        npc.setDropChance(slot, 0.0F);
+                    }
 
-                    // Priority 3: Gun Combat (Runs if target exists)
-                    npc.tasks.addTask(3, new EntityAIFlansGunAttack(npc, 1.1D, 20, 50.0F));
+                    // The gun AI / find-ammo tasks reference Flan core classes. Those are present in
+                    // this pack (guns are configured), but guard anyway: a missing Flan class must
+                    // never throw out of an EntityJoinWorldEvent handler and abort the spawn.
+                    try {
+                        // Priority 1: Gun Combat. Must out-rank any melee/charge task (EntitySoldier's
+                        // EntityAIAttackMelee is priority 2, AW2's combat AI similar) so a gun-armed
+                        // soldier KEEPS ITS DISTANCE and shoots instead of sprinting into punching
+                        // range. The gun AI's own movement strafes/holds at standoff distance.
+                        npc.tasks.addTask(1, new EntityAIFlansGunAttack(npc, 1.1D, 20, 100.0F));
 
-                    // Initialize Ammo NBT if missing
-                    if (!npc.getEntityData().hasKey("Infantry_CurrentAmmo")) {
-                        npc.getEntityData().setInteger("Infantry_CurrentAmmo", 30);
+                        // Priority 2: Find Ammo (only runs when the gun AI can't — i.e. out of ammo).
+                        npc.tasks.addTask(2, new EntityAIFindAmmo(npc));
+
+                        // Initialize Ammo NBT if missing
+                        if (!npc.getEntityData().hasKey("Infantry_CurrentAmmo")) {
+                            npc.getEntityData().setInteger("Infantry_CurrentAmmo", 30);
+                        }
+                    } catch (Throwable t) {
+                        studio.ERM.EpochRunnerMod.logger.error(
+                                "[MCM] Failed to inject Flan gun AI into " + regName + ": " + t, t);
                     }
                 }
             }

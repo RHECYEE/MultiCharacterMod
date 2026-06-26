@@ -4,11 +4,13 @@ import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.world.World;
-import studio.ERM.war.BattleManagers.core.BattleEngine;
 
 /**
- * Invisible ticking anchor that drives BattleEngine without requiring a global event handler.
- * Spawned when a battle starts; removed when battle ends.
+ * Invisible position marker spawned when a battle starts; removed when it ends.
+ *
+ * Historically this entity drove BattleEngine.tick() from its own onUpdate, but that stalled
+ * battles whenever the anchor's chunk unloaded. Ticking now lives in DeployedBattleTicker
+ * (one authoritative server-tick path), so this entity no longer drives the engine.
  */
 public class EntityBattleDirectorAnchor extends Entity {
 
@@ -43,7 +45,7 @@ public class EntityBattleDirectorAnchor extends Entity {
         this.motionY = 0;
         this.motionZ = 0;
 
-        BattleEngine.get(world).tick();
+        // Engine ticking moved to DeployedBattleTicker; this anchor is now a passive marker.
     }
 
     @Override

@@ -4,7 +4,10 @@ import net.minecraft.init.Items;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.nbt.JsonToNBT;
+import net.minecraft.nbt.NBTTagCompound;
 import studio.ERM.war.config.WarWeaponsConfig;
+import co.runed.multicharacter.compat.ModItems;
 
 /**
  * Equips EntitySoldier instances from the configurable WarWeaponsConfig.
@@ -35,6 +38,25 @@ public final class SoldierLoadout {
     public static void equip(EntitySoldier soldier, int warLevel, String role) {
         int idx = Math.max(0, Math.min(9, warLevel - 1));
         role = (role != null) ? role.toUpperCase() : "MELEE";
+
+        // LEVEL 10 — modern infantry. EVERY soldier (whatever its card role) carries an
+        // attachment-kitted Flan Uzi plus spare magazines so the injected gun AI keeps firing, with
+        // modern armour. This overrides the medieval melee/bow loadout entirely. The gun AI
+        // (AIInjectionHandler) recognises the held gun and makes them shoot at standoff range.
+        if (warLevel >= 10) {
+            ItemStack uzi = makeAttachmentUzi();
+            if (!uzi.isEmpty()) {
+                soldier.setItemStackToSlot(EntityEquipmentSlot.MAINHAND, uzi);
+                if (ModItems.MAG_25 != null) {
+                    soldier.setItemStackToSlot(EntityEquipmentSlot.OFFHAND, new ItemStack(ModItems.MAG_25, 4));
+                }
+                applyArmor(soldier, idx);
+                for (EntityEquipmentSlot slot : EntityEquipmentSlot.values()) {
+                    soldier.setDropChance(slot, 0.0F);
+                }
+                return;
+            }
+        }
 
         String weaponId;
         String offhandId = null;
@@ -151,5 +173,20 @@ public final class SoldierLoadout {
             if (item != null) return new ItemStack(item);
         } catch (Throwable ignored) {}
         return ItemStack.EMPTY;
+    }
+
+    /** A flansmod:uzi kitted with the requested attachments + ammo NBT, or EMPTY if Flan's absent. */
+    private static ItemStack makeAttachmentUzi() {
+        Item uzi = Item.getByNameOrId("flansmod:uzi");
+        if (uzi == null) return ItemStack.EMPTY;
+        ItemStack stack = new ItemStack(uzi);
+        try {
+            NBTTagCompound tag = JsonToNBT.getTagFromJson(
+                    "{attachments:{barrel:{},grip:{},generic_0:{},scope:{},stock:{}},ammo:[{}]}");
+            stack.setTagCompound(tag);
+        } catch (Throwable ignored) {
+            // Bad NBT shouldn't deny the soldier its gun -- ship the plain uzi.
+        }
+        return stack;
     }
 }

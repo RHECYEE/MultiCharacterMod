@@ -163,12 +163,8 @@ public final class BattleEngine {
         updateBossbarIfNeeded();
 
         if (activeDirector.isFinished()) {
-            // Directors currently store outcome internally but IBattleDirector does not expose it.
-            // For now: try known implementations; otherwise default ABORTED.
-            BattleOutcome outcome = BattleOutcome.ABORTED;
-            if (activeDirector instanceof DebugCircleDirector) {
-                outcome = ((DebugCircleDirector) activeDirector).getOutcome();
-            }
+            // Every director reports its own resolved outcome via IBattleDirector.getOutcome().
+            BattleOutcome outcome = activeDirector.getOutcome();
 
             // Emit resolved event here so map/manager systems can react.
             postResolvedEvent(outcome);

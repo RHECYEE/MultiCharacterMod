@@ -1,4 +1,4 @@
 package studio.ERM.war.network;
 
-public class FactionStats {
+public class PacketSyncWarData {
 }

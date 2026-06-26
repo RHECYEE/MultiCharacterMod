@@ -12,10 +12,11 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import studio.ERM.EpochRunnerMod;
 import studio.ERM.war.battle.WarBattleSystem;
-import studio.ERM.war.faction.ProceduralBuildingGenerator;
-import studio.ERM.war.faction.RivalExpansionManager;
-import studio.ERM.war.faction.RivalFactionStats;
+import studio.ERM.war.rival.ProceduralBuildingGenerator;
+import studio.ERM.war.rival.RivalExpansionManager;
+import studio.ERM.war.rival.RivalFactionStats;
 import studio.ERM.war.raid.SmartRaidSystem;
+import studio.ERM.war.world.WarWorldData;
 
 import java.util.*;
 
@@ -43,9 +44,6 @@ public class WarSystemIntegration {
     private static final Map<Integer, RivalExpansionManager> expansionManagers = new HashMap<>();
     private static final Map<Integer, SmartRaidSystem> raidSystems = new HashMap<>();
     
-    // Global battle system (one battle at a time)
-    private static WarBattleSystem battleSystem = null;
-    
     // Tick counter
     private static long worldTick = 0;
     
@@ -64,7 +62,7 @@ public class WarSystemIntegration {
         }
         
         if (!expansionManagers.containsKey(dim)) {
-            RivalExpansionManager manager = new RivalExpansionManager();
+            RivalExpansionManager manager = new RivalExpansionManager("rival_faction_" + dim);
             expansionManagers.put(dim, manager);
             EpochRunnerMod.logger.info("[WAR-INT] Initialized expansion manager for dimension " + dim);
         }
@@ -73,11 +71,6 @@ public class WarSystemIntegration {
             SmartRaidSystem raid = new SmartRaidSystem();
             raidSystems.put(dim, raid);
             EpochRunnerMod.logger.info("[WAR-INT] Initialized raid system for dimension " + dim);
-        }
-        
-        if (battleSystem == null) {
-            battleSystem = new WarBattleSystem();
-            EpochRunnerMod.logger.info("[WAR-INT] Initialized global battle system");
         }
     }
     
@@ -105,16 +98,6 @@ public class WarSystemIntegration {
         return raidSystems.get(world.provider.getDimension());
     }
     
-    /**
-     * Get the global battle system
-     */
-    public static WarBattleSystem getBattleSystem() {
-        if (battleSystem == null) {
-            battleSystem = new WarBattleSystem();
-        }
-        return battleSystem;
-    }
-    
     // ===== TICK HANDLER =====
     
     @SubscribeEvent
@@ -132,7 +115,7 @@ public class WarSystemIntegration {
         if (worldTick % 60 == 0) {
             RivalFactionStats stats = getFactionStats(world);
             if (stats != null) {
-                stats.tickRecovery(worldTick);
+                stats.updateRecovery(worldTick);
             }
         }
         
@@ -148,7 +131,7 @@ public class WarSystemIntegration {
                     10000, false
                 );
                 if (nearestPlayer != null) {
-                    manager.updatePlayerTarget(nearestPlayer.getPosition());
+                    manager.updatePlayerTarget(world);
                 }
             }
         }
@@ -159,10 +142,8 @@ public class WarSystemIntegration {
             raid.tick(world, worldTick);
         }
         
-        // Update battle system (every tick when active)
-        if (battleSystem != null) {
-            battleSystem.tick(world, worldTick);
-        }
+        // Update battle system (site bookkeeping; engine ticks via DeployedBattleTicker)
+        WarBattleSystem.tickBattles(world, worldTick);
     }
     
     // ===== CITY INTEGRATION =====
@@ -176,7 +157,7 @@ public class WarSystemIntegration {
         stats.initializeForLevel(level);
         
         RivalExpansionManager manager = getExpansionManager(world);
-        manager.initialize(center, level);
+        manager.initialize(world, center);
         
         EpochRunnerMod.logger.info("[WAR-INT] Rival city spawned at " + center + " level " + level);
     }
@@ -190,25 +171,22 @@ public class WarSystemIntegration {
         stats.levelUp();
         
         RivalExpansionManager manager = getExpansionManager(world);
-        manager.setLevel(newLevel);
-        
+
         // Trigger expansion toward player
         EntityPlayer nearestPlayer = findNearestPlayer(world, manager.getCapitalPosition());
         if (nearestPlayer != null) {
-            manager.updatePlayerTarget(nearestPlayer.getPosition());
-            
-            // Perform expansion steps
-            int expansionSteps = 2 + newLevel / 2;
-            for (int i = 0; i < expansionSteps; i++) {
-                RivalExpansionManager.ExpansionResult result = manager.performExpansion(world, stats);
-                if (result != null && result.node != null) {
-                    // Generate building at new node
-                    generateBuildingAtNode(world, result.node, newLevel);
+            manager.updatePlayerTarget(world);
+
+            // Perform expansion; generate buildings at any new nodes
+            List<RivalExpansionManager.ExpansionNode> newNodes = manager.expand(world, stats);
+            if (newNodes != null) {
+                for (RivalExpansionManager.ExpansionNode node : newNodes) {
+                    generateBuildingAtNode(world, node, newLevel);
                 }
             }
-            
+
             // Trigger density backfill
-            manager.performDensityBackfill(world, stats);
+            manager.backfillDensity(world, stats);
         }
         
         EpochRunnerMod.logger.info("[WAR-INT] Rival city grown to level " + newLevel);
@@ -231,7 +209,7 @@ public class WarSystemIntegration {
                 ProceduralBuildingGenerator.generateCoolingTower(world, pos, level);
                 break;
             case "FACTORY":
-                ProceduralBuildingGenerator.generateFactory(world, pos, level);
+                ProceduralBuildingGenerator.generateFactory(world, pos, level, node.facing);
                 break;
             case "SILO":
             case "STORAGE":
@@ -249,8 +227,7 @@ public class WarSystemIntegration {
                 ProceduralBuildingGenerator.generateWatchtower(world, pos, level);
                 break;
             case "BARRACKS":
-                // Use battle system barracks
-                WarBattleSystem.placeBarracks(world, pos, level);
+                // No barracks generator exists yet; node still counts toward stats below.
                 break;
         }
         
@@ -378,18 +355,18 @@ public class WarSystemIntegration {
             return null;
         }
         
-        return getBattleSystem().createBattleSite(world, chunk, name, level);
+        return WarBattleSystem.createBattleSite(world, chunk, name, level);
     }
     
     /**
      * Start a battle at an existing site
      */
     public static boolean startBattle(World world, ChunkPos chunk, EntityPlayer initiator) {
-        WarBattleSystem.BattleSite site = getBattleSystem().getBattleSite(chunk);
+        WarBattleSystem.BattleSite site = WarBattleSystem.getBattleSite(chunk);
         if (site == null) return false;
-        
+
         RivalFactionStats stats = getFactionStats(world);
-        return getBattleSystem().startBattle(world, site, stats, initiator);
+        return WarBattleSystem.startBattle(world, site, stats, initiator);
     }
     
     /**
@@ -456,7 +433,7 @@ public class WarSystemIntegration {
         
         // Load expansion manager
         if (nbt.hasKey("expansionManager")) {
-            RivalExpansionManager manager = new RivalExpansionManager();
+            RivalExpansionManager manager = new RivalExpansionManager("rival_faction_" + dim);
             manager.readFromNBT(nbt.getCompoundTag("expansionManager"));
             expansionManagers.put(dim, manager);
         }
@@ -471,10 +448,8 @@ public class WarSystemIntegration {
         expansionManagers.remove(dim);
         raidSystems.remove(dim);
         
-        if (battleSystem != null) {
-            battleSystem.reset();
-        }
-        
+        WarBattleSystem.reset();
+
         EpochRunnerMod.logger.info("[WAR-INT] Reset all systems for dimension " + dim);
     }
     
@@ -504,10 +479,11 @@ public class WarSystemIntegration {
             lines.add("§7Territory: §f" + manager.getClaimedChunkCount() + " chunks");
         }
         
-        if (battleSystem != null && battleSystem.hasActiveBattle()) {
+        if (WarBattleSystem.hasActiveBattle()) {
             lines.add("");
             lines.add("§4=== ACTIVE BATTLE ===");
-            WarBattleSystem.BattleSite site = battleSystem.getActiveBattleSite();
+            WarBattleSystem.ActiveBattle current = WarBattleSystem.getCurrentBattle();
+            WarBattleSystem.BattleSite site = current != null ? current.site : null;
             if (site != null) {
                 lines.add("§7Site: §f" + site.name);
                 lines.add("§7State: §f" + site.state.name());

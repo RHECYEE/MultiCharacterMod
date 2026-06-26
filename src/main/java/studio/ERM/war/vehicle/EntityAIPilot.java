@@ -1,8 +1,8 @@
-package co.runed.multicharacter.vehicle;
+package studio.ERM.war.vehicle;
 
-import co.runed.multicharacter.combat.CombatFeatures;
-import co.runed.multicharacter.ModConfig;
 import co.runed.multicharacter.compat.EntityAIFlansGunAttack;
+import co.runed.multicharacter.ModConfig;
+import co.runed.multicharacter.combat.CombatFeatures;
 import com.flansmod.common.FlansMod;
 import com.flansmod.common.RotatedAxes;
 import com.flansmod.common.driveables.*;
@@ -25,6 +25,9 @@ import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.network.datasync.DataParameter;
+import net.minecraft.network.datasync.DataSerializers;
+import net.minecraft.network.datasync.EntityDataManager;
 import net.minecraft.util.DamageSource;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.SoundCategory;
@@ -36,11 +39,22 @@ import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.common.Loader;
 
+import studio.ERM.war.skins.ISkinnable;
+import studio.ERM.war.skins.SkinPoolManager;
+
 
 import java.lang.reflect.Field;
 import java.util.*;
 
-public class EntityAIPilot extends EntityCreature {
+public class EntityAIPilot extends EntityCreature implements ISkinnable {
+
+    /**
+     * DataWatcher-backed skin key — auto-synced to every tracking client so the renderer's
+     * SkinTextureCache can resolve a real AW2 skin-pack texture instead of falling back to a
+     * default/missing-texture biped. Same proven pattern as EntitySoldier/EntityModernCitizen.
+     */
+    private static final DataParameter<String> DW_SKIN_KEY =
+            EntityDataManager.createKey(EntityAIPilot.class, DataSerializers.STRING);
 
     private String vehicleToSummon = "";
     private boolean hasSpawnedVehicle = false;
@@ -243,6 +257,13 @@ public class EntityAIPilot extends EntityCreature {
             String className = entity.getClass().getSimpleName();
             return className.contains("ModernCitizen") || className.contains("Citizen");
         }));
+    }
+
+    @Override
+    protected void entityInit() {
+        super.entityInit();
+        // Register the synced skin key so clients receive it via the entity's DataManager.
+        this.dataManager.register(DW_SKIN_KEY, "");
     }
 
     /**
@@ -500,8 +521,17 @@ public class EntityAIPilot extends EntityCreature {
         return item != null ? new ItemStack(item) : ItemStack.EMPTY;
     }
 
+    // Transient flag: true only while a friendly blast is detonating nearby, so a vehicle's
+    // own main gun never damages its crew and friendly tanks don't friendly-fire each other.
+    private boolean explosionShield = false;
+
+    public void setExplosionShield(boolean shielded) {
+        this.explosionShield = shielded;
+    }
+
     @Override
     public boolean attackEntityFrom(DamageSource source, float amount) {
+        if (explosionShield && source.isExplosion()) return false;
         if (this.isDying || this.isEntityInvulnerable(source) || this.isDead || this.getHealth() <= 0) return false;
 
         Entity attacker = source.getTrueSource();
@@ -558,6 +588,14 @@ public class EntityAIPilot extends EntityCreature {
     @Override
     public void onLivingUpdate() {
         super.onLivingUpdate();
+
+        // Roll an AW2 skin the first server tick we lack one. Doing it here (rather than only in a
+        // spawn-egg hook) means every spawn path — egg, SpawnHelper, RivalCitySpawner, raids, crew —
+        // gets a real soldier texture. setSkinKey() is DataParameter-backed, so it syncs to clients.
+        if (!this.world.isRemote && this.getSkinKey().isEmpty()) {
+            try { SkinPoolManager.applySkinFromPool(this, getDefaultPoolName(), this.world.rand); }
+            catch (Throwable ignored) {}
+        }
 
         if (!this.world.isRemote && this.ticksExisted % 40 == 0 && !this.isPassenger) {
             EntityPlayer nearest = this.world.getClosestPlayerToEntity(this, 100.0D);
@@ -804,14 +842,14 @@ public class EntityAIPilot extends EntityCreature {
         }
 
         if (Math.abs(deltaYaw) <= yawTolerance && Math.abs(deltaPitch) <= pitchTolerance) {
-            try {
-                vehicle.shoot(false);
-                VehicleCategory vcat = categorizeVehicle(vehicle);
-                if (vcat == VehicleCategory.TANK || vcat == VehicleCategory.STATIC) {
-                    vehicle.shoot(true);
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
+            // Flan's EntityDriveable.shoot() can NPE for an AI-crewed vehicle (it reaches for a player
+            // driver's ammo inventory that AI seats don't have). Fire each barrel in its OWN guard so a
+            // failing secondary never blocks the main gun, and DON'T spam the log with a stack trace
+            // every tick -- the tank just skips the shot it couldn't take.
+            VehicleCategory vcat = categorizeVehicle(vehicle);
+            try { vehicle.shoot(false); } catch (Throwable ignored) {}
+            if (vcat == VehicleCategory.TANK || vcat == VehicleCategory.STATIC) {
+                try { vehicle.shoot(true); } catch (Throwable ignored) {}
             }
 
             if (isMainGun) {
@@ -1140,7 +1178,15 @@ public class EntityAIPilot extends EntityCreature {
 
         float explosionPower = getExplosionPowerForVehicle(vehicle);
 
-        this.world.newExplosion(vehicle, explosionX, explosionY, explosionZ, explosionPower, false, explosionPower > 2.0F);
+        // Shield friendly crew/infantry inside the blast so the main gun never damages its own
+        // vehicle's crew or nearby allied troops. The vehicle (exploder) is already excluded by
+        // vanilla; this covers everyone riding it and friendly units standing beside it.
+        java.util.List<Entity> shielded = shieldFriendliesForBlast(explosionX, explosionY, explosionZ, explosionPower);
+        try {
+            this.world.newExplosion(vehicle, explosionX, explosionY, explosionZ, explosionPower, false, explosionPower > 2.0F);
+        } finally {
+            clearExplosionShields(shielded);
+        }
 
         spawnImpactParticles(explosionX, explosionY, explosionZ);
 
@@ -1155,6 +1201,51 @@ public class EntityAIPilot extends EntityCreature {
                 target.attackEntityFrom(DamageSource.causeExplosionDamage(this), damage);
             }
         }
+    }
+
+    /**
+     * Flag every friendly (same-team) crew member and infantry inside an upcoming blast so the
+     * synchronous {@link World#newExplosion} call cannot damage them. Returns the shielded list
+     * so the caller can clear the flags immediately afterwards.
+     */
+    private java.util.List<Entity> shieldFriendliesForBlast(double x, double y, double z, float power) {
+        String myTeam = this.getMcmTeam();
+        double r = power * 2.0 + 2.0;
+        net.minecraft.util.math.AxisAlignedBB box =
+                new net.minecraft.util.math.AxisAlignedBB(x - r, y - r, z - r, x + r, y + r, z + r);
+
+        java.util.List<Entity> shielded = new java.util.ArrayList<>();
+        for (Entity e : world.getEntitiesWithinAABB(Entity.class, box)) {
+            if (e == null || e.isDead) continue;
+
+            if (e instanceof EntityAIPilot) {
+                if (sameTeam(myTeam, ((EntityAIPilot) e).getMcmTeam())) {
+                    ((EntityAIPilot) e).setExplosionShield(true);
+                    shielded.add(e);
+                }
+            } else if (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) {
+                if (sameTeam(myTeam, ((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).getTeam_())) {
+                    ((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).setExplosionShield(true);
+                    shielded.add(e);
+                }
+            }
+        }
+        return shielded;
+    }
+
+    private void clearExplosionShields(java.util.List<Entity> shielded) {
+        if (shielded == null) return;
+        for (Entity e : shielded) {
+            if (e instanceof EntityAIPilot) {
+                ((EntityAIPilot) e).setExplosionShield(false);
+            } else if (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) {
+                ((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).setExplosionShield(false);
+            }
+        }
+    }
+
+    private static boolean sameTeam(String a, String b) {
+        return a != null && b != null && a.equalsIgnoreCase(b);
     }
 
     private float getExplosionPowerForVehicle(EntityDriveable vehicle) {
@@ -1758,6 +1849,7 @@ public class EntityAIPilot extends EntityCreature {
         compound.setBoolean("IsPassenger", isPassenger);
         compound.setString("mcmTeam", getMcmTeam());
         compound.setBoolean("mcmAllowVehicleTargets", isVehicleTargetingEnabled());
+        compound.setString("ermSkinKey", this.dataManager.get(DW_SKIN_KEY));
 
     }
 
@@ -1770,9 +1862,34 @@ public class EntityAIPilot extends EntityCreature {
         this.isPassenger = compound.getBoolean("IsPassenger");
         if (compound.hasKey("mcmTeam")) setMcmTeam(compound.getString("mcmTeam"));
         if (compound.hasKey("mcmAllowVehicleTargets")) setVehicleTargetingEnabled(compound.getBoolean("mcmAllowVehicleTargets"));
+        if (compound.hasKey("ermSkinKey")) this.dataManager.set(DW_SKIN_KEY, compound.getString("ermSkinKey"));
 
     }
 
+
+    // ---------------------------------------------------------------------
+    // ISkinnable — synced via DataParameter so the client renderer (RenderSkinnable +
+    // SkinTextureCache) resolves a real AW2 skin-pack texture for this Flan's vehicle pilot.
+    // ---------------------------------------------------------------------
+    @Override
+    public String getSkinKey() {
+        return this.dataManager.get(DW_SKIN_KEY);
+    }
+
+    @Override
+    public void setSkinKey(String key) {
+        this.dataManager.set(DW_SKIN_KEY, key != null ? key : "");
+    }
+
+    @Override
+    public String getDefaultPoolName() {
+        return "soldiers";
+    }
+
+    @Override
+    public ResourceLocation getFallbackTexture() {
+        return new ResourceLocation("minecraft", "textures/entity/steve.png");
+    }
 
     // ---------------------------------------------------------------------
     // Display name fix:

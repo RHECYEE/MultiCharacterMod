@@ -1,4 +1,4 @@
-package co.runed.multicharacter.compat;
+package studio.ERM.war.items;
 
 public class ItemInfantryMag extends ItemBase {
 

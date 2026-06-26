@@ -13,6 +13,7 @@ import net.minecraft.network.datasync.DataSerializers;
 import net.minecraft.network.datasync.EntityDataManager;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.World;
@@ -310,36 +311,20 @@ public class EntityWarRefugee extends EntityVillager {
      */
     public static class EntityAIWanderRefugeeCamp extends EntityAIWander {
         private final EntityWarRefugee refugee;
-        
+
         public EntityAIWanderRefugeeCamp(EntityWarRefugee refugee, double speedIn) {
             super(refugee, speedIn);
             this.refugee = refugee;
         }
-        
+
         @Override
-        protected boolean shouldExecute() {
+        public boolean shouldExecute() {
             // Don't wander if rejected (just stand and wait)
             if (refugee.isRejected()) {
                 return false;
             }
-            
+
             return super.shouldExecute();
-        }
-        
-        @Override
-        protected Vec3d getPosition() {
-            // Wander near camp position
-            if (refugee.getCampPosition() != null) {
-                int offsetX = refugee.rand.nextInt(16) - 8;
-                int offsetZ = refugee.rand.nextInt(16) - 8;
-                
-                BlockPos target = refugee.getCampPosition().add(offsetX, 0, offsetZ);
-                target = refugee.world.getTopSolidOrLiquidBlock(target);
-                
-                return new Vec3d(target.getX(), target.getY(), target.getZ());
-            }
-            
-            return super.getPosition();
         }
     }
     
@@ -398,7 +383,7 @@ public class EntityWarRefugee extends EntityVillager {
     // ===== BREEDING (Disabled) =====
     
     @Override
-    public EntityAgeable createChild(EntityAgeable ageable) {
+    public EntityVillager createChild(EntityAgeable ageable) {
         return null; // Refugees don't breed
     }
     

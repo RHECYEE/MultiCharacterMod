@@ -1,4 +1,462 @@
 package studio.ERM.war;
 
-public class CommandWar {
+import net.minecraft.command.CommandBase;
+import net.minecraft.command.CommandException;
+import net.minecraft.command.ICommandSender;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.item.ItemStack;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.text.TextComponentString;
+import net.minecraft.util.text.TextFormatting;
+import net.minecraft.world.World;
+import studio.ERM.EpochRunnerMod;
+import studio.ERM.war.BattleManagers.cards.UnitCard;
+import studio.ERM.war.BattleManagers.cards.UnitCardRegistry;
+import studio.ERM.war.BattleManagers.core.BattleEngine;
+import studio.ERM.war.BattleManagers.directors.SiegeDirector;
+import studio.ERM.war.battle.WarBattleSystem;
+import studio.ERM.war.items.ItemAirTargetDesignator;
+import studio.ERM.war.rival.RivalCityGenerator;
+import studio.ERM.war.rival.RivalCityManager;
+import studio.ERM.war.rival.RivalCitySpawner;
+import studio.ERM.war.rival.RivalCityState;
+import studio.ERM.war.vehicle.EntityAIPilot;
+import studio.ERM.war.world.WarWorldData;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * /war — operator/test command hub for the war system.
+ *
+ * Expanded from the minimal siege/debug stub to actually drive the systems that already exist
+ * server-side but had no command front-end: Flan's-vehicle summoning, rival NPC/city spawning,
+ * and the CP-gated territory claim system (which also feeds the tactical map's data packet).
+ *
+ * Subcommands:
+ *   /war siege                  - start the 5-phase SiegeDirector battle at your position
+ *   /war debug                  - start the DebugCircleDirector (carrier/puppet smoke test)
+ *   /war stop                   - force-end the active battle
+ *   /war status                 - print rival faction / battle / raid status
+ *   /war airstrike [1-10]       - give yourself an Air Target Designator at the given strike level
+ *   /war summon <vehicle> [n]   - spawn n enemy (RIVAL) Flan's vehicles with AI pilots in front of you
+ *   /war rival guards [n] [lvl] - spawn n rival guards near you
+ *   /war rival city [lvl]       - seed/generate a rival city at your position (heavy)
+ *   /war rival status           - info on the nearest rival city
+ *   /war claim [radius]         - claim chunks around you (costs CP); refreshes the map
+ *   /war unclaim [radius]       - unclaim your chunks around you; refreshes the map
+ *   /war cp <amount>            - grant yourself Command Points (so claims are affordable)
+ *   /war sync                   - push the territory + stats snapshot to your client (map refresh)
+ */
+public class CommandWar extends CommandBase {
+
+    @Override
+    public String getName() { return "war"; }
+
+    @Override
+    public String getUsage(ICommandSender sender) {
+        return "/war <siege|debug|stop|status|airstrike|summon|rival|claim|unclaim|cp|sync>";
+    }
+
+    @Override
+    public int getRequiredPermissionLevel() { return 2; }
+
+    @Override
+    public List<String> getTabCompletions(MinecraftServer server, ICommandSender sender, String[] args, BlockPos pos) {
+        if (args.length == 1) {
+            return getListOfStringsMatchingLastWord(args,
+                    "siege", "debug", "stop", "status", "airstrike",
+                    "summon", "rival", "claim", "unclaim", "cp", "sync", "repair");
+        }
+        if (args.length == 2 && "rival".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, "guards", "city", "status");
+        }
+        return java.util.Collections.emptyList();
+    }
+
+    @Override
+    public void execute(MinecraftServer server, ICommandSender sender, String[] args) throws CommandException {
+        if (args.length == 0) {
+            help(sender);
+            return;
+        }
+
+        String sub = args[0].toLowerCase(java.util.Locale.ROOT);
+        switch (sub) {
+            case "siege":   startSiege(sender);        break;
+            case "debug":   startDebug(sender);        break;
+            case "stop":    stop(sender);              break;
+            case "status":  status(sender);            break;
+            case "airstrike":
+            case "designator": giveDesignator(sender, args); break;
+            case "summon":  summonVehicle(sender, args); break;
+            case "rival":   rival(sender, args);       break;
+            case "claim":   claim(sender, args, true); break;
+            case "unclaim": claim(sender, args, false); break;
+            case "cp":      grantCp(sender, args);     break;
+            case "sync":    syncMap(sender);           break;
+            case "repair":  repair(sender, args);      break;
+            default:
+                msg(sender, TextFormatting.RED + "Unknown subcommand: " + sub);
+                help(sender);
+        }
+    }
+
+    // ===== battle subcommands =====
+
+    private void startSiege(ICommandSender sender) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        BattleEngine engine = BattleEngine.get(world);
+        if (engine == null) { msg(sender, TextFormatting.RED + "No battle engine for this world."); return; }
+        if (engine.hasActiveBattle()) {
+            msg(sender, TextFormatting.YELLOW + "A battle is already active. Use /war stop first.");
+            return;
+        }
+
+        UnitCard card = UnitCardRegistry.get("ShieldWall");
+        if (card == null) card = UnitCardRegistry.getDefault();
+        if (card == null) { msg(sender, TextFormatting.RED + "No UnitCards registered; cannot start a siege."); return; }
+
+        BlockPos pos = player.getPosition();
+        engine.startBattle(new SiegeDirector(card), player, pos);
+
+        if (engine.hasActiveBattle()) {
+            msg(sender, TextFormatting.GREEN + "Siege started at " + posStr(pos) + " (watch the boss bar for phases).");
+        } else {
+            msg(sender, TextFormatting.RED + "Siege failed to start (see server log).");
+        }
+    }
+
+    /**
+     * /war repair [radius] — restore everything the antigrief system stored. Every block that war
+     * damage replaced with a scaffold marker in claimed land is put back to its original state and
+     * its repair order cleared. With no radius it repairs the WHOLE world's outstanding war damage;
+     * with a radius it only repairs within that many blocks of you.
+     */
+    private void repair(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        WarWorldData data = WarWorldData.get(world);
+        if (data == null) { msg(sender, TextFormatting.RED + "No war data for this world."); return; }
+
+        int radius = -1;
+        if (args.length >= 2) {
+            try { radius = Math.max(1, Integer.parseInt(args[1])); } catch (NumberFormatException ignored) {}
+        }
+        BlockPos center = player.getPosition();
+
+        Map<BlockPos, WarWorldData.RepairOrder> repairMap = data.getRepairMap();
+        if (repairMap.isEmpty()) { msg(sender, TextFormatting.YELLOW + "No war damage to repair."); return; }
+
+        int restored = 0, skipped = 0;
+        for (BlockPos pos : new ArrayList<>(repairMap.keySet())) {
+            WarWorldData.RepairOrder order = repairMap.get(pos);
+            if (order == null || order.originalState == null) { data.removeRepairOrder(pos); continue; }
+            if (radius > 0 && center.getDistance(pos.getX(), pos.getY(), pos.getZ()) > radius) { skipped++; continue; }
+            try {
+                world.setBlockState(pos, order.originalState, 3);
+                data.removeRepairOrder(pos);
+                restored++;
+            } catch (Throwable ignored) {}
+        }
+
+        msg(sender, TextFormatting.GREEN + "Repaired " + restored + " block(s)"
+                + (radius > 0 ? " within " + radius + " blocks" : "")
+                + (skipped > 0 ? TextFormatting.GRAY + " (" + skipped + " left out of range)" : "") + ".");
+    }
+
+    private void startDebug(ICommandSender sender) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        BattleEngine engine = BattleEngine.get(world);
+        if (engine == null) { msg(sender, TextFormatting.RED + "No battle engine for this world."); return; }
+        if (engine.hasActiveBattle()) {
+            msg(sender, TextFormatting.YELLOW + "A battle is already active. Use /war stop first.");
+            return;
+        }
+
+        engine.startDebugCircleBattle(player, player.getPosition(), "ShieldWall");
+        msg(sender, TextFormatting.GREEN + "Debug circle battle started at " + posStr(player.getPosition()) + ".");
+    }
+
+    private void stop(ICommandSender sender) throws CommandException {
+        World world = sender.getEntityWorld();
+        if (world == null || world.isRemote) return;
+
+        boolean was = BattleEngine.get(world) != null && BattleEngine.get(world).hasActiveBattle();
+        WarBattleSystem.forceEndBattle(world);
+        msg(sender, was ? TextFormatting.GREEN + "Battle force-ended."
+                        : TextFormatting.GRAY + "No active battle to stop.");
+    }
+
+    private void status(ICommandSender sender) {
+        World world = sender.getEntityWorld();
+        if (world == null) return;
+
+        String[] lines = WarSystemIntegration.getStatusLines(world);
+        if (lines == null || lines.length == 0) {
+            msg(sender, TextFormatting.GRAY + "No war activity in this dimension yet.");
+            return;
+        }
+        for (String line : lines) {
+            sender.sendMessage(new TextComponentString(line));
+        }
+        BattleEngine engine = BattleEngine.get(world);
+        if (engine != null && engine.hasActiveBattle()) {
+            msg(sender, TextFormatting.GOLD + "Battle engine: ACTIVE");
+        }
+    }
+
+    private void giveDesignator(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        if (EpochRunnerMod.air_target_designator == null) {
+            msg(sender, TextFormatting.RED + "Air Target Designator item is not registered.");
+            return;
+        }
+
+        int level = 1;
+        if (args.length >= 2) {
+            level = parseInt(args[1], 1, 10);
+        }
+
+        ItemStack stack = new ItemStack(EpochRunnerMod.air_target_designator);
+        ItemAirTargetDesignator.setStrikeLevel(stack, level);
+        if (!player.inventory.addItemStackToInventory(stack)) {
+            player.dropItem(stack, false);
+        }
+        ItemAirTargetDesignator.StrikePackage pkg = ItemAirTargetDesignator.StrikePackage.fromLevel(level);
+        msg(sender, TextFormatting.GREEN + "Gave Air Target Designator — level " + level + " (" + pkg.name + ").");
+    }
+
+    // ===== /war summon <vehicle> [count] =====
+
+    private void summonVehicle(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        if (args.length < 2) {
+            msg(sender, TextFormatting.RED + "Usage: /war summon <flansVehicleShortName> [count]");
+            msg(sender, TextFormatting.GRAY + "Example: /war summon abrams 2");
+            return;
+        }
+
+        String vehicle = args[1];
+        int count = (args.length >= 3) ? parseInt(args[2], 1, 10) : 1;
+
+        // Spawn a few blocks in front of the player so the (large) vehicle has room.
+        Vec3d look = player.getLookVec();
+        double baseX = player.posX + look.x * 5.0;
+        double baseZ = player.posZ + look.z * 5.0;
+
+        int spawned = 0;
+        for (int i = 0; i < count; i++) {
+            double x = baseX + (i % 3) * 3.0;
+            double z = baseZ + (i / 3) * 3.0;
+            try {
+                EntityAIPilot pilot = new EntityAIPilot(world);
+                pilot.setPosition(x, player.posY, z);
+                // RIVAL team => hostile to the player; the pilot builds + mounts the vehicle on its
+                // first tick via spawnAndMountVehicle(), independent of the remount AI.
+                pilot.setMcmTeam(RivalCityState.RIVAL_FACTION_NAME);
+                pilot.setVehicleType(vehicle);
+                world.spawnEntity(pilot);
+                spawned++;
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.error("[/war summon] failed: " + t.getMessage());
+            }
+        }
+
+        if (spawned > 0) {
+            msg(sender, TextFormatting.GREEN + "Summoning " + spawned + "x enemy '" + vehicle
+                    + "'. If nothing appears, that Flan's vehicle shortName isn't loaded.");
+        } else {
+            msg(sender, TextFormatting.RED + "Failed to summon '" + vehicle + "' (see server log).");
+        }
+    }
+
+    // ===== /war rival ... =====
+
+    private void rival(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        String op = (args.length >= 2) ? args[1].toLowerCase(java.util.Locale.ROOT) : "status";
+        switch (op) {
+            case "guards":
+            case "guard": {
+                int count = (args.length >= 3) ? parseInt(args[2], 1, 20) : 4;
+                int level = (args.length >= 4) ? parseInt(args[3], 1, 10) : nearestRivalLevel(world, player.getPosition(), 3);
+                BlockPos at = player.getPosition();
+                int spawned = 0;
+                for (int i = 0; i < count; i++) {
+                    BlockPos p = at.add((i % 4) - 2, 0, (i / 4) - 2);
+                    try { RivalCitySpawner.spawnModernGuard(world, p, level); spawned++; }
+                    catch (Throwable t) { EpochRunnerMod.logger.error("[/war rival guards] " + t.getMessage()); }
+                }
+                msg(sender, TextFormatting.GREEN + "Spawned " + spawned + " rival guard(s) (L" + level + ").");
+                break;
+            }
+            case "city": {
+                int level = (args.length >= 3) ? parseInt(args[2], 1, 10) : 3;
+                try {
+                    // Delegate to the Rival City module: offsets the city to a believable
+                    // distance (not the player's feet) AND registers RIVAL chunk ownership
+                    // so the settlement shows up as red territory on the tactical war map.
+                    BlockPos center = RivalCityManager.seedCityAtDistance(world, player, level);
+                    if (center == null) {
+                        msg(sender, TextFormatting.RED + "Rival city generation failed (busy or invalid world).");
+                        break;
+                    }
+                    int dist = (int) Math.sqrt(center.distanceSq(player.getPosition()));
+                    msg(sender, TextFormatting.GREEN + "Seeded rival city L" + level + " at " + posStr(center)
+                            + TextFormatting.YELLOW + " (" + dist + "m away)" + TextFormatting.GREEN
+                            + ". Its claimed land now shows on the war map.");
+                } catch (Throwable t) {
+                    msg(sender, TextFormatting.RED + "Rival city generation failed: " + t.getMessage());
+                    EpochRunnerMod.logger.error("[/war rival city] failed", t);
+                }
+                break;
+            }
+            case "tp": {
+                RivalCityState near = RivalCityManager.getNearestCity(world, player.getPosition());
+                if (near == null || near.center == null) {
+                    msg(sender, TextFormatting.GRAY + "No rival city to teleport to. Use /war rival city first.");
+                    break;
+                }
+                BlockPos c = near.center;
+                player.setPositionAndUpdate(c.getX() + 0.5, c.getY() + 1.0, c.getZ() + 0.5);
+                msg(sender, TextFormatting.GREEN + "Teleported to rival city L" + near.level + " @ " + posStr(c) + ".");
+                break;
+            }
+            case "status":
+            default: {
+                RivalCityState near = RivalCityManager.getNearestCity(world, player.getPosition());
+                if (near == null || near.center == null) {
+                    msg(sender, TextFormatting.GRAY + "No rival city in this dimension. Use /war rival city to seed one.");
+                } else {
+                    msg(sender, TextFormatting.GOLD + "Nearest rival city: " + TextFormatting.WHITE
+                            + "L" + near.level + " @ " + posStr(near.center)
+                            + " (" + (int) Math.sqrt(near.center.distanceSq(player.getPosition())) + "m away)");
+                }
+                break;
+            }
+        }
+    }
+
+    private static int nearestRivalLevel(World world, BlockPos pos, int fallback) {
+        try {
+            RivalCityState near = RivalCityManager.getNearestCity(world, pos);
+            if (near != null) return Math.max(1, near.level);
+        } catch (Throwable ignored) {}
+        return fallback;
+    }
+
+    // ===== /war claim | unclaim [radius] =====
+
+    private void claim(ICommandSender sender, String[] args, boolean doClaim) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        int radius = (args.length >= 2) ? parseInt(args[1], 0, 8) : 0;
+        ChunkPos center = new ChunkPos(player.getPosition());
+        List<ChunkPos> chunks = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                chunks.add(new ChunkPos(center.x + dx, center.z + dz));
+            }
+        }
+
+        if (doClaim) {
+            WarClaimHandler.BatchClaimResult r = WarClaimHandler.batchClaim(player, chunks);
+            if (r.claimed > 0) {
+                msg(sender, TextFormatting.GREEN + "Claimed " + r.claimed + " chunk(s) for " + r.totalCost + " CP.");
+            }
+            if (r.failed > 0) {
+                msg(sender, TextFormatting.YELLOW + "" + r.failed + " chunk(s) failed (rival-owned, taken, or not enough CP — try /war cp 1000).");
+            }
+            if (r.claimed == 0 && r.failed == 0) {
+                msg(sender, TextFormatting.GRAY + "Nothing to claim (already yours).");
+            }
+        } else {
+            int n = WarClaimHandler.batchUnclaim(player, chunks);
+            msg(sender, (n > 0 ? TextFormatting.GREEN + "Unclaimed " + n + " chunk(s)."
+                               : TextFormatting.GRAY + "No owned chunks here to unclaim."));
+        }
+
+        // Push the updated ownership + stats to the client so the tactical map reflects it.
+        WarClaimHandler.syncTerritoryToPlayer(player);
+    }
+
+    // ===== /war cp <amount> =====
+
+    private void grantCp(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        if (args.length < 2) { msg(sender, TextFormatting.RED + "Usage: /war cp <amount>"); return; }
+        int amount = parseInt(args[1]);
+
+        WarWorldData data = WarWorldData.get(player.world);
+        if (data == null) { msg(sender, TextFormatting.RED + "No war data for this world."); return; }
+        WarWorldData.FactionStats stats = data.getStats(player.getUniqueID().toString());
+        stats.commandPoints += amount;
+        data.markDirty();
+
+        msg(sender, TextFormatting.GREEN + "Command Points " + (amount >= 0 ? "+" : "") + amount
+                + " (now " + stats.commandPoints + ").");
+        WarClaimHandler.syncTerritoryToPlayer(player);
+    }
+
+    // ===== /war sync =====
+
+    private void syncMap(ICommandSender sender) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        WarClaimHandler.syncTerritoryToPlayer(player);
+        msg(sender, TextFormatting.GREEN + "Pushed territory + stats snapshot to your client.");
+    }
+
+    // ===== help =====
+
+    private void help(ICommandSender sender) {
+        msg(sender, TextFormatting.GOLD + "=== /war ===");
+        for (String line : Arrays.asList(
+                TextFormatting.YELLOW + "/war siege" + TextFormatting.GRAY + " - start the 5-phase siege at your position",
+                TextFormatting.YELLOW + "/war debug" + TextFormatting.GRAY + " - start the debug circle battle",
+                TextFormatting.YELLOW + "/war stop" + TextFormatting.GRAY + " - force-end the active battle",
+                TextFormatting.YELLOW + "/war status" + TextFormatting.GRAY + " - show faction/battle/raid status",
+                TextFormatting.YELLOW + "/war airstrike [1-10]" + TextFormatting.GRAY + " - give yourself an Air Target Designator",
+                TextFormatting.YELLOW + "/war summon <vehicle> [n]" + TextFormatting.GRAY + " - spawn enemy Flan's vehicles",
+                TextFormatting.YELLOW + "/war rival guards [n] [lvl]" + TextFormatting.GRAY + " - spawn rival guards",
+                TextFormatting.YELLOW + "/war rival city [lvl]" + TextFormatting.GRAY + " - seed a rival city here (heavy)",
+                TextFormatting.YELLOW + "/war rival status" + TextFormatting.GRAY + " - nearest rival city info",
+                TextFormatting.YELLOW + "/war claim [radius]" + TextFormatting.GRAY + " - claim chunks (costs CP)",
+                TextFormatting.YELLOW + "/war unclaim [radius]" + TextFormatting.GRAY + " - unclaim your chunks",
+                TextFormatting.YELLOW + "/war cp <amount>" + TextFormatting.GRAY + " - grant Command Points",
+                TextFormatting.YELLOW + "/war sync" + TextFormatting.GRAY + " - refresh the tactical map data")) {
+            sender.sendMessage(new TextComponentString(line));
+        }
+    }
+
+    // ===== helpers =====
+
+    private static void msg(ICommandSender sender, String text) {
+        sender.sendMessage(new TextComponentString(text));
+    }
+
+    private static String posStr(BlockPos p) {
+        return p.getX() + ", " + p.getY() + ", " + p.getZ();
+    }
 }

@@ -68,6 +68,14 @@ public class EntityGhostAircraft extends EntityLiving {
     private int ticksReturning = 0;
     private int strafeCooldown = 0;
 
+    // Helicopter orbit state
+    private double orbitAngle = 0;
+    private double orbitRadius = 40;
+    private int hoverEngageTicks = 0;
+    private int rocketsFired = 0;
+    private int casLoiterTicks = 0;
+    private static final int CAS_LOITER_DURATION = 1200; // 60 seconds
+
     // Flans puppet
     private Entity flansVehiclePuppet = null;
     private boolean puppetSpawned = false;
@@ -79,7 +87,10 @@ public class EntityGhostAircraft extends EntityLiving {
         BOMBING_RUN,
         STRAFING,
         ESCORT,
-        INTERCEPTION
+        INTERCEPTION,
+        HOVER_STRIKE,
+        ORBIT_ATTACK,
+        CAS_LOITER
     }
 
     public EntityGhostAircraft(World worldIn) {
@@ -190,11 +201,11 @@ public class EntityGhostAircraft extends EntityLiving {
                 break;
         }
 
-// Optional override from config (nested type)
-        WarMasterConfig.ConfigData.AircraftStats cfg =
+// Optional override from config
+        WarMasterConfig.AircraftStats cfg =
                 (WarMasterConfig.data != null && WarMasterConfig.data.aircraftSettings != null)
-                        ? WarMasterConfig.data.aircraftSettings.getOrDefault(type, new WarMasterConfig.ConfigData.AircraftStats())
-                        : new WarMasterConfig.ConfigData.AircraftStats();
+                        ? WarMasterConfig.data.aircraftSettings.getOrDefault(type, new WarMasterConfig.AircraftStats())
+                        : new WarMasterConfig.AircraftStats();
 
 // Priority: Config Map > Doctrine defaults > existing dataparam defaults
         int bombs = (cfg.bombsRemaining != 0) ? cfg.bombsRemaining : defaultBombs;
@@ -266,6 +277,82 @@ public class EntityGhostAircraft extends EntityLiving {
         lastMoveDirection = approachVector.normalize();
     }
 
+    /**
+     * Setup a helicopter hover strike mission.
+     * Aircraft approaches target then hovers nearby, engaging with rockets and guns.
+     */
+    public void setHoverStrike(BlockPos target, BlockPos startPos) {
+        setMission(MissionType.HOVER_STRIKE);
+        this.attackTarget = target;
+
+        waypoints.clear();
+        waypoints.add(new Vec3d(startPos.getX(), altitude, startPos.getZ()));
+        waypoints.add(new Vec3d(target.getX(), altitude, target.getZ()));
+
+        currentWaypointIndex = 0;
+        targetPosition = waypoints.get(0);
+        isOnMission = true;
+        hoverEngageTicks = 0;
+        rocketsFired = 0;
+
+        lastMoveDirection = new Vec3d(
+                target.getX() - startPos.getX(), 0, target.getZ() - startPos.getZ()
+        ).normalize();
+
+        EpochRunnerMod.logger.info("[AIR] Hover strike set: " + target);
+    }
+
+    /**
+     * Setup a helicopter orbit attack mission.
+     * Aircraft orbits the target area at specified radius, firing weapons.
+     */
+    public void setOrbitAttack(BlockPos target, BlockPos startPos, double radius) {
+        setMission(MissionType.ORBIT_ATTACK);
+        this.attackTarget = target;
+        this.orbitRadius = radius;
+        this.orbitAngle = 0;
+        this.rocketsFired = 0;
+
+        waypoints.clear();
+        waypoints.add(new Vec3d(startPos.getX(), altitude, startPos.getZ()));
+        waypoints.add(new Vec3d(target.getX() + radius, altitude, target.getZ()));
+
+        currentWaypointIndex = 0;
+        targetPosition = waypoints.get(0);
+        isOnMission = true;
+
+        lastMoveDirection = new Vec3d(
+                target.getX() - startPos.getX(), 0, target.getZ() - startPos.getZ()
+        ).normalize();
+
+        EpochRunnerMod.logger.info("[AIR] Orbit attack set: " + target + " radius=" + radius);
+    }
+
+    /**
+     * Setup a CAS loiter mission.
+     * Aircraft patrols an area for extended duration, engaging targets of opportunity.
+     */
+    public void setCASLoiter(BlockPos target, BlockPos startPos) {
+        setMission(MissionType.CAS_LOITER);
+        this.attackTarget = target;
+        this.casLoiterTicks = 0;
+        this.rocketsFired = 0;
+
+        waypoints.clear();
+        waypoints.add(new Vec3d(startPos.getX(), altitude, startPos.getZ()));
+        waypoints.add(new Vec3d(target.getX(), altitude, target.getZ()));
+
+        currentWaypointIndex = 0;
+        targetPosition = waypoints.get(0);
+        isOnMission = true;
+
+        lastMoveDirection = new Vec3d(
+                target.getX() - startPos.getX(), 0, target.getZ() - startPos.getZ()
+        ).normalize();
+
+        EpochRunnerMod.logger.info("[AIR] CAS loiter set: " + target);
+    }
+
     // ===== UPDATE =====
     @Override
     public void onUpdate() {
@@ -287,6 +374,13 @@ public class EntityGhostAircraft extends EntityLiving {
 
                 handleDespawn();
             }
+
+            // Spawn + drag the REAL Flan plane so airstrikes show an ACTUAL aircraft model. This is the
+            // old, CME-free approach the user described: a normally-spawned Flan entity (Flan renders
+            // it itself) dragged along this ghost's flight path. The ghost itself renders nothing. The
+            // build/sync was fully implemented but never called -- which is why no planes ever appeared.
+            if (!puppetSpawned) spawnFlansPuppet();
+            syncPuppetPosition();
         }
 
         // Always update angles (pure math)
@@ -305,6 +399,15 @@ public class EntityGhostAircraft extends EntityLiving {
                 break;
             case INTERCEPTION:
                 executeInterception();
+                break;
+            case HOVER_STRIKE:
+                executeHoverStrike();
+                break;
+            case ORBIT_ATTACK:
+                executeOrbitAttack();
+                break;
+            case CAS_LOITER:
+                executeCASLoiter();
                 break;
             default:
                 break;
@@ -370,6 +473,175 @@ public class EntityGhostAircraft extends EntityLiving {
                 strafeCooldown = 40;
             }
         }
+    }
+
+    // ===== HELICOPTER MISSIONS =====
+
+    /**
+     * Hover Strike: helicopter holds position near target, fires rockets/guns downward.
+     * Used by ATTACK_HELI (Apache, Cobra, Tiger) with HOVER_STRIKE pattern.
+     */
+    private void executeHoverStrike() {
+        if (attackTarget == null) return;
+
+        double horizDist = getHorizontalDistanceTo(attackTarget);
+
+        // Approach phase: fly toward target until within engage range
+        if (horizDist > 50) {
+            targetPosition = new Vec3d(attackTarget.getX(), altitude, attackTarget.getZ());
+            return;
+        }
+
+        // Hover phase: hold position near target, slight drift
+        hoverEngageTicks++;
+        double hoverX = attackTarget.getX() + Math.sin(hoverEngageTicks * 0.02) * 8;
+        double hoverZ = attackTarget.getZ() + Math.cos(hoverEngageTicks * 0.02) * 8;
+        targetPosition = new Vec3d(hoverX, Math.max(altitude, attackTarget.getY() + 30), hoverZ);
+
+        // Slow down for hover
+        this.speed = Math.max(0.3f, speed * 0.95f);
+
+        // Fire rockets at intervals
+        int maxMissiles = this.dataManager.get(MAX_MISSILES);
+        if (hoverEngageTicks % 30 == 0 && rocketsFired < maxMissiles) {
+            fireRocketAtGround(attackTarget);
+            rocketsFired++;
+        }
+
+        // Strafe between rockets
+        if (strafeCooldown <= 0 && horizDist < 60) {
+            fireStrafe();
+            strafeCooldown = 15;
+        }
+
+        // Disengage after expending ordnance or timeout
+        if (rocketsFired >= maxMissiles || hoverEngageTicks > 600) {
+            setMission(MissionType.FLYOVER);
+            startReturning();
+        }
+    }
+
+    /**
+     * Orbit Attack: helicopter circles target area at radius, firing continuously.
+     * Used by GUNSHIP (Hind) with ORBIT_ATTACK pattern.
+     */
+    private void executeOrbitAttack() {
+        if (attackTarget == null) return;
+
+        double horizDist = getHorizontalDistanceTo(attackTarget);
+
+        // Approach phase
+        if (horizDist > orbitRadius + 30) {
+            targetPosition = new Vec3d(attackTarget.getX(), altitude, attackTarget.getZ());
+            return;
+        }
+
+        // Orbit phase: circle around target
+        orbitAngle += 0.03; // ~3.4 degrees per tick, full orbit ~6 seconds
+        double orbitX = attackTarget.getX() + Math.cos(orbitAngle) * orbitRadius;
+        double orbitZ = attackTarget.getZ() + Math.sin(orbitAngle) * orbitRadius;
+        targetPosition = new Vec3d(orbitX, Math.max(altitude, attackTarget.getY() + 35), orbitZ);
+
+        // Yaw follows movement direction (tangent to orbit), not inward
+        // moveTowardTarget() handles yaw naturally — no override needed
+
+        // Continuous strafing fire toward center
+        if (strafeCooldown <= 0) {
+            fireStrafe();
+            strafeCooldown = 10;
+        }
+
+        // Fire rockets periodically
+        int maxMissiles = this.dataManager.get(MAX_MISSILES);
+        if (ticksOnMission % 40 == 0 && rocketsFired < maxMissiles) {
+            fireRocketAtGround(attackTarget);
+            rocketsFired++;
+        }
+
+        // Drop bombs if available (Hind carries bombs)
+        if (bombsRemaining > 0 && ticksOnMission % 80 == 0) {
+            dropBomb();
+            bombsRemaining--;
+            this.dataManager.set(BOMBS, bombsRemaining);
+        }
+
+        // Disengage after full orbits or ammo depleted
+        if (ticksOnMission > 800 || (rocketsFired >= maxMissiles && bombsRemaining <= 0)) {
+            setMission(MissionType.FLYOVER);
+            startReturning();
+        }
+    }
+
+    /**
+     * CAS Loiter: helicopter patrols an area for extended duration, engaging targets of opportunity.
+     * Used when CAS auto-dispatch sends helicopters to support ground forces.
+     */
+    private void executeCASLoiter() {
+        if (attackTarget == null) return;
+
+        casLoiterTicks++;
+
+        // Figure-8 patrol pattern around target
+        double patrolPhase = casLoiterTicks * 0.015;
+        double patrolX = attackTarget.getX() + Math.sin(patrolPhase) * orbitRadius;
+        double patrolZ = attackTarget.getZ() + Math.sin(patrolPhase * 2) * (orbitRadius * 0.5);
+        targetPosition = new Vec3d(patrolX, Math.max(altitude, attackTarget.getY() + 40), patrolZ);
+
+        // Scan for nearby hostile entities and engage
+        List<Entity> nearbyEntities = world.getEntitiesWithinAABBExcludingEntity(this,
+                getEntityBoundingBox().grow(60));
+
+        Entity closestHostile = null;
+        double closestDist = Double.MAX_VALUE;
+        for (Entity e : nearbyEntities) {
+            if (e instanceof EntityGhostAircraft) {
+                EntityGhostAircraft other = (EntityGhostAircraft) e;
+                if (!other.getMcmTeam().equals(this.getMcmTeam())) {
+                    double d = getDistance(e);
+                    if (d < closestDist) { closestDist = d; closestHostile = e; }
+                }
+            } else if (e instanceof EntityLiving && !(e instanceof net.minecraft.entity.player.EntityPlayer)) {
+                double d = getDistance(e);
+                if (d < closestDist) { closestDist = d; closestHostile = e; }
+            }
+        }
+
+        // Engage closest hostile
+        if (closestHostile != null && closestDist < 50) {
+            if (strafeCooldown <= 0) {
+                fireStrafe();
+                strafeCooldown = 12;
+            }
+            int maxMissiles = this.dataManager.get(MAX_MISSILES);
+            if (closestDist < 30 && rocketsFired < maxMissiles && casLoiterTicks % 60 == 0) {
+                fireRocketAtGround(new BlockPos(closestHostile));
+                rocketsFired++;
+            }
+        }
+
+        // Depart after loiter duration expires
+        if (casLoiterTicks >= CAS_LOITER_DURATION) {
+            setMission(MissionType.FLYOVER);
+            startReturning();
+        }
+    }
+
+    /**
+     * Fire a rocket/missile at a ground position. Smaller explosion than bombs.
+     */
+    private void fireRocketAtGround(BlockPos target) {
+        if (world.isRemote) return;
+
+        BlockPos groundPos = world.getTopSolidOrLiquidBlock(target);
+        float accuracy = this.dataManager.get(ACCURACY);
+        double offsetX = (rand.nextDouble() - 0.5) * 6.0 * accuracy;
+        double offsetZ = (rand.nextDouble() - 0.5) * 6.0 * accuracy;
+
+        world.newExplosion(this,
+                groundPos.getX() + 0.5 + offsetX,
+                groundPos.getY(),
+                groundPos.getZ() + 0.5 + offsetZ,
+                2.5f, true, true);
     }
 
     // ===== WEAPONS =====
@@ -594,65 +866,67 @@ public class EntityGhostAircraft extends EntityLiving {
     public boolean canBeCollidedWith() { return true; }
 
     private void handleDespawn() {
-        if (!isReturning) return;
-
-        ticksReturning++;
-
         // Snapshot player list to avoid CME if it changes during iteration
         List<Entity> players = new ArrayList<>(world.playerEntities);
 
-        if (players.isEmpty()) {
-            if (ticksReturning > 100) setDead();
+        // Hard timeout: any aircraft alive too long gets killed regardless of state
+        if (ticksOnMission > 3000) {
+            setDead();
             return;
         }
 
+        // If no players in world, despawn quickly
+        if (players.isEmpty()) {
+            if (ticksOnMission > 100) setDead();
+            return;
+        }
+
+        // Find nearest player
         double nearestPlayer = Double.MAX_VALUE;
         for (Entity e : players) {
             if (e == null || e.isDead) continue;
             nearestPlayer = Math.min(nearestPlayer, getDistance(e));
         }
-        if (nearestPlayer > 200) setDead();
-        if (ticksReturning > 600) setDead();
+
+        // Far from all players — despawn immediately (avoids floating in unloaded chunks)
+        if (nearestPlayer > 180) {
+            setDead();
+            return;
+        }
+
+        // Returning aircraft: shorter timeout
+        if (isReturning) {
+            ticksReturning++;
+            if (ticksReturning > 400) setDead();
+            if (nearestPlayer > 120) setDead();
+        }
     }
 
     // ===== FLANS PUPPET =====
 
     private void spawnFlansPuppet() {
-        if (world.isRemote) return;
-
-        String aircraftType = getAircraftType();
-
-        try {
-            String typeName = aircraftType;
-            if (typeName.contains(":")) {
-                typeName = typeName.substring(typeName.indexOf(":") + 1);
-            }
-
-            ResourceLocation vehicleRL = new ResourceLocation("flansmod", "plane");
-            Entity vehicle = EntityList.createEntityByIDFromName(vehicleRL, world);
-
-            if (vehicle != null) {
-                vehicle.setPosition(posX, posY, posZ);
-                vehicle.rotationYaw = rotationYaw;
-                vehicle.rotationPitch = rotationPitch;
-
-                NBTTagCompound vehicleNBT = new NBTTagCompound();
-                vehicleNBT.setString("Type", typeName);
-                vehicle.readFromNBT(vehicleNBT);
-
-                vehicle.noClip = true;
-                vehicle.setNoGravity(true);
-
-                world.spawnEntity(vehicle);
-                flansVehiclePuppet = vehicle;
-
-                EpochRunnerMod.logger.info("[GHOST-AIR] Spawned Flans puppet: " + typeName);
-            }
-        } catch (Exception e) {
-            EpochRunnerMod.logger.debug("[GHOST-AIR] Could not spawn Flans puppet: " + e.getMessage());
-        }
-
+        // DISABLED -- spawning a live Flan EntityPlane CRASHES the server. A real Flan plane (and the
+        // seat + wheel entities its constructor auto-spawns) runs Flan's full flight physics every
+        // tick, which NPEs without a real player pilot (EntityPlane.onUpdate -> "Ticking entity"
+        // crash). noClip/noGravity/position-dragging does NOT bypass that tick. Airstrike aircraft are
+        // therefore drawn by the entity RENDERER and no live driveable is ever constructed. Kept as a
+        // no-op so the onUpdate call site stays valid and flansVehiclePuppet stays null.
         puppetSpawned = true;
+    }
+
+    /** Resolve a Flan PlaneType from a ShortName, with the same fallbacks RenderGhostAircraft uses. */
+    private com.flansmod.common.driveables.PlaneType resolvePlaneType(String shortName) {
+        try {
+            com.flansmod.common.driveables.PlaneType t =
+                    com.flansmod.common.driveables.PlaneType.getPlane(shortName);
+            if (t != null) return t;
+        } catch (Throwable ignored) {}
+        try {
+            for (com.flansmod.common.driveables.PlaneType t : com.flansmod.common.driveables.PlaneType.types) {
+                if (t != null && t.shortName != null && t.shortName.equalsIgnoreCase(shortName)) return t;
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     private void syncPuppetPosition() {
@@ -680,12 +954,36 @@ public class EntityGhostAircraft extends EntityLiving {
     }
 
     @Override
-    @Override
     public void setDead() {
         super.setDead();
+        // Take the dragged Flan plane (and its seats) with us so airstrikes don't leave wrecks behind.
+        if (flansVehiclePuppet != null && !flansVehiclePuppet.isDead) {
+            try { flansVehiclePuppet.setDead(); } catch (Throwable ignored) {}
+        }
+        flansVehiclePuppet = null;
     }
 
     public Entity getFlansPuppet() {
         return flansVehiclePuppet;
+    }
+
+    /**
+     * Sets the player this aircraft should focus on (for orbit/deploy anchoring).
+     */
+    public void setTargetPlayer(net.minecraft.entity.player.EntityPlayer player) {
+        // Used by AirStrikeController for orbit/deploy anchoring
+        if (player != null) {
+            this.setAttackTarget(player);
+        }
+    }
+
+    /**
+     * Apply a strike profile from WarAirstrikeHelper to this aircraft.
+     */
+    public void applyStrikeProfile(WarAirstrikeHelper.StrikeProfile profile, net.minecraft.util.math.BlockPos target) {
+        if (profile == null) return;
+        this.altitude = (float) profile.altitude;
+        this.speed = Math.max(0.4f, (float) profile.speed);
+        this.setMission(profile.mission);
     }
 }

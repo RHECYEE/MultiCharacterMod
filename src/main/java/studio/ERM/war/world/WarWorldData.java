@@ -1,4 +1,4 @@
-package studio.ERM.war;
+package studio.ERM.war.world;
 
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
@@ -72,6 +72,7 @@ public class WarWorldData extends WorldSavedData {
 
         public boolean hasNuclearMilestone = false;
         public float ambushExposure = 0.0f;
+        public boolean exposureWarned = false; // one-shot guard so the "you've been seen" line fires once per ramp, not every tick
         public BlockPos lastAmbushPos;
         public long ambushCooldown = 0;
 
@@ -227,6 +228,20 @@ public class WarWorldData extends WorldSavedData {
         markDirty();
     }
 
+    /** Decode a repair order's original block state: registry-name+meta (stable), or legacy state-id. */
+    private static IBlockState readRepairState(NBTTagCompound tag) {
+        try {
+            if (tag.hasKey("block")) {
+                Block b = Block.getBlockFromName(tag.getString("block"));
+                if (b == null) return null;
+                return b.getStateFromMeta(tag.getInteger("meta"));
+            }
+            return Block.getStateById(tag.getInteger("state")); // legacy numeric-id saves
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     @Override
     public void readFromNBT(NBTTagCompound nbt) {
         NBTTagList territoryList = nbt.getTagList("Territory", Constants.NBT.TAG_COMPOUND);
@@ -255,12 +270,18 @@ public class WarWorldData extends WorldSavedData {
         }
 
         NBTTagList repairList = nbt.getTagList("Repairs", Constants.NBT.TAG_COMPOUND);
+        int repairDropped = 0;
         for (int i = 0; i < repairList.tagCount(); i++) {
             NBTTagCompound tag = repairList.getCompoundTagAt(i);
             BlockPos pos = new BlockPos(tag.getInteger("x"), tag.getInteger("y"), tag.getInteger("z"));
-            IBlockState state = Block.getStateById(tag.getInteger("state"));
+            IBlockState state = readRepairState(tag);
+            // Drop unresolved / AIR originals instead of storing a junk order that can never repair.
+            if (state == null || state.getBlock() == net.minecraft.init.Blocks.AIR) { repairDropped++; continue; }
             repairMap.put(pos, new RepairOrder(pos, state, tag.getLong("time")));
         }
+        // Decisive diagnostic for the save/exit scaffold bug: did the repair record survive the reload?
+        studio.ERM.EpochRunnerMod.logger.info("[ERM-Repair] readFromNBT: loaded " + repairMap.size()
+                + " repair order(s)" + (repairDropped > 0 ? " (" + repairDropped + " unresolved/air dropped)" : ""));
 
         NBTTagList sabotageList = nbt.getTagList("Sabotage", Constants.NBT.TAG_COMPOUND);
         for (int i = 0; i < sabotageList.tagCount(); i++) {
@@ -320,15 +341,30 @@ public class WarWorldData extends WorldSavedData {
 
         NBTTagList repairList = new NBTTagList();
         for (RepairOrder order : repairMap.values()) {
+            if (order == null || order.originalState == null) continue;
             NBTTagCompound tag = new NBTTagCompound();
             tag.setInteger("x", order.pos.getX());
             tag.setInteger("y", order.pos.getY());
             tag.setInteger("z", order.pos.getZ());
-            tag.setInteger("state", Block.getStateId(order.originalState));
+            // Persist the original block by REGISTRY NAME + meta, not the numeric state id. Numeric
+            // block ids are remapped when the modpack changes, so a saved id can resolve to the WRONG
+            // block (or AIR) after a save/exit -- the root of "scaffolds stop repairing across a
+            // reload". Registry names are stable forever.
+            net.minecraft.util.ResourceLocation rn = order.originalState.getBlock().getRegistryName();
+            if (rn != null) {
+                tag.setString("block", rn.toString());
+                tag.setInteger("meta", order.originalState.getBlock().getMetaFromState(order.originalState));
+            } else {
+                tag.setInteger("state", Block.getStateId(order.originalState)); // last-resort fallback
+            }
             tag.setLong("time", order.timestamp);
             repairList.appendTag(tag);
         }
         nbt.setTag("Repairs", repairList);
+        if (!repairMap.isEmpty()) {
+            studio.ERM.EpochRunnerMod.logger.info("[ERM-Repair] writeToNBT: saved " + repairList.tagCount()
+                    + " repair order(s)");
+        }
 
         NBTTagList sabotageList = new NBTTagList();
         for (Map.Entry<BlockPos, SabotageEntry> entry : sabotagedBlocks.entrySet()) {

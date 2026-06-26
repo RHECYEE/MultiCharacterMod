@@ -8,8 +8,8 @@ import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import studio.ERM.EpochRunnerMod;
-import studio.ERM.war.faction.ProceduralBuildingGenerator;
-import studio.ERM.war.faction.RivalFactionStats;
+import studio.ERM.war.rival.ProceduralBuildingGenerator;
+import studio.ERM.war.rival.RivalFactionStats;
 
 import java.util.*;
 

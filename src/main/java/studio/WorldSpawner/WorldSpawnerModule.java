@@ -18,7 +18,9 @@ public final class WorldSpawnerModule {
     private WorldSpawnerModule() {
     }
 
-    @SubscribeEvent
+    // Invoked from EpochRunnerMod.serverLoad (@Mod.EventHandler). FMLServerStartingEvent is an
+    // FML lifecycle event, NOT a Forge EVENT_BUS event, so this must NOT be @SubscribeEvent
+    // (the @Mod.EventBusSubscriber above would otherwise crash mod loading on registration).
     public static void onServerStarting(FMLServerStartingEvent event) {
         WorldSpawnerConfig.getInstance().loadFromDisk();
         event.registerServerCommand(new CommandWorldSpawner());

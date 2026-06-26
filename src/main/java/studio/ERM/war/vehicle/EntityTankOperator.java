@@ -1,4 +1,4 @@
-package co.runed.multicharacter.vehicle;
+package studio.ERM.war.vehicle;
 
 import com.flansmod.common.FlansMod;
 import com.flansmod.common.RotatedAxes;

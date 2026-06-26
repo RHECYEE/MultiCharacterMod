@@ -1,7 +1,7 @@
-package co.runed.multicharacter.vehicle;
+package studio.ERM.war.vehicle;
 
 import co.runed.multicharacter.MultiCharacterMod;
-import co.runed.multicharacter.compat.ItemBase;
+import studio.ERM.war.items.ItemBase;
 
 public class ItemTankOperator extends ItemBase {
     public ItemTankOperator() {

@@ -202,7 +202,7 @@ public class GuiBattleDeployMenu {
 
     private void deployBattle(String directorId) {
         // Send packet to server
-        TacticalWarMapNetwork.NET.sendToServer(new PacketDeployBattle(directorId, worldX, worldZ));
+        TacticalWarMapNetwork.sendToServer(new PacketDeployBattle(directorId, worldX, worldZ));
     }
 
     /**

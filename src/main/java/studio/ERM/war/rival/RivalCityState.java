@@ -3,8 +3,8 @@ package studio.ERM.war.rival;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
 import net.minecraft.util.math.BlockPos;
-import studio.ERM.war.faction.RivalExpansionManager;
-import studio.ERM.war.faction.RivalFactionStats;
+import studio.ERM.war.rival.RivalExpansionManager;
+import studio.ERM.war.rival.RivalFactionStats;
 
 import java.util.*;
 

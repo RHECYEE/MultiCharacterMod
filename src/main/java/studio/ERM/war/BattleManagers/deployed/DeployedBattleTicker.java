@@ -4,6 +4,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
+import studio.ERM.war.BattleManagers.core.BattleEngine;
 import studio.ERM.war.BattleManagers.directors.BattleDirectorEntry;
 import studio.ERM.war.BattleManagers.directors.BattleDirectorRegistry;
 import studio.ERM.war.map.net.TacticalWarMapNetwork;
@@ -36,6 +37,15 @@ public final class DeployedBattleTicker {
         try {
             for (World world : net.minecraftforge.common.DimensionManager.getWorlds()) {
                 if (world == null || world.isRemote) continue;
+
+                // Authoritative battle engine tick: the ONE server-side path that drives active
+                // directors every tick, independent of any spawned anchor entity. The old
+                // EntityBattleDirectorAnchor path stalled battles whenever its chunk unloaded.
+                BattleEngine engine = BattleEngine.get(world);
+                if (engine != null) {
+                    engine.tick();
+                }
+
                 DeployedBattleManager manager = DeployedBattleManager.get(world);
                 if (manager != null) {
                     manager.tick(world);
@@ -114,6 +124,6 @@ public final class DeployedBattleTicker {
             dataList.add(data);
         }
 
-        TacticalWarMapNetwork.NET.sendTo(new PacketDeployedBattlesSync(dataList), player);
+        TacticalWarMapNetwork.sendTo(new PacketDeployedBattlesSync(dataList), player);
     }
 }

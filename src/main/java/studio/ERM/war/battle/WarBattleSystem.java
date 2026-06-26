@@ -8,6 +8,7 @@ import studio.ERM.EpochRunnerMod;
 import studio.ERM.war.BattleManagers.cards.UnitCardRegistry;
 import studio.ERM.war.BattleManagers.core.BattleEngine;
 import studio.ERM.war.rival.RivalFactionStats;
+// RivalFactionStats now correctly in studio.ERM.war.rival package
 
 import java.util.Collection;
 import java.util.Collections;
@@ -122,12 +123,9 @@ public final class WarBattleSystem {
     public static void tickBattles(World world, long worldTick) {
         if (world == null || world.isRemote) return;
 
-        // BattleManagers anchor ticks the engine, but this call remains safe and ensures progress
-        // if other tick paths ever change.
-        BattleEngine.get(world).tick();
-
+        // Engine ticking is owned by DeployedBattleTicker (one authoritative path).
+        // Here we only reconcile the active-battle marker with engine state.
         if (CURRENT != null) {
-            // If engine ended, clear active battle marker.
             if (!BattleEngine.get(world).hasActiveBattle()) {
                 CURRENT.site.state = SiteState.RESOLVED;
                 CURRENT = null;

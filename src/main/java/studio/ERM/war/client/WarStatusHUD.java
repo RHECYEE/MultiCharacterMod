@@ -12,7 +12,7 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import studio.ERM.EpochRunnerMod;
-import studio.ERM.war.WarTensionManager;
+import studio.ERM.handlers.WarTensionManager;
 import studio.ERM.war.world.WarWorldData;
 import studio.ERM.war.rival.RivalCityManager;
 import studio.ERM.war.air.AirStrikeController;

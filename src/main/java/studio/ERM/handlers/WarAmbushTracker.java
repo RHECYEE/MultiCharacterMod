@@ -26,12 +26,23 @@ public class WarAmbushTracker {
         String playerID = player.getUniqueID().toString();
         WarWorldData.FactionStats stats = data.getStats(playerID);
 
-        // Logic: Exposure only builds in enemy territory
-        if (!currentOwner.equals("NEUTRAL") && !currentOwner.equals(playerID)) {
+        // Exposure must build ONLY in genuinely hostile territory.
+        // A chunk counts as the player's own (safe) when it is NEUTRAL, matches the
+        // player's UUID, OR is stored under the legacy literal "PLAYER" token. Some
+        // claim paths / older saves persist player-owned chunks as "PLAYER" rather than
+        // the raw UUID (see WarWorldData.normalizeOwnerString), so the old check —
+        // which only recognised the UUID — treated the player's OWN claimed land as
+        // enemy and endlessly spammed the "you've been seen" narrator line.
+        boolean ownedByPlayer = currentOwner.equals(playerID) || currentOwner.equalsIgnoreCase("PLAYER");
+        boolean safeTerritory = currentOwner.equals("NEUTRAL") || ownedByPlayer;
+
+        if (!safeTerritory) {
             updateExposure(player, stats, data);
         } else {
-            // Decay exposure in safe territory
+            // Decay exposure in safe territory and re-arm the one-shot warning once
+            // we've cooled down enough, so a future genuine incursion can warn again.
             stats.ambushExposure = Math.max(0, stats.ambushExposure - 0.5f);
+            if (stats.ambushExposure < 40.0f) stats.exposureWarned = false;
         }
     }
 
@@ -47,8 +58,10 @@ public class WarAmbushTracker {
         stats.ambushExposure += (float)(Math.sqrt(dist) * multiplier * 0.05f);
         stats.lastAmbushPos = player.getPosition();
 
-        // Narrator warnings
-        if (stats.ambushExposure >= 60.0f && stats.ambushExposure < 65.0f) {
+        // Narrator warning — fire ONCE per exposure ramp, not every tick while exposure
+        // sits in a band (the old [60,65) check re-sent the line every 2 seconds = spam).
+        if (stats.ambushExposure >= 60.0f && !stats.exposureWarned) {
+            stats.exposureWarned = true;
             WarNarratorManager.sendNarratorMessage(player, "You’ve been visible for a while.", "That has a cost.");
         }
 
@@ -60,6 +73,7 @@ public class WarAmbushTracker {
 
     private void triggerAmbush(EntityPlayer player, WarWorldData.FactionStats stats, WarWorldData data) {
         stats.ambushExposure = 0;
+        stats.exposureWarned = false; // reset one-shot warning for the next ramp
         stats.ambushCooldown = player.world.getTotalWorldTime() + 12000; // 10 minute cooldown
 
         WarNarratorManager.sendNarratorMessage(player, "Contact.", "You were expected.");

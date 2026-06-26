@@ -27,6 +27,14 @@ public class AirStrikeController {
     private static final List<AirOperation> activeOperations = new CopyOnWriteArrayList<>();
     private static final Random rand = new Random();
 
+    // CAS tracking (Phase 3)
+    private static final java.util.Map<BlockPos, Long> casCooldowns = new java.util.HashMap<>();
+    private static final long CAS_COOLDOWN_TICKS = 600; // 30 seconds between CAS dispatches per site
+
+    // Surge tracking (Phase 4)
+    private static final java.util.Map<BlockPos, Long> surgeCooldowns = new java.util.HashMap<>();
+    private static final long SURGE_COOLDOWN_TICKS = 2400; // 2 minutes between surges per site
+
     /**
      * Used by HUD / status overlays.
      */
@@ -45,6 +53,28 @@ public class AirStrikeController {
         if (s.isEmpty()) return "flansmod:bf109";
         if (s.contains(":")) return s.toLowerCase(Locale.ROOT);
         return ("flansmod:" + s).toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Level-appropriate fallback pool of REAL Flan's plane ShortNames, used when the air
+     * package config carries no explicit aircraftTypes list (which is the default).
+     *
+     * Every entry is verified against the installed content packs (WW2 + Modern Warfare).
+     * Made-up/legacy names with NO matching ShortName -- "apache" (it is ApacheAH64), "tiger"
+     * (it is EC665), "huey", "biplane" -- are deliberately excluded, because an unknown
+     * ShortName makes the client fall back to an invisible placeholder box.
+     */
+    private static String[] defaultAircraftPool(int level) {
+        if (level <= 2) {
+            return new String[] { "Camel", "Fokker" };
+        } else if (level <= 4) {
+            return new String[] { "BF109", "Spitfire", "Mustang", "yak9", "zero" };
+        } else if (level <= 6) {
+            return new String[] { "Mustang", "Lancaster", "A10", "SU25" };
+        } else if (level <= 8) {
+            return new String[] { "A10", "SU25", "tornado", "cobra", "hind" };
+        }
+        return new String[] { "tornado", "f22", "B52", "ApacheAH64", "hind" };
     }
 
     // ============================================================
@@ -142,6 +172,119 @@ public class AirStrikeController {
     }
 
     // ============================================================
+    // PHASE 3: CAS AUTO-DISPATCH
+    // ============================================================
+
+    /**
+     * Request CAS (Close Air Support) at a battle site.
+     * Dispatches a CAS aircraft to loiter over the area, engaging ground targets.
+     * Respects a per-site cooldown to prevent spam.
+     *
+     * @param team "PLAYER" for friendly CAS, "RIVAL" for hostile
+     * @param level war level (1-10), affects aircraft quality
+     * @return true if CAS was dispatched
+     */
+    public static boolean requestCAS(World world, BlockPos target, String team, int level) {
+        if (world == null || world.isRemote) return false;
+        level = Math.max(1, Math.min(10, level));
+
+        // Check cooldown
+        long worldTime = world.getTotalWorldTime();
+        Long lastCAS = casCooldowns.get(target);
+        if (lastCAS != null && (worldTime - lastCAS) < CAS_COOLDOWN_TICKS) {
+            return false;
+        }
+
+        // Pick a CAS-capable aircraft based on level.
+        // These MUST be real Flan's ShortNames or the client renders a placeholder box.
+        // Verified against the installed Modern Warfare pack: ApacheAH64 (NOT "apache"),
+        // hind, cobra, a10, su25, LittleBird. "apache"/"huey" do not exist as ShortNames.
+        String aircraftType;
+        if (level >= 8) {
+            aircraftType = rand.nextBoolean() ? "flansmod:ApacheAH64" : "flansmod:hind";
+        } else if (level >= 5) {
+            String[] casAircraft = {"flansmod:a10", "flansmod:su25", "flansmod:cobra"};
+            aircraftType = casAircraft[rand.nextInt(casAircraft.length)];
+        } else {
+            String[] lightCas = {"flansmod:LittleBird", "flansmod:cobra"};
+            aircraftType = lightCas[rand.nextInt(lightCas.length)];
+        }
+
+        // Launch as CAS loiter mission
+        boolean result = launchAirStrike(world, team, target, level, null, aircraftType);
+        if (result) {
+            casCooldowns.put(target, worldTime);
+            EpochRunnerMod.logger.info("[AIR] CAS dispatched to " + target + " team=" + team + " level=" + level);
+        }
+        return result;
+    }
+
+    /**
+     * Convenience: request friendly CAS for player defense.
+     */
+    public static boolean requestFriendlyCAS(World world, EntityPlayer player, BlockPos target, int level) {
+        return requestCAS(world, target, "PLAYER", level);
+    }
+
+    /**
+     * Convenience: request hostile CAS (enemy air support during siege/raid).
+     */
+    public static boolean requestHostileCAS(World world, BlockPos target, int level) {
+        return requestCAS(world, target, "RIVAL", level);
+    }
+
+    // ============================================================
+    // PHASE 4: SURGE AIRSTRIKES
+    // ============================================================
+
+    /**
+     * Launch a surge airstrike: multiple waves of aircraft in quick succession.
+     * Triggered during critical battle moments (siege Phase 3 breach, etc).
+     *
+     * @param waveCount number of waves to launch (staggered by ~15 seconds each)
+     * @return true if at least one wave was launched
+     */
+    public static boolean launchSurgeAirStrike(World world, BlockPos target, String team, int level, int waveCount) {
+        if (world == null || world.isRemote) return false;
+        level = Math.max(1, Math.min(10, level));
+        waveCount = Math.max(1, Math.min(5, waveCount));
+
+        // Check surge cooldown
+        long worldTime = world.getTotalWorldTime();
+        Long lastSurge = surgeCooldowns.get(target);
+        if (lastSurge != null && (worldTime - lastSurge) < SURGE_COOLDOWN_TICKS) {
+            return false;
+        }
+
+        boolean anyLaunched = false;
+
+        // First wave launches immediately
+        if (launchAirStrike(world, team, target, level, null, (String) null)) {
+            anyLaunched = true;
+        }
+
+        // Schedule subsequent waves as delayed operations
+        if (waveCount > 1) {
+            SurgeWaveOperation surge = new SurgeWaveOperation(target, team, level, waveCount - 1, worldTime);
+            activeOperations.add(surge);
+        }
+
+        if (anyLaunched) {
+            surgeCooldowns.put(target, worldTime);
+            EpochRunnerMod.logger.info("[AIR] SURGE AIRSTRIKE launched at " + target
+                    + " team=" + team + " level=" + level + " waves=" + waveCount);
+        }
+        return anyLaunched;
+    }
+
+    /**
+     * Convenience: hostile surge (used by SiegeDirector Phase 3).
+     */
+    public static boolean launchHostileSurge(World world, BlockPos target, int level, int waveCount) {
+        return launchSurgeAirStrike(world, target, "RIVAL", level, waveCount);
+    }
+
+    // ============================================================
     // TICK
     // ============================================================
 
@@ -218,6 +361,16 @@ public class AirStrikeController {
                 target.getZ() - Math.sin(angle) * approachDist
         );
 
+        // Aircraft type pool. config.aircraftTypes is currently ALWAYS empty (the JSON
+        // AirPackageLevel carries no type list), which made the old code do
+        // rand.nextInt(0) and throw -- aborting the entire strike before anything spawned.
+        // Fall back to a level-appropriate pool of REAL Flan's ShortNames so the strike both
+        // spawns and renders an actual plane model.
+        String[] typePool = (config.aircraftTypes != null && config.aircraftTypes.length > 0)
+                ? config.aircraftTypes
+                : defaultAircraftPool(level);
+        if (typePool.length == 0) typePool = new String[] { "bf109" };
+
         // If a specific aircraftType is requested, force a single aircraft and no escorts.
         int aircraftCount = (forcedAircraftType != null) ? 1 : config.aircraftCount;
         int escortCount = (forcedAircraftType != null) ? 0 : config.escortCount;
@@ -228,7 +381,7 @@ public class AirStrikeController {
             if (forcedAircraftType != null) {
                 aircraftType = forcedAircraftType;
             } else {
-                aircraftType = normalizeFlansVehicleId(config.aircraftTypes[rand.nextInt(config.aircraftTypes.length)]);
+                aircraftType = normalizeFlansVehicleId(typePool[rand.nextInt(typePool.length)]);
             }
 
             EntityGhostAircraft aircraft = new EntityGhostAircraft(world, aircraftType, team);
@@ -262,6 +415,18 @@ public class AirStrikeController {
                     aircraft.setStrafingRun(target, new Vec3d(-Math.cos(angle), 0, -Math.sin(angle)));
                     break;
 
+                case HOVER_STRIKE:
+                    aircraft.setHoverStrike(target, startPos);
+                    break;
+
+                case ORBIT_ATTACK:
+                    aircraft.setOrbitAttack(target, startPos, 40 + rand.nextInt(20));
+                    break;
+
+                case CAS_LOITER:
+                    aircraft.setCASLoiter(target, startPos);
+                    break;
+
                 case INTERCEPTION:
                 case FLYOVER:
                 default:
@@ -278,7 +443,7 @@ public class AirStrikeController {
 
         // Escorts
         for (int i = 0; i < escortCount; i++) {
-            String escortType = normalizeFlansVehicleId(config.aircraftTypes[0]);
+            String escortType = normalizeFlansVehicleId(typePool[0]);
             EntityGhostAircraft escort = new EntityGhostAircraft(world, escortType, team);
 
             if (focusPlayer != null) {
@@ -319,6 +484,46 @@ public class AirStrikeController {
             op.aircraft.add(aircraft);
         } catch (Throwable t) {
             EpochRunnerMod.logger.warn("[AIR] Failed to spawn ghost aircraft: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Surge wave operation: spawns additional strike waves at timed intervals.
+     * Each wave is a full launchAirStrike call, staggered by WAVE_DELAY ticks.
+     */
+    private static class SurgeWaveOperation extends AirOperation {
+        private static final int WAVE_DELAY = 300; // 15 seconds between waves
+        private final String team;
+        private final int level;
+        private int wavesRemaining;
+        private long lastWaveTick;
+
+        SurgeWaveOperation(BlockPos target, String team, int level, int wavesRemaining, long startTick) {
+            super("surge_" + System.currentTimeMillis(), team, level, target);
+            this.team = team;
+            this.level = level;
+            this.wavesRemaining = wavesRemaining;
+            this.lastWaveTick = startTick;
+            this.startTick = startTick;
+        }
+
+        @Override
+        void tick(WorldServer world) {
+            super.tick(world);
+            if (wavesRemaining <= 0) return;
+
+            long worldTime = world.getTotalWorldTime();
+            if ((worldTime - lastWaveTick) >= WAVE_DELAY) {
+                launchAirStrike(world, team, target, level, null, (String) null);
+                lastWaveTick = worldTime;
+                wavesRemaining--;
+                EpochRunnerMod.logger.info("[AIR] Surge wave launched, " + wavesRemaining + " remaining");
+            }
+        }
+
+        @Override
+        boolean isFinished(WorldServer world) {
+            return wavesRemaining <= 0 && super.isFinished(world);
         }
     }
 

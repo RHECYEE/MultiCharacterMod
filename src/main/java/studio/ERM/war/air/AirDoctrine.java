@@ -116,6 +116,11 @@ public class AirDoctrine {
                 "flansmod:lancaster", AircraftRole.BOMBER, AttackPattern.CARPET_BOMB,
                 110, 150, 0.95f, 0, 0, 1, false, false, true, 4, "WW2", 7
         ));
+        // Modern heavy bomber (Modern Warfare pack ShortName "B52").
+        PROFILES.put("flansmod:b52", new AircraftProfile(
+                "flansmod:b52", AircraftRole.BOMBER, AttackPattern.CARPET_BOMB,
+                130, 175, 1.0f, 0, 0, 1, false, false, true, 5, "MODERN", 9
+        ));
 
         // === Modern ===
         PROFILES.put("flansmod:a10", new AircraftProfile(
@@ -154,6 +159,12 @@ public class AirDoctrine {
         ));
         PROFILES.put("flansmod:tiger", new AircraftProfile(
                 "flansmod:tiger", AircraftRole.ATTACK_HELI, AttackPattern.HOVER_STRIKE,
+                25, 60, 0.55f, 5, 28, 999, true, true, false, 2, "MODERN", 8
+        ));
+        // Modern Warfare's Tiger attack helicopter actually has ShortName "EC665"
+        // (the file is Tiger.txt but ShortName=EC665), so "tiger" alone never resolves.
+        PROFILES.put("flansmod:ec665", new AircraftProfile(
+                "flansmod:ec665", AircraftRole.ATTACK_HELI, AttackPattern.HOVER_STRIKE,
                 25, 60, 0.55f, 5, 28, 999, true, true, false, 2, "MODERN", 8
         ));
 
