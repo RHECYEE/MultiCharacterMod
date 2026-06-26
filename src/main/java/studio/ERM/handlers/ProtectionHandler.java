@@ -167,6 +167,21 @@ public class ProtectionHandler extends WorldSavedData {
         }
     }
 
+    /**
+     * All protector-stick-protected positions inside one chunk. Used by the strategic heat map: blocks
+     * the player explicitly protected are the strongest "this is valuable" signal for base mapping.
+     */
+    public static java.util.Set<BlockPos> protectedPositionsInChunk(World world, int cx, int cz) {
+        java.util.Set<BlockPos> out = new java.util.HashSet<>();
+        if (world == null) return out;
+        try {
+            for (BlockPos p : get(world).protectedStates.keySet()) {
+                if ((p.getX() >> 4) == cx && (p.getZ() >> 4) == cz) out.add(p);
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
     public static void toggleProtection(EntityPlayer player, BlockPos pos) {
         ProtectionHandler instance = get(player.world);
         BlockPos immutablePos = pos.toImmutable();

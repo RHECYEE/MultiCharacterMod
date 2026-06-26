@@ -71,7 +71,7 @@ public class CommandWar extends CommandBase {
         if (args.length == 1) {
             return getListOfStringsMatchingLastWord(args,
                     "siege", "debug", "stop", "status", "airstrike",
-                    "summon", "rival", "claim", "unclaim", "cp", "sync", "repair");
+                    "summon", "rival", "claim", "unclaim", "cp", "sync", "repair", "heat");
         }
         if (args.length == 2 && "rival".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, "guards", "city", "status");
@@ -101,6 +101,7 @@ public class CommandWar extends CommandBase {
             case "cp":      grantCp(sender, args);     break;
             case "sync":    syncMap(sender);           break;
             case "repair":  repair(sender, args);      break;
+            case "heat":    heat(sender, args);        break;
             default:
                 msg(sender, TextFormatting.RED + "Unknown subcommand: " + sub);
                 help(sender);
@@ -173,6 +174,54 @@ public class CommandWar extends CommandBase {
         msg(sender, TextFormatting.GREEN + "Repaired " + restored + " block(s)"
                 + (radius > 0 ? " within " + radius + " blocks" : "")
                 + (skipped > 0 ? TextFormatting.GRAY + " (" + skipped + " left out of range)" : "") + ".");
+    }
+
+    /**
+     * /war heat [radiusChunks] — strategic heat-map prototype (the siege "brain" foundation). Scans
+     * chunks around you, scores their tile entities + protector-stick blocks, classifies each chunk,
+     * then reports the hottest base CLUSTER and its CORE (the real objective — often the storage /
+     * machine room, not your bed). This is what the Siege Director will use to choose WHERE to strike.
+     */
+    private void heat(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        int radius = 4;
+        if (args.length >= 2) {
+            try { radius = Math.max(1, Math.min(12, Integer.parseInt(args[1]))); } catch (NumberFormatException ignored) {}
+        }
+        int cx = player.getPosition().getX() >> 4;
+        int cz = player.getPosition().getZ() >> 4;
+
+        studio.ERM.war.strategy.WarHeatMap map = studio.ERM.war.strategy.WarHeatMap.get(world);
+        java.util.List<studio.ERM.war.strategy.StrategicChunk> scanned = map.scanArea(world, cx, cz, radius);
+
+        studio.ERM.war.strategy.StrategicChunk hottest = map.hottest();
+        if (hottest == null || hottest.totalHeat() < 30) {
+            msg(sender, TextFormatting.YELLOW + "Scanned " + scanned.size() + " chunks (r=" + radius
+                    + "); no base detected nearby.");
+            return;
+        }
+        java.util.List<studio.ERM.war.strategy.StrategicChunk> cluster = map.cluster(hottest, 30.0);
+        studio.ERM.war.strategy.StrategicChunk core = map.coreOf(cluster);
+
+        double clusterHeat = 0;
+        for (studio.ERM.war.strategy.StrategicChunk c : cluster) clusterHeat += c.totalHeat();
+
+        msg(sender, TextFormatting.GOLD + "=== Strategic Heat (r=" + radius + ", " + scanned.size() + " chunks scanned) ===");
+        msg(sender, TextFormatting.GRAY + "Base cluster: " + TextFormatting.WHITE + cluster.size()
+                + " chunks, total heat " + (int) clusterHeat);
+        if (core != null) {
+            msg(sender, TextFormatting.GREEN + "CORE @ chunk [" + core.chunkX + ", " + core.chunkZ + "] = "
+                    + TextFormatting.WHITE + core.classification + " (heat " + (int) core.totalHeat() + ")");
+        }
+        cluster.sort((a, b) -> Double.compare(b.totalHeat(), a.totalHeat()));
+        int shown = 0;
+        for (studio.ERM.war.strategy.StrategicChunk c : cluster) {
+            if (shown++ >= 8) break;
+            msg(sender, TextFormatting.GRAY + " " + c.toString());
+        }
     }
 
     private void startDebug(ICommandSender sender) throws CommandException {
