@@ -88,6 +88,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // Direction from the base out to the assault front (the side the army comes from).
     private double frontBearing = 0.0;
 
+    // The ONE breach corridor for this siege, chosen at Deployment. ALL bombardment converges here
+    // until there is a real ground-level gap, and the engineers then exploit exactly this spot. A
+    // siege has a single objective: open this corridor (not swiss-cheese the whole wall).
+    private BlockPos breachCorridor = null;
+
     // Temporary siege-camp ground/decor. Every block the camp build changes is recorded here with
     // its ORIGINAL state, exactly like the repair system stores claimed chunks, so the whole camp
     // (flattened staging pad, tents, catapult frames) is restored verbatim when the siege ends --
@@ -197,6 +202,22 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 spawnLineCarrier(world, lateral, ENCIRCLE_RING + 16.0, pickStagingCard());
             }
         }
+
+        // Commit to ONE breach corridor now; everything bombards it and the engineers exploit it.
+        chooseBreachCorridor(world);
+    }
+
+    /** Pick the single wall section this whole siege will breach (a real wall near the defender). */
+    private void chooseBreachCorridor(World world) {
+        BlockPos defender = activator != null ? activator.getPosition() : site;
+        BlockPos wall = findWallTargetNear(world, defender);
+        if (wall != null) {
+            breachCorridor = new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ());
+        } else {
+            // Open ground / no wall: aim the breach at the near edge of the base on the assault bearing.
+            breachCorridor = frontPoint(world, 10.0, 0.0);
+        }
+        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor);
     }
 
     // ════════════════════════════════════════════════════════════
@@ -252,28 +273,55 @@ public class SiegeDirector implements IPhasedBattleDirector {
         engineersComplete = false;
         EpochRunnerMod.logger.info("[Siege] -> ENGINEER PUSH: breach jobs (warLevel=" + warLevel + ")");
 
-        BlockPos defender = activator != null ? activator.getPosition() : site;
+        if (breachCorridor == null) chooseBreachCorridor(world);
+
+        // Spread the engineers across adjacent sections of the SAME corridor (along the wall face).
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang);
+
         int engineerCount = (warLevel <= 3) ? 1 : (warLevel <= 6) ? 2 : 3;
         double emid = (engineerCount - 1) / 2.0;
         for (int i = 0; i < engineerCount; i++) {
-            double lateral = (i - emid) * 18.0;
-            BlockPos start = frontPoint(world, WALL_RING + 8.0, lateral);
-            // Designate a REAL entry point: scan the defender's actual fortifications and breach THOSE
-            // (stored at ground level so the engineer can path to the wall base). Open ground with no
-            // wall falls back to the ring, so engineers still raise a forward assault ramp.
-            BlockPos wall = findWallTargetNear(world, defender);
-            BlockPos breachPoint = (wall != null)
-                    ? new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ())
-                    : frontPoint(world, WALL_RING, lateral);
+            double off = (i - emid) * 3.0;
+            int bx = (int) Math.round(breachCorridor.getX() + px * off);
+            int bz = (int) Math.round(breachCorridor.getZ() + pz * off);
+            BlockPos breachPoint = new BlockPos(bx, surfaceY(world, bx, bz), bz);
+            BlockPos start = outsidePoint(world, breachPoint, 8.0);
             EntityFormationCarrier eng = spawnCarrierAt(world, start, getCard("SiegeUnit"), true);
             if (eng != null) {
-                engineerTasks.add(new EngineerTask(eng, lateral, breachPoint));
-                eng.setMoveTarget(breachPoint, 0.06 + warLevel * 0.003);
+                engineerTasks.add(new EngineerTask(eng, off, breachPoint));
+                eng.setMoveTarget(breachPoint, 0.07 + warLevel * 0.004);
             }
+        }
+
+        // Shield-wall escort: infantry stand BETWEEN the workers and the defender, soaking pressure so
+        // the engineers can do their job. They hold this line (no chase) -- the protection, not the punch.
+        int shields = (warLevel <= 3) ? 1 : 2;
+        double smid = (shields - 1) / 2.0;
+        for (int i = 0; i < shields; i++) {
+            double off = (i - smid) * 8.0;
+            int sx = (int) Math.round(breachCorridor.getX() + px * off);
+            int sz = (int) Math.round(breachCorridor.getZ() + pz * off);
+            BlockPos guardAt = outsidePoint(world, new BlockPos(sx, surfaceY(world, sx, sz), sz), 3.0);
+            EntityFormationCarrier shield = spawnCarrierAt(world, guardAt, getCard("ShieldWall"), true);
+            if (shield != null) shield.setBattleContext(activator, guardAt);
         }
     }
 
-    /** Drive each engineer to the wall and execute a breach job scaled to tech level. */
+    /** A point {@code dist} blocks OUTSIDE the wall from {@code wall} (away from the base core). */
+    private BlockPos outsidePoint(World world, BlockPos wall, double dist) {
+        double ang = Math.atan2(wall.getZ() - site.getZ(), wall.getX() - site.getX());
+        int x = (int) Math.round(wall.getX() + Math.cos(ang) * dist);
+        int z = (int) Math.round(wall.getZ() + Math.sin(ang) * dist);
+        return new BlockPos(x, surfaceY(world, x, z), z);
+    }
+
+    /**
+     * Engineers are CONSTRUCTION CREWS, not combat mobs. At the corridor they VISIBLY work: rapidly
+     * place a ladder column to scale the wall, fast-mine a tunnel straight through (~130% iron-pick),
+     * and at high tech plant a real TNT charge at ground level then RETREAT before it blows. The
+     * shield-wall escort (spawned in beginEngineerPush) soaks the pressure so they can keep working.
+     */
     private void tickEngineers(World world) {
         boolean allComplete = !engineerTasks.isEmpty();
 
@@ -282,45 +330,74 @@ public class SiegeDirector implements IPhasedBattleDirector {
             if (t.done || eng == null || eng.isDead) continue;
             allComplete = false;
 
+            // Just planted a charge: pull the workers back, let it cook, then resume.
+            if (tickAge < t.retreatUntil) {
+                eng.setMoveTarget(outsidePoint(world, t.breachPoint, 12.0), 0.11 + warLevel * 0.004);
+                continue;
+            }
+
             double d = eng.getDistance(t.breachPoint.getX(), t.breachPoint.getY(), t.breachPoint.getZ());
             if (d > ARRIVE_DIST) {
-                eng.setMoveTarget(t.breachPoint, 0.06 + warLevel * 0.003); // re-issue (nav is one-shot)
+                eng.setMoveTarget(t.breachPoint, 0.07 + warLevel * 0.004); // re-issue (nav is one-shot)
                 continue;
             }
 
             t.workTicks++;
 
-            // 1) Assault ramp — real cobblestone steps up the ACTUAL wall, EVERY level.
-            if (t.stepsBuilt < RAMP_STEPS && t.workTicks % RAMP_TICKS_PER_STEP == 0) {
-                buildRampStep(world, t, t.stepsBuilt);
+            // LADDER team — a climbable ladder column up the wall, every level.
+            if (t.workTicks % 4 == 0 && t.stepsBuilt < RAMP_STEPS + RAMP_CREST) {
+                placeLadderRung(world, t, t.stepsBuilt);
                 t.stepsBuilt++;
             }
 
-            // 2) Mining / tunnelling THROUGH the wall inward — mid tech and up.
-            if (warLevel >= 5 && t.workTicks % 6 == 0) {
-                mineTunnel(world, t, t.workTicks / 6);
+            // MINING team — fast tunnel straight through toward the core (mid tech and up).
+            if (warLevel >= 5 && t.workTicks % 3 == 0) {
+                mineTunnel(world, t, t.workTicks / 3);
             }
 
-            // 3) Explosive breach — high tech. Terrain-only blast (manual removal + effect): it opens
-            //    the wall but CANNOT damage the attackers' own formations.
-            boolean rampDone = t.stepsBuilt >= RAMP_STEPS;
-            if (warLevel >= 8 && !t.breached && rampDone
-                    && t.workTicks >= RAMP_STEPS * RAMP_TICKS_PER_STEP + BREACH_WINDUP) {
-                // A real, generous breach -- wide enough to actually pour an army through.
-                breachWall(world, t.breachPoint, 5);
-                explosionEffect(world, t.breachPoint);
-                t.breached = true;
+            // SAPPER team — plant a real ground-level TNT charge, then retreat from the blast (high tech).
+            if (warLevel >= 8 && t.workTicks % 60 == 30) {
+                plantSapperCharge(world, t.breachPoint);
+                t.retreatUntil = tickAge + 36;
             }
 
-            // Done when the breach method for this tech level has completed. On completion, clear AND
-            // FLOOR a wide corridor from the breach inward so the assault flows straight through.
-            if (rampDone && (warLevel < 8 || t.breached)) {
+            // Finished after a solid work window (the bombardment also opens the corridor). Floor a
+            // clean corridor inward so the assault pours straight through.
+            if (t.workTicks >= 140) {
                 t.done = true;
                 levelBreachPath(world, t);
             }
         }
 
         engineersComplete = allComplete;
+    }
+
+    /** One ladder rung up the outer face of the wall at the corridor (reverts when the siege ends). */
+    private void placeLadderRung(World world, EngineerTask t, int step) {
+        try {
+            net.minecraft.util.EnumFacing outward = net.minecraft.util.EnumFacing.getFacingFromVector(
+                    t.breachPoint.getX() - site.getX(), 0, t.breachPoint.getZ() - site.getZ());
+            BlockPos col = t.breachPoint.offset(outward); // one block out from the wall face
+            int gY = surfaceY(world, col.getX(), col.getZ());
+            BlockPos p = new BlockPos(col.getX(), gY + step, col.getZ());
+            BlockPos support = p.offset(outward.getOpposite()); // the wall the ladder clings to
+            if (world.isAirBlock(p) && world.getBlockState(support).getMaterial().isSolid()) {
+                setCampBlock(world, p, Blocks.LADDER.getDefaultState()
+                        .withProperty(net.minecraft.block.BlockLadder.FACING, outward));
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /** Plant a real primed-TNT sapper charge at ground level + guarantee the gap with openGroundBreach. */
+    private void plantSapperCharge(World world, BlockPos at) {
+        try {
+            net.minecraft.entity.item.EntityTNTPrimed tnt = new net.minecraft.entity.item.EntityTNTPrimed(
+                    world, at.getX() + 0.5, at.getY() + 0.5, at.getZ() + 0.5, null);
+            tnt.setFuse(30);
+            world.spawnEntity(tnt);
+            world.playSound(null, at, SoundEvents.ENTITY_CREEPER_PRIMED, SoundCategory.HOSTILE, 1.2F, 0.8F);
+        } catch (Throwable ignored) {}
+        openGroundBreach(world, at);
     }
 
     // ════════════════════════════════════════════════════════════
@@ -474,8 +551,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
         while (it.hasNext()) {
             CatapultShot s = it.next();
             if (tickAge >= s.impactTick) {
-                breachWall(world, s.target, 2);
-                scatterRubble(world, s.target);
+                boolean corridorHit = breachCorridor != null
+                        && Math.abs(s.target.getX() - breachCorridor.getX()) <= 4
+                        && Math.abs(s.target.getZ() - breachCorridor.getZ()) <= 4;
+                if (corridorHit) {
+                    openGroundBreach(world, s.target); // carve the wall down to ground at the corridor
+                } else {
+                    breachWall(world, s.target, 2); // stray / player rounds: just a crater
+                    scatterRubble(world, s.target);
+                }
                 explosionEffect(world, s.target);
                 if (s.block != null && !s.block.isDead) s.block.setDead();
                 it.remove();
@@ -495,19 +579,17 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // fire near the base when there is no wall to find. This is the siege softening the fortress,
         // not sniping the champion.
         BlockPos defender = activator != null ? activator.getPosition() : site;
+        if (breachCorridor == null) chooseBreachCorridor(world);
         BlockPos target;
         int roll = world.rand.nextInt(100);
         if (roll < 5) {
             target = defender; // the occasional terrifying near-miss on the player
         } else {
-            BlockPos wall = findWallTargetNear(world, defender);
-            if (wall != null) {
-                target = wall;
-            } else {
-                int tx = site.getX() + world.rand.nextInt(21) - 10;
-                int tz = site.getZ() + world.rand.nextInt(21) - 10;
-                target = new BlockPos(tx, surfaceY(world, tx, tz), tz);
-            }
+            // Converge on the ONE breach corridor with a tight cluster, so the gap actually opens
+            // instead of pockmarking the whole wall.
+            int sx = breachCorridor.getX() + world.rand.nextInt(5) - 2;
+            int sz = breachCorridor.getZ() + world.rand.nextInt(5) - 2;
+            target = new BlockPos(sx, surfaceY(world, sx, sz), sz);
         }
 
         // Launch from ABOVE the timber frame, nudged toward the target, so the projectile clears the
@@ -546,15 +628,37 @@ public class SiegeDirector implements IPhasedBattleDirector {
         } catch (Throwable ignored) {}
     }
 
-    /** Scatter a few cobblestone "rubble" blocks on the surface around an impact. */
+    /** Scatter a few cobblestone "rubble" blocks on the surface around an impact. Routed through
+     *  setCampBlock so the rubble is RECORDED and reverts when the siege ends -- otherwise /war repair
+     *  left this cobblestone scattered all over the battlefield permanently. */
     private void scatterRubble(World world, BlockPos center) {
         for (int n = 0; n < 6; n++) {
             int rx = center.getX() + world.rand.nextInt(9) - 4;
             int rz = center.getZ() + world.rand.nextInt(9) - 4;
             BlockPos p = new BlockPos(rx, surfaceY(world, rx, rz), rz);
             try {
-                if (world.isAirBlock(p)) world.setBlockState(p, Blocks.COBBLESTONE.getDefaultState(), 2);
+                if (world.isAirBlock(p)) setCampBlock(world, p, Blocks.COBBLESTONE.getDefaultState());
             } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * Carve the wall at the breach corridor from the surface DOWN to the defender's ground level,
+     * across a 5-wide front (along the wall face). Repeated catapult hits here open a REAL walk-through
+     * gap instead of pockmarking the wall. Antigrief-aware via damageBlock (claimed walls become
+     * repairable scaffold, rival/neutral walls clear to air).
+     */
+    private void openGroundBreach(World world, BlockPos at) {
+        int floorY = site.getY();
+        double ang = Math.atan2(at.getZ() - site.getZ(), at.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang); // perpendicular = along the wall (corridor width)
+        for (int w = -2; w <= 2; w++) {
+            int x = (int) Math.round(at.getX() + px * w);
+            int z = (int) Math.round(at.getZ() + pz * w);
+            int top = surfaceY(world, x, z);
+            for (int y = floorY; y <= top + 2; y++) {
+                damageBlock(world, new BlockPos(x, y, z));
+            }
         }
     }
 
@@ -1170,6 +1274,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int stepsBuilt = 0;
         boolean breached = false;
         boolean done = false;
+        int retreatUntil = 0; // tickAge before which the crew pulls back from a planted charge
 
         EngineerTask(EntityFormationCarrier carrier, double lateral, BlockPos breachPoint) {
             this.carrier = carrier;
