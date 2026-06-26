@@ -173,32 +173,41 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
         if (world.isRemote) return;
 
-        // STRATEGIC TARGETING. The siege MUST lock onto the actual fortress, not wherever the player
-        // happened to stand -- otherwise the whole army forms up in an empty field and digs a pointless
-        // hole (exactly what kept happening). PRIMARY: a structural scan that finds the real castle by
-        // its building blocks (cobblestone / stone brick / planks / walls / ...). This works on a stone
-        // castle that the tile-entity heat map reads as COLD. FALLBACK: the heat-map core (storage /
-        // machine concentration). LAST RESORT: the trigger point.
+        // STRATEGIC TARGETING. The siege MUST lock onto the actual castle, not wherever the player
+        // happened to stand when they triggered it -- otherwise the whole army forms up in an empty
+        // field and digs a pointless hole. Search order, strongest signal first:
+        //   1. PROTECTED BLOCKS -- the blocks the defender marked with the protection stick. Stored
+        //      globally, so this finds the castle at ANY range (the heat scan only saw a 96-block radius
+        //      of LOADED chunks, which is why a castle triggered from a distance was missed).
+        //   2. STRUCTURE scan -- man-made building blocks, for a base that wasn't protect-sticked.
+        //   3. HEAT core -- tile-entity (chest/machine) concentration.
+        //   4. the trigger point.
         try {
-            BlockPos fortress = findFortressCenter(world, site, 90);
-            if (fortress != null) {
-                this.site = fortress;
-                EpochRunnerMod.logger.info("[Siege] FORTRESS structure found -> siege aimed at " + site);
+            BlockPos protectedCore = findProtectedCore(world, site, 256);
+            if (protectedCore != null) {
+                this.site = protectedCore;
+                EpochRunnerMod.logger.info("[Siege] PROTECTED-block castle found -> siege aimed at " + site);
             } else {
-                WarHeatMap map = WarHeatMap.get(world);
-                map.scanArea(world, site.getX() >> 4, site.getZ() >> 4, 6);
-                StrategicChunk hot = map.hottest();
-                if (hot != null && hot.totalHeat() >= 60) {
-                    baseCluster = map.cluster(hot, 30.0);
-                    baseCore = map.coreOf(baseCluster);
-                    if (baseCore != null) {
-                        int coreX = (baseCore.chunkX << 4) + 8, coreZ = (baseCore.chunkZ << 4) + 8;
-                        this.site = new BlockPos(coreX, surfaceY(world, coreX, coreZ), coreZ);
-                        EpochRunnerMod.logger.info("[Siege] no structure; heat core @ chunk [" + baseCore.chunkX
-                                + "," + baseCore.chunkZ + "] -- siege re-aimed at the core");
-                    }
+                BlockPos fortress = findFortressCenter(world, site, 120);
+                if (fortress != null) {
+                    this.site = fortress;
+                    EpochRunnerMod.logger.info("[Siege] FORTRESS structure found -> siege aimed at " + site);
                 } else {
-                    EpochRunnerMod.logger.info("[Siege] no fortress / heat found -> besieging trigger point " + site);
+                    WarHeatMap map = WarHeatMap.get(world);
+                    map.scanArea(world, site.getX() >> 4, site.getZ() >> 4, 8);
+                    StrategicChunk hot = map.hottest();
+                    if (hot != null && hot.totalHeat() >= 60) {
+                        baseCluster = map.cluster(hot, 30.0);
+                        baseCore = map.coreOf(baseCluster);
+                        if (baseCore != null) {
+                            int coreX = (baseCore.chunkX << 4) + 8, coreZ = (baseCore.chunkZ << 4) + 8;
+                            this.site = new BlockPos(coreX, surfaceY(world, coreX, coreZ), coreZ);
+                            EpochRunnerMod.logger.info("[Siege] heat core @ chunk [" + baseCore.chunkX
+                                    + "," + baseCore.chunkZ + "] -- siege re-aimed at the core");
+                        }
+                    } else {
+                        EpochRunnerMod.logger.info("[Siege] no castle signal found -> besieging trigger point " + site);
+                    }
                 }
             }
         } catch (Throwable t) {
@@ -1230,11 +1239,37 @@ public class SiegeDirector implements IPhasedBattleDirector {
     }
 
     /**
+     * Find the defender's castle from the blocks THEY protected with the protection stick -- the
+     * strongest, most authoritative "this is my base" signal there is. Protected positions are stored
+     * globally (no chunk-load / scan-radius limit), so this finds the castle even when the siege is
+     * triggered from far away. Seeds on the protected block nearest the trigger, then returns the
+     * centroid of that local cluster (the castle the player is at). Null if too few protected blocks.
+     */
+    private BlockPos findProtectedCore(World world, BlockPos around, int radius) {
+        java.util.List<BlockPos> pts =
+                studio.ERM.handlers.ProtectionHandler.protectedPositionsNear(world, around, radius);
+        if (pts.size() < 8) return null;
+        BlockPos seed = null; long best = Long.MAX_VALUE;
+        for (BlockPos p : pts) {
+            long dx = p.getX() - around.getX(), dz = p.getZ() - around.getZ();
+            long d = dx * dx + dz * dz;
+            if (d < best) { best = d; seed = p; }
+        }
+        long sx = 0, sz = 0; int n = 0; final long clusterR2 = 80L * 80L;
+        for (BlockPos p : pts) {
+            long dx = p.getX() - seed.getX(), dz = p.getZ() - seed.getZ();
+            if (dx * dx + dz * dz <= clusterR2) { sx += p.getX(); sz += p.getZ(); n++; }
+        }
+        if (n < 6) return null;
+        int cx = (int) (sx / n), cz = (int) (sz / n);
+        return new BlockPos(cx, surfaceY(world, cx, cz), cz);
+    }
+
+    /**
      * Find the besieged FORTRESS by its STRUCTURE. Grid-scan around the trigger point counting man-made
      * building blocks per column (above the natural surface), and return the build-weighted centroid --
-     * the castle. This is what makes the siege actually attack a stone castle the tile-entity heat map
-     * can't see (the reason the army kept forming up in an empty field). Returns null if no real
-     * structure is nearby, so the caller can fall back to heat / the trigger point.
+     * the castle. Backstop for when the defender did not protect-stick their walls. Returns null if no
+     * real structure is nearby, so the caller can fall back to heat / the trigger point.
      */
     private BlockPos findFortressCenter(World world, BlockPos around, int radius) {
         long sumX = 0, sumZ = 0, weight = 0;

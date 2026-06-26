@@ -222,6 +222,25 @@ public class ProtectionHandler extends WorldSavedData {
         return out;
     }
 
+    /**
+     * All protector-stick-protected positions within {@code radius} blocks (horizontally) of a point.
+     * These are stored GLOBALLY (not per-loaded-chunk), so unlike a heat scan this works at ANY range
+     * from the player and on unloaded chunks -- exactly what the siege needs to find the defender's
+     * castle when the battle is triggered from a distance.
+     */
+    public static java.util.List<BlockPos> protectedPositionsNear(World world, BlockPos center, int radius) {
+        java.util.List<BlockPos> out = new java.util.ArrayList<>();
+        if (world == null || center == null) return out;
+        try {
+            long r2 = (long) radius * radius;
+            for (BlockPos p : get(world).protectedStates.keySet()) {
+                long dx = p.getX() - center.getX(), dz = p.getZ() - center.getZ();
+                if (dx * dx + dz * dz <= r2) out.add(p);
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
     public static void toggleProtection(EntityPlayer player, BlockPos pos) {
         ProtectionHandler instance = get(player.world);
         BlockPos immutablePos = pos.toImmutable();
