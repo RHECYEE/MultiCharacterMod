@@ -173,26 +173,36 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
         if (world.isRemote) return;
 
-        // STRATEGIC TARGETING: scan the surroundings with the heat map and aim the WHOLE siege at the
-        // defender's real base CORE (their storage/machine/living concentration) instead of wherever
-        // they happened to be standing. This is the director conducting a siege against the base.
+        // STRATEGIC TARGETING. The siege MUST lock onto the actual fortress, not wherever the player
+        // happened to stand -- otherwise the whole army forms up in an empty field and digs a pointless
+        // hole (exactly what kept happening). PRIMARY: a structural scan that finds the real castle by
+        // its building blocks (cobblestone / stone brick / planks / walls / ...). This works on a stone
+        // castle that the tile-entity heat map reads as COLD. FALLBACK: the heat-map core (storage /
+        // machine concentration). LAST RESORT: the trigger point.
         try {
-            WarHeatMap map = WarHeatMap.get(world);
-            map.scanArea(world, site.getX() >> 4, site.getZ() >> 4, 6);
-            StrategicChunk hot = map.hottest();
-            if (hot != null && hot.totalHeat() >= 60) {
-                baseCluster = map.cluster(hot, 30.0);
-                baseCore = map.coreOf(baseCluster);
-                if (baseCore != null) {
-                    int coreX = (baseCore.chunkX << 4) + 8, coreZ = (baseCore.chunkZ << 4) + 8;
-                    this.site = new BlockPos(coreX, surfaceY(world, coreX, coreZ), coreZ);
-                    EpochRunnerMod.logger.info("[Siege] base core @ chunk [" + baseCore.chunkX + ","
-                            + baseCore.chunkZ + "] " + baseCore.classification + " (cluster=" + baseCluster.size()
-                            + " chunks) -- siege re-aimed at the core");
+            BlockPos fortress = findFortressCenter(world, site, 90);
+            if (fortress != null) {
+                this.site = fortress;
+                EpochRunnerMod.logger.info("[Siege] FORTRESS structure found -> siege aimed at " + site);
+            } else {
+                WarHeatMap map = WarHeatMap.get(world);
+                map.scanArea(world, site.getX() >> 4, site.getZ() >> 4, 6);
+                StrategicChunk hot = map.hottest();
+                if (hot != null && hot.totalHeat() >= 60) {
+                    baseCluster = map.cluster(hot, 30.0);
+                    baseCore = map.coreOf(baseCluster);
+                    if (baseCore != null) {
+                        int coreX = (baseCore.chunkX << 4) + 8, coreZ = (baseCore.chunkZ << 4) + 8;
+                        this.site = new BlockPos(coreX, surfaceY(world, coreX, coreZ), coreZ);
+                        EpochRunnerMod.logger.info("[Siege] no structure; heat core @ chunk [" + baseCore.chunkX
+                                + "," + baseCore.chunkZ + "] -- siege re-aimed at the core");
+                    }
+                } else {
+                    EpochRunnerMod.logger.info("[Siege] no fortress / heat found -> besieging trigger point " + site);
                 }
             }
         } catch (Throwable t) {
-            EpochRunnerMod.logger.warn("[Siege] heat-map targeting failed: " + t);
+            EpochRunnerMod.logger.warn("[Siege] targeting failed: " + t);
         }
 
         // Pick the bearing that stages the army on the MOST land (don't form up on open ocean).
@@ -291,7 +301,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
             int x = (int) Math.round(from.getX() + ux * s);
             int z = (int) Math.round(from.getZ() + uz * s);
             int surf = surfaceY(world, x, z);
-            if (surf - prevSurf >= 3) {                 // the wall face: breach at its OUTSIDE foot
+            // A wall = either a sharp surface jump OR a man-made block at body height (a castle wall the
+            // same height as its approach reads as man-made, not as a jump). Breach at the OUTSIDE foot.
+            boolean built = false;
+            try {
+                built = isManMade(world.getBlockState(new BlockPos(x, prevSurf + 1, z)))
+                     || isManMade(world.getBlockState(new BlockPos(x, prevSurf + 2, z)));
+            } catch (Throwable ignored) {}
+            if (surf - prevSurf >= 3 || built) {
                 return new BlockPos(x, prevSurf, z);
             }
             prevSurf = surf;
@@ -870,13 +887,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
             CatapultShot s = it.next();
             if (tickAge >= s.impactTick) {
                 boolean corridorHit = breachCorridor != null
-                        && Math.abs(s.target.getX() - breachCorridor.getX()) <= 4
-                        && Math.abs(s.target.getZ() - breachCorridor.getZ()) <= 4;
-                if (corridorHit) {
+                        && Math.abs(s.target.getX() - breachCorridor.getX()) <= 5
+                        && Math.abs(s.target.getZ() - breachCorridor.getZ()) <= 5;
+                // Only carve terrain where there is an ACTUAL wall/structure. Hitting open ground used to
+                // dig pointless craters in the field (the "catapult is digging holes" report) -- now a
+                // round that lands on open grass just makes a visual blast, no excavation.
+                if (corridorHit && hasStructureAt(world, s.target)) {
                     openGroundBreach(world, s.target); // carve the wall down to ground at the corridor
-                } else {
-                    breachWall(world, s.target, 2); // stray / player rounds: just a crater
-                    scatterRubble(world, s.target);
+                } else if (hasStructureAt(world, s.target)) {
+                    breachWall(world, s.target, 2);    // a stray round that still hit a wall: crater it
                 }
                 explosionEffect(world, s.target);
                 if (s.block != null && !s.block.isDead) s.block.setDead();
@@ -921,37 +940,43 @@ public class SiegeDirector implements IPhasedBattleDirector {
         double launchY = from.getY() + 5.0;
 
         // EntityFallingBlock physics per tick: motionY -= 0.04 (gravity, BEFORE move), then move, then
-        // motion *= 0.98 (drag, AFTER move). The OLD calc used plain d/flight and ignored the 0.98 drag,
-        // so the round only travelled ~66% of the distance -- THAT is why the catapult always shot short.
-        // Compensate exactly: horizontal distance over T ticks = v * (1 - d^T)/(1 - d), so invert it.
-        final int flight = 45;
+        // motion *= 0.98 (drag, AFTER move). We solve the drag+gravity recurrence in closed form so the
+        // round lands EXACTLY on the target after `flight` ticks. A long flight time gives a tall, slow,
+        // dramatic ~60-block arc (the "fling it way up" the player wanted) -- not a wimpy flat toss --
+        // while staying accurate. Every round is TRACKED and killed at impact, so none litter cobblestone.
+        final int flight = 85;
         final double gAcc = 0.04;  // gravity per tick (subtracted before move)
         final double drag = 0.98;  // motion multiplier per tick (after move)
         final double dragFactor = (1.0 - Math.pow(drag, flight)) / (1.0 - drag); // effective ticks with drag
         final double mStar = -drag * gAcc / (1.0 - drag); // vertical motion fixed point under gravity+drag
-        double vx = ((target.getX() + 0.5) - launchX) / dragFactor;
-        double vz = ((target.getZ() + 0.5) - launchZ) / dragFactor;
-        // Vertical closed form for the same drag+gravity recurrence (lands on target.y after `flight`).
-        double vy = mStar + (((target.getY() + 0.5) - launchY) - flight * (mStar - gAcc)) / dragFactor;
 
-        try {
-            // EntityFallingBlock setDead()s itself on its FIRST tick unless the block at its spawn
-            // position IS the falling block (sand/gravel spawn from an existing block). That's why the
-            // cobblestone vanished the instant it left the catapult. Place the cobblestone at the
-            // launch block for that one tick; the falling block clears it and arcs away properly.
-            BlockPos launchBlock = new BlockPos(launchX, launchY, launchZ);
-            if (world.isAirBlock(launchBlock)) {
-                world.setBlockState(launchBlock, Blocks.COBBLESTONE.getDefaultState(), 2);
-            }
-            EntityFallingBlock fb = new EntityFallingBlock(world, launchX, launchY, launchZ,
-                    Blocks.COBBLESTONE.getDefaultState());
-            fb.motionX = vx;
-            fb.motionY = vy;
-            fb.motionZ = vz;
-            world.spawnEntity(fb);
-            catapultShots.add(new CatapultShot(fb, target, tickAge + flight));
-            world.playSound(null, from, SoundEvents.ENTITY_GENERIC_EXPLODE, SoundCategory.HOSTILE, 1.6F, 1.5F);
-        } catch (Throwable ignored) {}
+        // A converging CLUSTER of boulders per shot for spectacle (each lands in a tight pattern on the
+        // breach). Count scales with war level. The big launch report sells the heave.
+        int boulders = Math.max(2, Math.min(5, 2 + warLevel / 3));
+        world.playSound(null, from, SoundEvents.ENTITY_GENERIC_EXPLODE, SoundCategory.HOSTILE, 2.4F, 0.7F);
+        for (int b = 0; b < boulders; b++) {
+            int tx = target.getX() + (b == 0 ? 0 : world.rand.nextInt(5) - 2);
+            int tz = target.getZ() + (b == 0 ? 0 : world.rand.nextInt(5) - 2);
+            int ty = target.getY();
+            double vx = ((tx + 0.5) - launchX) / dragFactor;
+            double vz = ((tz + 0.5) - launchZ) / dragFactor;
+            double vy = mStar + (((ty + 0.5) - launchY) - flight * (mStar - gAcc)) / dragFactor;
+            try {
+                // EntityFallingBlock setDead()s on its FIRST tick unless the block at its spawn position
+                // IS the falling block. Place the block at the launch position for that one tick.
+                double lx = launchX + (b == 0 ? 0 : (world.rand.nextDouble() - 0.5) * 1.5);
+                double lz = launchZ + (b == 0 ? 0 : (world.rand.nextDouble() - 0.5) * 1.5);
+                BlockPos launchBlock = new BlockPos(lx, launchY, lz);
+                if (world.isAirBlock(launchBlock)) {
+                    world.setBlockState(launchBlock, Blocks.COBBLESTONE.getDefaultState(), 2);
+                }
+                EntityFallingBlock fb = new EntityFallingBlock(world, lx, launchY, lz,
+                        Blocks.COBBLESTONE.getDefaultState());
+                fb.motionX = vx; fb.motionY = vy; fb.motionZ = vz;
+                world.spawnEntity(fb);
+                catapultShots.add(new CatapultShot(fb, new BlockPos(tx, ty, tz), tickAge + flight));
+            } catch (Throwable ignored) {}
+        }
     }
 
     /** Scatter a few cobblestone "rubble" blocks on the surface around an impact. Routed through
@@ -1205,6 +1230,67 @@ public class SiegeDirector implements IPhasedBattleDirector {
     }
 
     /**
+     * Find the besieged FORTRESS by its STRUCTURE. Grid-scan around the trigger point counting man-made
+     * building blocks per column (above the natural surface), and return the build-weighted centroid --
+     * the castle. This is what makes the siege actually attack a stone castle the tile-entity heat map
+     * can't see (the reason the army kept forming up in an empty field). Returns null if no real
+     * structure is nearby, so the caller can fall back to heat / the trigger point.
+     */
+    private BlockPos findFortressCenter(World world, BlockPos around, int radius) {
+        long sumX = 0, sumZ = 0, weight = 0;
+        final int step = 3;
+        for (int dx = -radius; dx <= radius; dx += step) {
+            for (int dz = -radius; dz <= radius; dz += step) {
+                int x = around.getX() + dx, z = around.getZ() + dz;
+                int surf = surfaceY(world, x, z);
+                int built = 0;
+                for (int y = surf - 3; y <= surf + 22; y++) {
+                    try {
+                        if (isManMade(world.getBlockState(new BlockPos(x, y, z)))) built++;
+                    } catch (Throwable ignored) {}
+                }
+                if (built >= 3) { // this column is part of a wall/building, not natural ground
+                    sumX += (long) x * built; sumZ += (long) z * built; weight += built;
+                }
+            }
+        }
+        if (weight < 24) return null; // not enough structure to call it a fortress
+        int cx = (int) (sumX / weight), cz = (int) (sumZ / weight);
+        return new BlockPos(cx, surfaceY(world, cx, cz), cz);
+    }
+
+    /** True for common player-built fortress materials (not natural terrain). Used for target + breach. */
+    private boolean isManMade(IBlockState st) {
+        try {
+            net.minecraft.block.Block b = st.getBlock();
+            if (b == Blocks.AIR) return false;
+            net.minecraft.util.ResourceLocation rn = b.getRegistryName();
+            if (rn == null) return false;
+            String n = rn.getPath();
+            return n.contains("cobblestone") || n.contains("stonebrick") || n.contains("stone_brick")
+                || n.contains("brick") || n.contains("planks") || n.contains("log") || n.contains("_wall")
+                || n.contains("fence") || n.contains("_stairs") || n.contains("_slab") || n.contains("glass")
+                || n.contains("concrete") || n.contains("nether_brick") || n.contains("quartz")
+                || n.contains("sandstone") || n.contains("obsidian") || n.contains("iron_bars")
+                || n.contains("_door") || n.contains("polished") || n.contains("chiseled")
+                || n.contains("pillar") || n.contains("terracotta") || n.contains("prismarine");
+        } catch (Throwable t) { return false; }
+    }
+
+    /** True if there is an actual wall/structure at an impact point worth carving (vs open ground). */
+    private boolean hasStructureAt(World world, BlockPos at) {
+        try {
+            for (int dx = -1; dx <= 1; dx++)
+                for (int dz = -1; dz <= 1; dz++)
+                    for (int dy = 0; dy <= 4; dy++) {
+                        if (isManMade(world.getBlockState(new BlockPos(at.getX() + dx, at.getY() + dy, at.getZ() + dz))))
+                            return true;
+                    }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /**
      * Choose the assault bearing that stages the camp on the MOST solid land, so the army does not
      * form up out on open ocean. Scans 16 bearings and scores each by how much of its camp zone is dry.
      */
@@ -1245,12 +1331,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
             // Protector-stick blocks are indestructible -- never damage or scaffold them.
             if (studio.ERM.handlers.ProtectionHandler.isProtected(world, pos)) return;
             IBlockState st = world.getBlockState(pos);
+            // ALREADY a scaffold (a prior hit recorded the real original): leave it. Re-recording would
+            // save the SCAFFOLD as the "original", so /war repair restored an invisible block -- exactly
+            // the leftover-invisible-blocks bug. The first hit's repair order already has the true block.
+            if (EpochRunnerMod.scaffold != null && st.getBlock() == EpochRunnerMod.scaffold) return;
             if (st.getBlockHardness(world, pos) < 0) return; // bedrock / unbreakable
 
             if (EpochRunnerMod.scaffold != null && isClaimedLand(world, pos)) {
                 WarWorldData data = WarWorldData.get(world);
                 if (data != null) {
-                    data.addRepairOrder(pos.toImmutable(), st);
+                    if (!data.getRepairMap().containsKey(pos.toImmutable())) {
+                        data.addRepairOrder(pos.toImmutable(), st); // record only the FIRST (true) original
+                    }
                     world.setBlockState(pos, EpochRunnerMod.scaffold.getDefaultState(), 2);
                     return;
                 }

@@ -79,7 +79,11 @@ public class ProtectionHandler extends WorldSavedData {
             if (war != null && EpochRunnerMod.scaffold != null && isClaimedForRepair(war, pos)) {
                 try {
                     IBlockState st = world.getBlockState(pos);
-                    if (!world.isAirBlock(pos) && st.getBlockHardness(world, pos) >= 0) {
+                    // Skip blocks already turned to scaffold / already recorded -- re-recording would save
+                    // the scaffold as the "original" and /war repair would restore an invisible block.
+                    boolean alreadyHandled = st.getBlock() == EpochRunnerMod.scaffold
+                            || war.getRepairMap().containsKey(pos);
+                    if (!alreadyHandled && !world.isAirBlock(pos) && st.getBlockHardness(world, pos) >= 0) {
                         war.addRepairOrder(pos, st);
                         toScaffold.add(pos);
                     }
