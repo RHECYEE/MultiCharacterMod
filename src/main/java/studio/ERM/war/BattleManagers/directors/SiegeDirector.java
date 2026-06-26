@@ -203,6 +203,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
             }
         }
 
+        // Mechanized recon screen: real Flan jeeps + halftracks scout ahead of the line (L6+).
+        if (warLevel >= 6) {
+            spawnTransportPlatoon(world, ENCIRCLE_RING + 10.0);
+        }
+
         // Commit to ONE breach corridor now; everything bombards it and the engineers exploit it.
         chooseBreachCorridor(world);
     }
@@ -326,9 +331,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         boolean allComplete = !engineerTasks.isEmpty();
 
         for (EngineerTask t : engineerTasks) {
+            if (t.done) continue;           // this crew genuinely finished its breach job
+            allComplete = false;            // anything not-done (INCLUDING a dead crew) -> phase not complete
             EntityFormationCarrier eng = t.carrier;
-            if (t.done || eng == null || eng.isDead) continue;
-            allComplete = false;
+            if (eng == null || eng.isDead) continue; // dead before finishing: let the phase run its timer
 
             // Just planted a charge: pull the workers back, let it cook, then resume.
             if (tickAge < t.retreatUntil) {
@@ -479,11 +485,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 break;
 
             case P_ENGINEER:
-                tickCatapults(world);
+                // NOTE: NO catapults here -- the barrage opened the breach during BOMBARDMENT. If the
+                // catapults kept cratering the corridor now they would blow the footing out from under
+                // the engineers working in it (which is what made the engineer phase die in 1 tick).
                 refreshBombardment();
                 tickEngineers(world);
                 advanceLine(world, WALL_RING + 4.0, 0.05 + warLevel * 0.003);
-                if (tsp >= PHASE_ENGINEER_TICKS || engineersComplete || waveDefeated(tsp)) beginSurge(world);
+                // Only advance early once the engineers GENUINELY finished (engineersComplete now means
+                // every task is done, not "all dead") AND a minimum dwell has passed, so they actually
+                // get seen laddering / mining / sapping.
+                if (tsp >= PHASE_ENGINEER_TICKS
+                        || (engineersComplete && tsp >= MIN_PHASE_DWELL)
+                        || waveDefeated(tsp)) beginSurge(world);
                 break;
 
             case P_SURGE:
@@ -839,18 +852,41 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
-    /** Vehicle pool by level: L6-7 WW2 only, L8+ full random (WW2 + modern). */
+    /**
+     * Tank pool by level: L6-7 WW2 only, L8+ full random (WW2 + modern). These are REAL Flan ShortNames
+     * verified against the installed WW2 + Modern Warfare content packs (the old list used Pershing /
+     * Leopard2 / Challenger / "Abrams" which DO NOT EXIST -> the pilot summon silently failed).
+     */
     private String pickTank(World world) {
         String[] pool;
         if (warLevel >= 8) {
-            pool = new String[] { "Tiger", "Panzer", "Sherman", "T34", "Churchill", "Pershing",
-                                  "Abrams", "T90", "Leopard2", "Challenger" };
+            pool = new String[] { "Tiger", "TigerII", "Panzer", "Sherman", "T34", "Churchill", "Cromwell",
+                                  "IS2", "KV1", "StuG", "abrams", "T90", "Leo2A6", "ChallyII" };
         } else if (warLevel >= 6) {
-            pool = new String[] { "Tiger", "Panzer", "Sherman", "T34", "Churchill", "Pershing", "KV1" };
+            pool = new String[] { "Tiger", "Tiger131", "Panzer", "PanzerIIL", "Sherman", "T34",
+                                  "Churchill", "Cromwell", "StuG", "M10", "Hellcat", "KV1" };
         } else {
-            pool = new String[] { "Sherman", "Panzer" };
+            pool = new String[] { "Sherman", "Panzer", "Cromwell" };
         }
         return pool[world.rand.nextInt(pool.length)];
+    }
+
+    /** Transport pool by level (jeeps + halftracks). Real Flan ShortNames from the installed packs. */
+    private String pickTransport(World world) {
+        String[] pool = (warLevel >= 8)
+                ? new String[] { "Jeep", "SASJeep", "Kubel", "M3Halftrack", "SdkFz251", "Humvee", "Greyhound" }
+                : new String[] { "Jeep", "SASJeep", "Kubel", "M3Halftrack", "SdkFz251", "BMWR75" };
+        return pool[world.rand.nextInt(pool.length)];
+    }
+
+    /** A recon/transport screen of jeeps + halftracks (real Flan vehicles) ahead of the line. */
+    private void spawnTransportPlatoon(World world, double ring) {
+        int count = (warLevel >= 8) ? 4 : 3;
+        double mid = (count - 1) / 2.0;
+        for (int i = 0; i < count; i++) {
+            double lateral = (i - mid) * (TANK_LANE_SPACING * 0.75);
+            spawnTankAtFront(world, lateral, ring, pickTransport(world));
+        }
     }
 
     // ════════════════════════════════════════════════════════════
