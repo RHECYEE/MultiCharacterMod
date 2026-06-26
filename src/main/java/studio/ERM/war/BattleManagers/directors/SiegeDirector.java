@@ -25,6 +25,8 @@ import studio.ERM.war.BattleManagers.cards.UnitCardRegistry;
 import studio.ERM.war.BattleManagers.entities.EntityFormationCarrier;
 import studio.ERM.war.air.AirStrikeController;
 import studio.ERM.war.rival.RivalCityManager;
+import studio.ERM.war.strategy.StrategicChunk;
+import studio.ERM.war.strategy.WarHeatMap;
 import studio.ERM.war.vehicle.EntityAIPilot;
 
 import java.util.ArrayList;
@@ -93,6 +95,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // siege has a single objective: open this corridor (not swiss-cheese the whole wall).
     private BlockPos breachCorridor = null;
 
+    // The defender's REAL base, mapped by the strategic heat map at siege start. The siege re-aims at
+    // the cluster CORE (storage/machine/living concentration) and breaches a low-defense PERIMETER
+    // chunk facing the army -- "conduct a siege against the base", not "attack where the player stood".
+    private java.util.List<StrategicChunk> baseCluster = null;
+    private StrategicChunk baseCore = null;
+
     // Temporary siege-camp ground/decor. Every block the camp build changes is recorded here with
     // its ORIGINAL state, exactly like the repair system stores claimed chunks, so the whole camp
     // (flattened staging pad, tents, catapult frames) is restored verbatim when the siege ends --
@@ -159,6 +167,28 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
         if (world.isRemote) return;
 
+        // STRATEGIC TARGETING: scan the surroundings with the heat map and aim the WHOLE siege at the
+        // defender's real base CORE (their storage/machine/living concentration) instead of wherever
+        // they happened to be standing. This is the director conducting a siege against the base.
+        try {
+            WarHeatMap map = WarHeatMap.get(world);
+            map.scanArea(world, site.getX() >> 4, site.getZ() >> 4, 6);
+            StrategicChunk hot = map.hottest();
+            if (hot != null && hot.totalHeat() >= 60) {
+                baseCluster = map.cluster(hot, 30.0);
+                baseCore = map.coreOf(baseCluster);
+                if (baseCore != null) {
+                    int coreX = (baseCore.chunkX << 4) + 8, coreZ = (baseCore.chunkZ << 4) + 8;
+                    this.site = new BlockPos(coreX, surfaceY(world, coreX, coreZ), coreZ);
+                    EpochRunnerMod.logger.info("[Siege] base core @ chunk [" + baseCore.chunkX + ","
+                            + baseCore.chunkZ + "] " + baseCore.classification + " (cluster=" + baseCluster.size()
+                            + " chunks) -- siege re-aimed at the core");
+                }
+            }
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[Siege] heat-map targeting failed: " + t);
+        }
+
         // Pick the bearing that stages the army on the MOST land (don't form up on open ocean).
         this.frontBearing = pickLandwardBearing(world);
 
@@ -212,17 +242,48 @@ public class SiegeDirector implements IPhasedBattleDirector {
         chooseBreachCorridor(world);
     }
 
-    /** Pick the single wall section this whole siege will breach (a real wall near the defender). */
+    /**
+     * Pick the single wall section this whole siege will breach. Chunk STRATEGY -> block TACTICS:
+     * if the heat map mapped a base, pick the low-defense PERIMETER chunk facing the army, then
+     * locally scan that chunk for the actual wall block. Otherwise fall back to a local scan.
+     */
     private void chooseBreachCorridor(World world) {
+        if (baseCluster != null && !baseCluster.isEmpty()) {
+            StrategicChunk edge = pickPerimeterChunkTowardAttack();
+            if (edge != null) {
+                int wx = (edge.chunkX << 4) + 8, wz = (edge.chunkZ << 4) + 8;
+                BlockPos wall = findWallTargetNear(world, new BlockPos(wx, surfaceY(world, wx, wz), wz));
+                breachCorridor = (wall != null)
+                        ? new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ())
+                        : new BlockPos(wx, surfaceY(world, wx, wz), wz);
+                EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor
+                        + " (perimeter chunk [" + edge.chunkX + "," + edge.chunkZ + "] " + edge.classification
+                        + ", defense=" + (int) edge.defenseHeat + ")");
+                return;
+            }
+        }
         BlockPos defender = activator != null ? activator.getPosition() : site;
         BlockPos wall = findWallTargetNear(world, defender);
-        if (wall != null) {
-            breachCorridor = new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ());
-        } else {
-            // Open ground / no wall: aim the breach at the near edge of the base on the assault bearing.
-            breachCorridor = frontPoint(world, 10.0, 0.0);
+        breachCorridor = (wall != null)
+                ? new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ())
+                : frontPoint(world, 10.0, 0.0);
+        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (local scan)");
+    }
+
+    /** The base-cluster chunk on the side the army comes from, preferring the LOWEST-defense edge. */
+    private StrategicChunk pickPerimeterChunkTowardAttack() {
+        if (baseCluster == null || baseCluster.isEmpty()) return null;
+        double cx = Math.cos(frontBearing), cz = Math.sin(frontBearing); // toward the army staging side
+        StrategicChunk best = null;
+        double bestScore = -Double.MAX_VALUE;
+        for (StrategicChunk c : baseCluster) {
+            double dx = ((c.chunkX << 4) + 8) - site.getX();
+            double dz = ((c.chunkZ << 4) + 8) - site.getZ();
+            double proj = dx * cx + dz * cz;           // front edge faces the attackers
+            double score = proj - c.defenseHeat * 0.1; // bias toward the soft (low-defense) spot
+            if (score > bestScore) { bestScore = score; best = c; }
         }
-        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor);
+        return best;
     }
 
     // ════════════════════════════════════════════════════════════
@@ -311,6 +372,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
             EntityFormationCarrier shield = spawnCarrierAt(world, guardAt, getCard("ShieldWall"), true);
             if (shield != null) shield.setBattleContext(activator, guardAt);
         }
+
+        // RAMP/BRIDGE team: bridge any moat / river / gap on the approach so the assault doesn't
+        // bottleneck on water or a ditch. This is the "engineers create the military route" capability.
+        buildApproachRoute(world);
     }
 
     /** A point {@code dist} blocks OUTSIDE the wall from {@code wall} (away from the base core). */
@@ -319,6 +384,39 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int x = (int) Math.round(wall.getX() + Math.cos(ang) * dist);
         int z = (int) Math.round(wall.getZ() + Math.sin(ang) * dist);
         return new BlockPos(x, surfaceY(world, x, z), z);
+    }
+
+    /**
+     * Bridge water / lava / gaps along a 3-wide approach lane from the breach OUT toward the army, and
+     * drain liquid head-space, so the assault has a usable military route over moats/rivers. All blocks
+     * go through setCampBlock, so the bridge (and the drained water) revert when the siege ends.
+     */
+    private void buildApproachRoute(World world) {
+        if (breachCorridor == null) return;
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double ux = Math.cos(ang), uz = Math.sin(ang); // outward, toward the army
+        double px = -uz, pz = ux;                       // lane width axis
+        int floorY = breachCorridor.getY();
+        for (int s = 0; s <= 40; s++) {
+            int baseX = (int) Math.round(breachCorridor.getX() + ux * s);
+            int baseZ = (int) Math.round(breachCorridor.getZ() + uz * s);
+            for (int w = -1; w <= 1; w++) {
+                int x = (int) Math.round(baseX + px * w);
+                int z = (int) Math.round(baseZ + pz * w);
+                try {
+                    BlockPos floor = new BlockPos(x, floorY - 1, z);
+                    if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
+                        setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
+                    }
+                    for (int y = floorY; y <= floorY + 2; y++) {
+                        BlockPos hp = new BlockPos(x, y, z);
+                        if (world.getBlockState(hp).getMaterial().isLiquid()) {
+                            setCampBlock(world, hp, Blocks.AIR.getDefaultState());
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
     }
 
     /**
