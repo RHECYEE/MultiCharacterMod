@@ -72,8 +72,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private final List<EntityFormationCarrier> carriers = new ArrayList<>();
     // Volley/ballista carriers that hold at range and suppress the wall tops.
     private final List<EntityFormationCarrier> bombardLine = new ArrayList<>();
-    // Engineer breach assignments.
-    private final List<EngineerTask> engineerTasks = new ArrayList<>();
+    // ENGINEER CORPS (the most important part of the siege). A shared, reservable work queue: the
+    // planner classifies EVERY obstacle on the assault axis (water/gap/cliff/wall) into a saved
+    // MilitaryRoute, then engineer crews pull tasks off the queue and VISIBLY build/mine/ladder/breach
+    // them -- ready for all obstacle types at once, with the wall BREACH as the top-priority objective.
+    private final List<RouteNode> route = new ArrayList<>();   // the saved MilitaryRoute (staging->core)
+    private final List<EngTask> engQueue = new ArrayList<>();  // shared obstacle/work queue
+    private final List<EngCrew> engCrews = new ArrayList<>();  // engineer squads that pull from the queue
+    private BlockPos routeStart = null;                        // staging foot on the army side of the route
     private boolean engineersComplete = false;
     // Real Flan armour (EntityAIPilot-crewed). The mis-named "VehiclePlatoon" card is just infantry;
     // THESE are the actual driving/firing tanks.
@@ -248,26 +254,51 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * locally scan that chunk for the actual wall block. Otherwise fall back to a local scan.
      */
     private void chooseBreachCorridor(World world) {
-        if (baseCluster != null && !baseCluster.isEmpty()) {
-            StrategicChunk edge = pickPerimeterChunkTowardAttack();
-            if (edge != null) {
-                int wx = (edge.chunkX << 4) + 8, wz = (edge.chunkZ << 4) + 8;
-                BlockPos wall = findWallTargetNear(world, new BlockPos(wx, surfaceY(world, wx, wz), wz));
-                breachCorridor = (wall != null)
-                        ? new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ())
-                        : new BlockPos(wx, surfaceY(world, wx, wz), wz);
-                EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor
-                        + " (perimeter chunk [" + edge.chunkX + "," + edge.chunkZ + "] " + edge.classification
-                        + ", defense=" + (int) edge.defenseHeat + ")");
-                return;
-            }
+        // Decide which side the army comes from, then RAY-WALK from a staging foot outside that side
+        // straight in toward the base core and drop the breach on the FIRST real wall (the first sharp
+        // upward jump in the surface). The old random ±9 scan kept landing the breach in an open field
+        // SHORT of the castle -- this guarantees it lands ON the wall, on the assault axis.
+        BlockPos edgeOutside;
+        StrategicChunk edge = pickPerimeterChunkTowardAttack();
+        if (edge != null) {
+            int ex = (edge.chunkX << 4) + 8, ez = (edge.chunkZ << 4) + 8;
+            BlockPos edgeCenter = new BlockPos(ex, surfaceY(world, ex, ez), ez);
+            edgeOutside = outsidePoint(world, edgeCenter, 30.0); // step OUT toward the army from the edge
+        } else {
+            edgeOutside = frontPoint(world, ENCIRCLE_RING, 0.0);
         }
-        BlockPos defender = activator != null ? activator.getPosition() : site;
-        BlockPos wall = findWallTargetNear(world, defender);
-        breachCorridor = (wall != null)
-                ? new BlockPos(wall.getX(), surfaceY(world, wall.getX(), wall.getZ()), wall.getZ())
-                : frontPoint(world, 10.0, 0.0);
-        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (local scan)");
+        routeStart = edgeOutside;
+        breachCorridor = detectWallOnPath(world, edgeOutside, site);
+        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (wall on assault axis "
+                + edgeOutside.getX() + "," + edgeOutside.getZ() + " -> core " + site.getX() + "," + site.getZ()
+                + (edge != null ? "; perimeter chunk def=" + (int) edge.defenseHeat : "; landward bearing") + ")");
+    }
+
+    /**
+     * Ray-walk from an OUTSIDE staging point straight toward the base core and return the foot of the
+     * REAL wall: the first place the surface jumps up sharply (a built wall / steep rampart). If no
+     * wall is found (open base) return a point just outside the core. This is what makes the breach
+     * land ON the castle wall instead of in a field short of it.
+     */
+    private BlockPos detectWallOnPath(World world, BlockPos from, BlockPos to) {
+        double dx = to.getX() - from.getX(), dz = to.getZ() - from.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 1.0) return to;
+        double ux = dx / dist, uz = dz / dist;
+        int prevSurf = surfaceY(world, from.getX(), from.getZ());
+        int n = (int) Math.ceil(dist);
+        for (int s = 1; s <= n; s++) {
+            int x = (int) Math.round(from.getX() + ux * s);
+            int z = (int) Math.round(from.getZ() + uz * s);
+            int surf = surfaceY(world, x, z);
+            if (surf - prevSurf >= 3) {                 // the wall face: breach at its OUTSIDE foot
+                return new BlockPos(x, prevSurf, z);
+            }
+            prevSurf = surf;
+        }
+        int bx = (int) Math.round(to.getX() - ux * 6);  // no clear wall: breach just outside the core
+        int bz = (int) Math.round(to.getZ() - uz * 6);
+        return new BlockPos(bx, surfaceY(world, bx, bz), bz);
     }
 
     /** The base-cluster chunk on the side the army comes from, preferring the LOWEST-defense edge. */
@@ -337,32 +368,32 @@ public class SiegeDirector implements IPhasedBattleDirector {
         phase = P_ENGINEER;
         lastPhaseChangeTick = tickAge;
         engineersComplete = false;
-        EpochRunnerMod.logger.info("[Siege] -> ENGINEER PUSH: breach jobs (warLevel=" + warLevel + ")");
+        EpochRunnerMod.logger.info("[Siege] -> ENGINEER PUSH: planning military route (warLevel=" + warLevel + ")");
 
         if (breachCorridor == null) chooseBreachCorridor(world);
 
-        // Spread the engineers across adjacent sections of the SAME corridor (along the wall face).
+        // 1) PLAN: classify EVERY obstacle on the assault axis into the saved MilitaryRoute + work queue.
+        planMilitaryRoute(world);
+
+        // 2) CREWS: spawn the engineer squads that pull tasks off the SHARED queue and build them. They
+        //    start OUTSIDE the wall and walk in to whatever task they reserve (bridge/ramp/clear/breach).
+        engCrews.clear();
         double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
         double px = -Math.sin(ang), pz = Math.cos(ang);
-
-        int engineerCount = (warLevel <= 3) ? 1 : (warLevel <= 6) ? 2 : 3;
+        int engineerCount = (warLevel <= 3) ? 2 : (warLevel <= 6) ? 3 : 4;
         double emid = (engineerCount - 1) / 2.0;
         for (int i = 0; i < engineerCount; i++) {
             double off = (i - emid) * 3.0;
             int bx = (int) Math.round(breachCorridor.getX() + px * off);
             int bz = (int) Math.round(breachCorridor.getZ() + pz * off);
-            BlockPos breachPoint = new BlockPos(bx, surfaceY(world, bx, bz), bz);
-            BlockPos start = outsidePoint(world, breachPoint, 8.0);
+            BlockPos start = outsidePoint(world, new BlockPos(bx, surfaceY(world, bx, bz), bz), 12.0);
             EntityFormationCarrier eng = spawnCarrierAt(world, start, getCard("SiegeUnit"), true);
-            if (eng != null) {
-                engineerTasks.add(new EngineerTask(eng, off, breachPoint));
-                eng.setMoveTarget(breachPoint, 0.07 + warLevel * 0.004);
-            }
+            if (eng != null) engCrews.add(new EngCrew(eng));
         }
 
-        // Shield-wall escort: infantry stand BETWEEN the workers and the defender, soaking pressure so
-        // the engineers can do their job. They hold this line (no chase) -- the protection, not the punch.
-        int shields = (warLevel <= 3) ? 1 : 2;
+        // 3) ESCORT: shield-wall infantry stand BETWEEN the workers and the defender and HOLD (no chase),
+        //    soaking pressure so the engineers can work the queue. The protection, not the punch.
+        int shields = (warLevel <= 3) ? 2 : 3;
         double smid = (shields - 1) / 2.0;
         for (int i = 0; i < shields; i++) {
             double off = (i - smid) * 8.0;
@@ -372,10 +403,6 @@ public class SiegeDirector implements IPhasedBattleDirector {
             EntityFormationCarrier shield = spawnCarrierAt(world, guardAt, getCard("ShieldWall"), true);
             if (shield != null) shield.setBattleContext(activator, guardAt);
         }
-
-        // RAMP/BRIDGE team: bridge any moat / river / gap on the approach so the assault doesn't
-        // bottleneck on water or a ditch. This is the "engineers create the military route" capability.
-        buildApproachRoute(world);
     }
 
     /** A point {@code dist} blocks OUTSIDE the wall from {@code wall} (away from the base core). */
@@ -387,109 +414,289 @@ public class SiegeDirector implements IPhasedBattleDirector {
     }
 
     /**
-     * Bridge water / lava / gaps along a 3-wide approach lane from the breach OUT toward the army, and
-     * drain liquid head-space, so the assault has a usable military route over moats/rivers. All blocks
-     * go through setCampBlock, so the bridge (and the drained water) revert when the siege ends.
+     * THE ENGINEER PLANNER. Ray-walk the whole assault axis (staging -> wall -> core), classify EVERY
+     * column into an obstacle, and build a CONNECTED, terrain-following MilitaryRoute: each node carries
+     * a walkable grade Y clamped to +-1 per step, so the road can never float over a dip or bury into a
+     * rise (that was the "floating bridge" bug). The non-passable stretches are then grouped into a
+     * small set of reservable EngTasks -- bridges, ramps, head-clears, the WALL BREACH (top priority),
+     * and a LADDER escalade -- so the crews are ready for all obstacle types at once.
      */
-    private void buildApproachRoute(World world) {
-        if (breachCorridor == null) return;
-        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
-        double ux = Math.cos(ang), uz = Math.sin(ang); // outward, toward the army
-        double px = -uz, pz = ux;                       // lane width axis
-        int floorY = breachCorridor.getY();
-        for (int s = 0; s <= 40; s++) {
-            int baseX = (int) Math.round(breachCorridor.getX() + ux * s);
-            int baseZ = (int) Math.round(breachCorridor.getZ() + uz * s);
-            for (int w = -1; w <= 1; w++) {
-                int x = (int) Math.round(baseX + px * w);
-                int z = (int) Math.round(baseZ + pz * w);
-                try {
-                    BlockPos floor = new BlockPos(x, floorY - 1, z);
-                    if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
-                        setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
-                    }
-                    for (int y = floorY; y <= floorY + 2; y++) {
-                        BlockPos hp = new BlockPos(x, y, z);
-                        if (world.getBlockState(hp).getMaterial().isLiquid()) {
-                            setCampBlock(world, hp, Blocks.AIR.getDefaultState());
-                        }
-                    }
-                } catch (Throwable ignored) {}
+    private void planMilitaryRoute(World world) {
+        route.clear();
+        engQueue.clear();
+        if (breachCorridor == null || routeStart == null) return;
+
+        // Plan staging -> wall -> a little PAST the wall (the interior corridor is floored by
+        // levelBreachPath after the breach). We deliberately do NOT route all the way to the core, so
+        // the engineers don't try to breach every interior building -- the wall is the objective.
+        double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
+        int endX = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * 8);
+        int endZ = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * 8);
+        double dx = endX - routeStart.getX(), dz = endZ - routeStart.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 1.0) return;
+        double ux = dx / dist, uz = dz / dist;
+        int n = (int) Math.ceil(dist);
+
+        int breachIdx = -1; double breachBest = Double.MAX_VALUE;
+        int gradeY = surfaceY(world, routeStart.getX(), routeStart.getZ());
+        for (int s = 0; s <= n; s++) {
+            int x = (int) Math.round(routeStart.getX() + ux * s);
+            int z = (int) Math.round(routeStart.getZ() + uz * s);
+            int surf = surfaceY(world, x, z);
+            Obstacle ob = classifyColumn(world, x, z, surf, gradeY);
+            // Terrain-following walkable grade -- clamp the step to +-1 so the route CONNECTS. The wall
+            // itself is passed THROUGH at the approach grade (we breach it, we don't climb the grade up it).
+            if (ob != Obstacle.WALL) {
+                if (surf > gradeY + 1) gradeY++;
+                else if (surf < gradeY - 1) gradeY--;
+                else gradeY = surf;
             }
+            route.add(new RouteNode(x, z, gradeY, ob));
+            double dToWall = Math.hypot(x - breachCorridor.getX(), z - breachCorridor.getZ());
+            if (dToWall < breachBest) { breachBest = dToWall; breachIdx = route.size() - 1; }
         }
+
+        // Group consecutive non-passable nodes of the same family into one task.
+        int i = 0;
+        while (i < route.size()) {
+            Obstacle ob = route.get(i).obstacle;
+            if (ob == Obstacle.PASSABLE) { i++; continue; }
+            int j = i;
+            while (j + 1 < route.size() && taskFamily(route.get(j + 1).obstacle) == taskFamily(ob)) j++;
+            EngWork w = workFor(ob);
+            if (w == EngWork.BREACH) {
+                engQueue.add(new EngTask(EngWork.BREACH, ob, i, j, 100)); // the wall: top priority
+                engQueue.add(new EngTask(EngWork.LADDER, ob, i, j, 40));  // escalade alongside the breach
+            } else {
+                engQueue.add(new EngTask(w, ob, i, j, 50 - i));          // nearest-to-staging first
+            }
+            i = j + 1;
+        }
+
+        // FAILSAFE: the wall IS the objective -- guarantee a breach task at it even if the surface scan
+        // never flagged a height jump (a flat-topped wall level with its own approach).
+        boolean haveBreach = false;
+        for (EngTask t : engQueue) if (t.work == EngWork.BREACH) { haveBreach = true; break; }
+        if (!haveBreach && breachIdx >= 0) {
+            engQueue.add(new EngTask(EngWork.BREACH, Obstacle.WALL, breachIdx, breachIdx, 100));
+            engQueue.add(new EngTask(EngWork.LADDER, Obstacle.WALL, breachIdx, breachIdx, 40));
+        }
+        engQueue.sort((a, b) -> b.priority - a.priority);
+        EpochRunnerMod.logger.info("[Siege] MilitaryRoute: " + route.size() + " nodes; "
+                + engQueue.size() + " engineering tasks " + summarizeQueue());
+    }
+
+    /** Classify one route column from its surface height vs the current walkable grade. */
+    private Obstacle classifyColumn(World world, int x, int z, int surf, int gradeY) {
+        try {
+            Material top = world.getBlockState(new BlockPos(x, surf, z)).getMaterial();
+            if (top == Material.LAVA) return Obstacle.LAVA;
+            if (top == Material.WATER) return Obstacle.WATER;
+            int rise = surf - gradeY;
+            if (rise >= 3) return Obstacle.WALL;          // a real vertical barrier
+            boolean head = world.getBlockState(new BlockPos(x, gradeY + 1, z)).getMaterial().isSolid()
+                        || world.getBlockState(new BlockPos(x, gradeY + 2, z)).getMaterial().isSolid();
+            if (head && rise >= 1) return Obstacle.WALL;  // solid wall the same height as the approach
+            if (rise == 2) return Obstacle.CLIFF;         // a steep step up -> ramp/cut
+            if (surf <= gradeY - 3) return Obstacle.GAP;  // a ravine / drop -> bridge
+            return Obstacle.PASSABLE;
+        } catch (Throwable t) { return Obstacle.PASSABLE; }
+    }
+
+    private static int taskFamily(Obstacle o) {
+        switch (o) {
+            case WATER: case LAVA: case GAP: return 1; // bridge family
+            case CLIFF:                       return 2; // ramp family
+            case WALL:                        return 3; // breach family
+            default:                          return 0;
+        }
+    }
+    private static EngWork workFor(Obstacle o) {
+        switch (o) {
+            case WATER: case LAVA: case GAP: return EngWork.BRIDGE;
+            case CLIFF:                       return EngWork.RAMP;
+            case WALL:                        return EngWork.BREACH;
+            default:                          return EngWork.CLEAR;
+        }
+    }
+    /** Work units a task needs (one per node for road work; a fixed carve budget for breach/ladder). */
+    private int taskNeeded(EngTask t) {
+        switch (t.work) {
+            case BREACH: return 16;
+            case LADDER: return RAMP_STEPS + RAMP_CREST;
+            default:     return Math.max(1, t.toIdx - t.fromIdx + 1);
+        }
+    }
+    private String summarizeQueue() {
+        int br = 0, ld = 0, bg = 0, rp = 0, cl = 0;
+        for (EngTask t : engQueue) switch (t.work) {
+            case BREACH: br++; break; case LADDER: ld++; break; case BRIDGE: bg++; break;
+            case RAMP: rp++; break; default: cl++; break;
+        }
+        return "(breach=" + br + " ladder=" + ld + " bridge=" + bg + " ramp=" + rp + " clear=" + cl + ")";
     }
 
     /**
-     * Engineers are CONSTRUCTION CREWS, not combat mobs. At the corridor they VISIBLY work: rapidly
-     * place a ladder column to scale the wall, fast-mine a tunnel straight through (~130% iron-pick),
-     * and at high tech plant a real TNT charge at ground level then RETREAT before it blows. The
-     * shield-wall escort (spawned in beginEngineerPush) soaks the pressure so they can keep working.
+     * Build one connected, terrain-following route node across a 3-wide lane: floor the grade over any
+     * gap/liquid (bridge/fill) AND cut a head-high passage through any solid (ramp-cut/clear). Floor
+     * blocks go through setCampBlock (revert on siege end); cuts go through damageBlock (antigrief-aware).
      */
-    private void tickEngineers(World world) {
-        boolean allComplete = !engineerTasks.isEmpty();
-
-        for (EngineerTask t : engineerTasks) {
-            if (t.done) continue;           // this crew genuinely finished its breach job
-            allComplete = false;            // anything not-done (INCLUDING a dead crew) -> phase not complete
-            EntityFormationCarrier eng = t.carrier;
-            if (eng == null || eng.isDead) continue; // dead before finishing: let the phase run its timer
-
-            // Just planted a charge: pull the workers back, let it cook, then resume.
-            if (tickAge < t.retreatUntil) {
-                eng.setMoveTarget(outsidePoint(world, t.breachPoint, 12.0), 0.11 + warLevel * 0.004);
-                continue;
-            }
-
-            double d = eng.getDistance(t.breachPoint.getX(), t.breachPoint.getY(), t.breachPoint.getZ());
-            if (d > ARRIVE_DIST) {
-                eng.setMoveTarget(t.breachPoint, 0.07 + warLevel * 0.004); // re-issue (nav is one-shot)
-                continue;
-            }
-
-            t.workTicks++;
-
-            // LADDER team — a climbable ladder column up the wall, every level.
-            if (t.workTicks % 4 == 0 && t.stepsBuilt < RAMP_STEPS + RAMP_CREST) {
-                placeLadderRung(world, t, t.stepsBuilt);
-                t.stepsBuilt++;
-            }
-
-            // MINING team — fast tunnel straight through toward the core (mid tech and up).
-            if (warLevel >= 5 && t.workTicks % 3 == 0) {
-                mineTunnel(world, t, t.workTicks / 3);
-            }
-
-            // SAPPER team — plant a real ground-level TNT charge, then retreat from the blast (high tech).
-            if (warLevel >= 8 && t.workTicks % 60 == 30) {
-                plantSapperCharge(world, t.breachPoint);
-                t.retreatUntil = tickAge + 36;
-            }
-
-            // Finished after a solid work window (the bombardment also opens the corridor). Floor a
-            // clean corridor inward so the assault pours straight through.
-            if (t.workTicks >= 140) {
-                t.done = true;
-                levelBreachPath(world, t);
-            }
+    private void buildRouteNode(World world, RouteNode node) {
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang);
+        for (int w = -1; w <= 1; w++) {
+            int x = (int) Math.round(node.x + px * w);
+            int z = (int) Math.round(node.z + pz * w);
+            try {
+                BlockPos floor = new BlockPos(x, node.gradeY - 1, z);
+                if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
+                    setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
+                }
+                for (int y = node.gradeY; y <= node.gradeY + 2; y++) {
+                    BlockPos hp = new BlockPos(x, y, z);
+                    Material m = world.getBlockState(hp).getMaterial();
+                    if (m.isLiquid()) setCampBlock(world, hp, Blocks.AIR.getDefaultState());
+                    else if (m.isSolid()) damageBlock(world, hp); // cut the cliff/overhang for headroom
+                }
+            } catch (Throwable ignored) {}
         }
-
-        engineersComplete = allComplete;
     }
 
-    /** One ladder rung up the outer face of the wall at the corridor (reverts when the siege ends). */
-    private void placeLadderRung(World world, EngineerTask t, int step) {
+    /** Carve a 3-wide, 4-tall walk-through gap THROUGH the wall, one block deeper toward the core each step. */
+    private void breachStep(World world, RouteNode wn, int depth) {
+        double inAng = Math.atan2(site.getZ() - wn.z, site.getX() - wn.x);
+        double ix = Math.cos(inAng), iz = Math.sin(inAng);  // inward toward the core
+        double px = -iz, pz = ix;                            // along the wall face (width)
+        int cx = (int) Math.round(wn.x + ix * depth);
+        int cz = (int) Math.round(wn.z + iz * depth);
+        for (int w = -1; w <= 1; w++) {
+            int x = (int) Math.round(cx + px * w);
+            int z = (int) Math.round(cz + pz * w);
+            for (int y = wn.gradeY; y <= wn.gradeY + 3; y++) damageBlock(world, new BlockPos(x, y, z));
+        }
+        explosionEffect(world, new BlockPos(cx, wn.gradeY + 1, cz));
+    }
+
+    /** One ladder rung up the outer face of the wall at a route node (reverts when the siege ends). */
+    private void placeLadderRungAt(World world, RouteNode wn, int step) {
         try {
             net.minecraft.util.EnumFacing outward = net.minecraft.util.EnumFacing.getFacingFromVector(
-                    t.breachPoint.getX() - site.getX(), 0, t.breachPoint.getZ() - site.getZ());
-            BlockPos col = t.breachPoint.offset(outward); // one block out from the wall face
-            int gY = surfaceY(world, col.getX(), col.getZ());
-            BlockPos p = new BlockPos(col.getX(), gY + step, col.getZ());
+                    wn.x - site.getX(), 0, wn.z - site.getZ());
+            BlockPos col = new BlockPos(wn.x, wn.gradeY, wn.z).offset(outward); // one block out from the face
+            BlockPos p = new BlockPos(col.getX(), wn.gradeY + step, col.getZ());
             BlockPos support = p.offset(outward.getOpposite()); // the wall the ladder clings to
             if (world.isAirBlock(p) && world.getBlockState(support).getMaterial().isSolid()) {
                 setCampBlock(world, p, Blocks.LADDER.getDefaultState()
                         .withProperty(net.minecraft.block.BlockLadder.FACING, outward));
             }
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Engineers are CONSTRUCTION CREWS, not combat mobs. Each crew RESERVES the highest-priority
+     * unclaimed task on the shared queue (the wall breach first, then the nearest bridge/ramp/clear),
+     * walks to it, and VISIBLY builds it block-by-block at ~130% iron-pick speed -- bridging moats,
+     * cutting ramps, laddering & breaching the wall, all in parallel. When a crew dies its task returns
+     * to the queue for another crew. The phase completes when every task on the route is done.
+     */
+    private void tickEngineers(World world) {
+        if (engQueue.isEmpty()) { engineersComplete = true; return; }
+
+        for (EngCrew crew : engCrews) {
+            EntityFormationCarrier eng = crew.carrier;
+            if (eng == null || eng.isDead) { releaseTask(crew); continue; } // give the task back
+
+            // Sapper charge cooking: pull back from the blast, then resume.
+            if (tickAge < crew.retreatUntil) {
+                eng.setMoveTarget(outsidePoint(world, breachCorridor, 12.0), 0.11 + warLevel * 0.004);
+                continue;
+            }
+
+            EngTask t = crew.current;
+            if (t == null || t.done) t = reserveNextTask(crew);
+            if (t == null) { // queue drained: form up at the breach
+                eng.setMoveTarget(breachCorridor, 0.06 + warLevel * 0.004);
+                continue;
+            }
+
+            BlockPos wp = workPos(world, t);
+            double d = eng.getDistance(wp.getX(), wp.getY(), wp.getZ());
+            if (d > ARRIVE_DIST) { eng.setMoveTarget(wp, 0.07 + warLevel * 0.004); continue; }
+
+            crew.workTicks++;
+            doTaskWork(world, crew, t); // one unit of visible work
+        }
+
+        boolean allDone = true;
+        for (EngTask t : engQueue) if (!t.done) { allDone = false; break; }
+        engineersComplete = allDone;
+    }
+
+    /** Do one visible unit of work on the crew's current task; mark it done + chain follow-ups. */
+    private void doTaskWork(World world, EngCrew crew, EngTask t) {
+        switch (t.work) {
+            case BRIDGE: case RAMP: case CLEAR: {           // ~130% pick: 2 nodes/tick
+                for (int k = 0; k < 2 && t.progress < taskNeeded(t); k++, t.progress++) {
+                    int idx = Math.min(t.fromIdx + t.progress, t.toIdx);
+                    buildRouteNode(world, route.get(idx));
+                }
+                break;
+            }
+            case LADDER:
+                placeLadderRungAt(world, route.get(t.fromIdx), t.progress);
+                t.progress++;
+                break;
+            case BREACH:
+                breachStep(world, route.get(t.fromIdx), t.progress / 2); // deepen every 2 ticks
+                if (warLevel >= 8 && t.progress == 6) {                  // high tech: a real TNT charge
+                    plantSapperCharge(world, breachCorridor);
+                    crew.retreatUntil = tickAge + 36;
+                }
+                t.progress++;
+                break;
+        }
+        if (t.progress >= taskNeeded(t)) {
+            t.done = true;
+            if (t.work == EngWork.BREACH) {                 // open + floor the corridor through the gap
+                openGroundBreach(world, breachCorridor);
+                levelBreachPath(world, breachCorridor);
+            }
+            releaseTask(crew);
+        }
+    }
+
+    /** Reserve the best unclaimed task for a crew: highest priority, then nearest to the crew. */
+    private EngTask reserveNextTask(EngCrew crew) {
+        releaseTask(crew);
+        EngTask best = null; double bestScore = -Double.MAX_VALUE;
+        for (EngTask t : engQueue) {
+            if (t.done || t.claimedBy != null) continue;
+            RouteNode wn = route.get(t.fromIdx);
+            double dn = crew.carrier.getDistance(wn.x, wn.gradeY, wn.z);
+            double score = t.priority * 100.0 - dn; // priority dominates; distance breaks ties
+            if (score > bestScore) { bestScore = score; best = t; }
+        }
+        if (best != null) { best.claimedBy = crew; crew.current = best; }
+        return best;
+    }
+
+    /** Release a crew's reserved task back to the queue (death / completion). */
+    private void releaseTask(EngCrew crew) {
+        if (crew.current != null && crew.current.claimedBy == crew && !crew.current.done) {
+            crew.current.claimedBy = null;
+        }
+        crew.current = null;
+    }
+
+    /** Where a crew stands to work a task: just OUTSIDE the node it faces. Breach/ladder anchor on the
+     *  wall (fromIdx); road work anchors on the segment MIDPOINT (a stable spot, so the crew actually
+     *  "arrives" and builds instead of forever chasing a target that races ahead of it). */
+    private BlockPos workPos(World world, EngTask t) {
+        int idx = (t.work == EngWork.BREACH || t.work == EngWork.LADDER)
+                ? t.fromIdx : (t.fromIdx + t.toIdx) / 2;
+        RouteNode wn = route.get(idx);
+        return outsidePoint(world, new BlockPos(wn.x, wn.gradeY, wn.z), 2.0);
     }
 
     /** Plant a real primed-TNT sapper charge at ground level + guarantee the gap with openGroundBreach. */
@@ -713,11 +920,19 @@ public class SiegeDirector implements IPhasedBattleDirector {
         double launchZ = from.getZ() + 0.5 + (dirZ / dlen) * 2.5;
         double launchY = from.getY() + 5.0;
 
+        // EntityFallingBlock physics per tick: motionY -= 0.04 (gravity, BEFORE move), then move, then
+        // motion *= 0.98 (drag, AFTER move). The OLD calc used plain d/flight and ignored the 0.98 drag,
+        // so the round only travelled ~66% of the distance -- THAT is why the catapult always shot short.
+        // Compensate exactly: horizontal distance over T ticks = v * (1 - d^T)/(1 - d), so invert it.
         final int flight = 45;
-        final double gAcc = 0.04; // EntityFallingBlock gravity per tick
-        double vx = ((target.getX() + 0.5) - launchX) / flight;
-        double vz = ((target.getZ() + 0.5) - launchZ) / flight;
-        double vy = ((target.getY() - launchY) + 0.5 * gAcc * flight * flight) / flight;
+        final double gAcc = 0.04;  // gravity per tick (subtracted before move)
+        final double drag = 0.98;  // motion multiplier per tick (after move)
+        final double dragFactor = (1.0 - Math.pow(drag, flight)) / (1.0 - drag); // effective ticks with drag
+        final double mStar = -drag * gAcc / (1.0 - drag); // vertical motion fixed point under gravity+drag
+        double vx = ((target.getX() + 0.5) - launchX) / dragFactor;
+        double vz = ((target.getZ() + 0.5) - launchZ) / dragFactor;
+        // Vertical closed form for the same drag+gravity recurrence (lands on target.y after `flight`).
+        double vy = mStar + (((target.getY() + 0.5) - launchY) - flight * (mStar - gAcc)) / dragFactor;
 
         try {
             // EntityFallingBlock setDead()s itself on its FIRST tick unless the block at its spawn
@@ -760,7 +975,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * repairable scaffold, rival/neutral walls clear to air).
      */
     private void openGroundBreach(World world, BlockPos at) {
-        int floorY = site.getY();
+        // Carve from the breach FOOT (the route grade at the wall), not the core ground -- on sloped or
+        // raised terrain those differ, and using the core Y left a lip / hole short of the real opening.
+        int floorY = Math.min(at.getY(), site.getY());
         double ang = Math.atan2(at.getZ() - site.getZ(), at.getX() - site.getX());
         double px = -Math.sin(ang), pz = Math.cos(ang); // perpendicular = along the wall (corridor width)
         for (int w = -2; w <= 2; w++) {
@@ -777,44 +994,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
     //  ENGINEERING  (real blocks; breaches are terrain-only and friendly-safe)
     // ════════════════════════════════════════════════════════════
 
-    /** One ascending cobblestone ramp column climbing from OUTSIDE the wall up onto the breach point. */
-    private void buildRampStep(World world, EngineerTask t, int step) {
-        // Outward bearing = from the base core toward the wall, so the ramp climbs from the field up.
-        double ang = Math.atan2(t.breachPoint.getZ() - site.getZ(), t.breachPoint.getX() - site.getX());
-        int out = RAMP_STEPS - step; // early steps further out; the last step reaches the wall itself
-        int x = t.breachPoint.getX() + (int) Math.round(Math.cos(ang) * out);
-        int z = t.breachPoint.getZ() + (int) Math.round(Math.sin(ang) * out);
-        int gY = surfaceY(world, x, z);
-        int rise = Math.min(step, RAMP_CREST);
-        for (int y = gY; y <= gY + rise; y++) {
-            BlockPos p = new BlockPos(x, y, z);
-            try {
-                if (world.isAirBlock(p)) setCampBlock(world, p, Blocks.COBBLESTONE.getDefaultState());
-            } catch (Throwable ignored) {}
-        }
-    }
-
-    /** Carve a 1x3 sapper tunnel from the breach point INWARD through the wall toward the base core. */
-    private void mineTunnel(World world, EngineerTask t, int depth) {
-        if (depth > 10) return;
-        double ang = Math.atan2(site.getZ() - t.breachPoint.getZ(), site.getX() - t.breachPoint.getX());
-        int x = t.breachPoint.getX() + (int) Math.round(Math.cos(ang) * depth);
-        int z = t.breachPoint.getZ() + (int) Math.round(Math.sin(ang) * depth);
-        int baseY = t.breachPoint.getY();
-        for (int y = baseY; y <= baseY + 2; y++) {
-            damageBlock(world, new BlockPos(x, y, z)); // antigrief-aware
-        }
-    }
-
     /**
      * Once a lane is breached, clear AND floor a wide (5x3) corridor from the wall inward to the base
      * at ground level, so the assault pours straight through instead of bottlenecking on rubble or
      * dropping into holes. Clears via damageBlock (antigrief-aware); floors gaps via setCampBlock so
      * the added cobblestone reverts when the siege ends. This is the "make it bigger + level it out".
      */
-    private void levelBreachPath(World world, EngineerTask t) {
-        BlockPos bp = t.breachPoint;
-        int floorY = site.getY();
+    private void levelBreachPath(World world, BlockPos bp) {
+        int floorY = bp.getY();
         double dist = Math.hypot(site.getX() - bp.getX(), site.getZ() - bp.getZ());
         if (dist < 1.0) return;
         double ux = (site.getX() - bp.getX()) / dist, uz = (site.getZ() - bp.getZ()) / dist; // toward core
@@ -1331,7 +1518,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
         carriers.clear();
         frontLine.clear();
         bombardLine.clear();
-        engineerTasks.clear();
+        engCrews.clear();
+        engQueue.clear();
+        route.clear();
     }
 
     @Override
@@ -1399,22 +1588,47 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
-    /** One engineer's breach assignment: approach the lane, raise a ramp, mine/blow the wall. */
-    private static final class EngineerTask {
-        final EntityFormationCarrier carrier;
-        final double lateral;
-        final BlockPos breachPoint;
-        int workTicks = 0;
-        int stepsBuilt = 0;
-        boolean breached = false;
-        boolean done = false;
-        int retreatUntil = 0; // tickAge before which the crew pulls back from a planted charge
+    /** A terrain obstacle the route can cross (drives the engineering action + mobility cost). */
+    private enum Obstacle { PASSABLE, WATER, LAVA, GAP, CLIFF, WALL }
 
-        EngineerTask(EntityFormationCarrier carrier, double lateral, BlockPos breachPoint) {
-            this.carrier = carrier;
-            this.lateral = lateral;
-            this.breachPoint = breachPoint;
+    /** A unit of engineering work pulled off the shared queue. */
+    private enum EngWork { CLEAR, BRIDGE, RAMP, LADDER, BREACH }
+
+    /** One node of the saved MilitaryRoute: a column + its terrain-following walkable grade + obstacle. */
+    private static final class RouteNode {
+        final int x, z, gradeY;
+        final Obstacle obstacle;
+        RouteNode(int x, int z, int gradeY, Obstacle obstacle) {
+            this.x = x; this.z = z; this.gradeY = gradeY; this.obstacle = obstacle;
         }
+    }
+
+    /**
+     * One reservable engineering task: a span of route nodes [fromIdx,toIdx] and the work to do there.
+     * A crew claims it ({@code claimedBy}), advances {@code progress} as it visibly builds, and marks it
+     * {@code done}. Higher {@code priority} is taken first (the wall breach = 100).
+     */
+    private static final class EngTask {
+        final EngWork work;
+        final Obstacle obstacle;
+        final int fromIdx, toIdx;
+        final int priority;
+        int progress = 0;
+        boolean done = false;
+        EngCrew claimedBy = null;
+        EngTask(EngWork work, Obstacle obstacle, int fromIdx, int toIdx, int priority) {
+            this.work = work; this.obstacle = obstacle;
+            this.fromIdx = fromIdx; this.toIdx = toIdx; this.priority = priority;
+        }
+    }
+
+    /** One engineer squad that pulls tasks off the shared queue and builds them. */
+    private static final class EngCrew {
+        final EntityFormationCarrier carrier;
+        EngTask current = null;
+        int workTicks = 0;
+        int retreatUntil = 0; // tickAge before which the crew pulls back from a planted charge
+        EngCrew(EntityFormationCarrier carrier) { this.carrier = carrier; }
     }
 
     /** An in-flight catapult round: the visual cobblestone block + where/when it detonates. */

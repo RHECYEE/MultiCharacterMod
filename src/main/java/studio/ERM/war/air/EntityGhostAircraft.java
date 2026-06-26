@@ -784,6 +784,17 @@ public class EntityGhostAircraft extends EntityLiving {
 
     @Override
     public boolean attackEntityFrom(DamageSource source, float amount) {
+        // FRIENDLY-FIRE GUARD: the air campaign must never dogfight itself. A flight bombing/strafing
+        // the same area was catching nearby friendly aircraft in its own blasts -- they damaged each
+        // other and chain-exploded, which is the "air deployment fighting each other" the player saw.
+        // Ignore any damage that originates from another ghost aircraft (bombs, missiles, the death
+        // blast). AA fire (handled below) still downs them.
+        Entity src = source.getImmediateSource();
+        Entity trueSrc = source.getTrueSource();
+        if (src instanceof EntityGhostAircraft || trueSrc instanceof EntityGhostAircraft) {
+            return false;
+        }
+
         if (source.getImmediateSource() != null) {
             String sourceName = source.getImmediateSource().getName().toLowerCase();
             if (sourceName.contains("aa") || sourceName.contains("flak") || sourceName.contains("bofors")) {

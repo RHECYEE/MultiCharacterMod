@@ -41,6 +41,15 @@ public class EntityFormationCarrier extends EntityCreature {
     // Release pacing
     private int releasePerSecond = 4;
 
+    // CONTACT SLICE (director-managed formations only). Instead of dumping the whole squad into real
+    // combat-AI soldiers the instant the line touches the objective -- which spawned 100-300 soldiers in
+    // a second and devolved the siege into "minecraft madness" -- a director formation keeps its puppets
+    // in formation and feeds only a small, capped slice of real fighters into contact, replenishing them
+    // as they fall. The bulk of the unit stays a controlled, tight, advancing puppet block (Total War).
+    private final List<Integer> contactIds = new ArrayList<>();
+    private int contactCooldown = 0;
+    private int contactSliceCap = 3;
+
     // Rout
     private float routHealthThreshold = 0.25F;
 
@@ -235,7 +244,7 @@ public class EntityFormationCarrier extends EntityCreature {
                     && this.getDistanceSq(battleSite.getX() + 0.5, battleSite.getY(), battleSite.getZ() + 0.5)
                        <= (double) (releaseRange * releaseRange);
             if (atObjective) {
-                tickRelease();
+                tickContactSlice(); // controlled trickle of fighters; the rest hold formation
             } else {
                 syncPuppetCountToHealth();
             }
@@ -369,6 +378,51 @@ public class EntityFormationCarrier extends EntityCreature {
             setDead();
         }
         return releasedThisTick;
+    }
+
+    /**
+     * Controlled commitment for a director formation: keep at most {@link #contactSliceCap} real
+     * fighters in the fight at once, replenishing one at a time (on a cooldown) as they fall. The rest
+     * of the unit stays a tight puppet block that thins with the carrier's health. This is what turns a
+     * siege line into an advancing Total-War formation instead of a one-second flood of loose soldiers.
+     */
+    private void tickContactSlice() {
+        for (int i = contactIds.size() - 1; i >= 0; i--) {       // forget fallen fighters
+            Entity e = world.getEntityByID(contactIds.get(i));
+            if (e == null || e.isDead) contactIds.remove(i);
+        }
+        if (contactCooldown > 0) contactCooldown--;
+        if (contactCooldown <= 0 && contactIds.size() < contactSliceCap && !puppetEntityIds.isEmpty()) {
+            Entity s = releaseOnePuppet();
+            if (s != null) { contactIds.add(s.getEntityId()); contactCooldown = 25; }
+        }
+        // The unreleased remainder still visibly thins as the formation takes damage.
+        syncPuppetCountToHealth();
+    }
+
+    /** Release exactly ONE front-slot puppet as a real soldier and return it (for contact tracking). */
+    private Entity releaseOnePuppet() {
+        String loadoutRole = SoldierLoadout.roleFromCardName(this.cardName);
+        Entity spawned = null;
+        for (int i = 0; i < slotPayloads.size() && i < puppetEntityIds.size(); i++) {
+            int puppetId = puppetEntityIds.get(i);
+            Entity p = world.getEntityByID(puppetId);
+            if (!(p instanceof EntitySoldierPuppet)) continue;
+            EntitySoldierPuppet puppet = (EntitySoldierPuppet) p;
+            SlotPayload payload = slotPayloads.get(i);
+            BlockPos spawnPos = new BlockPos(p.posX, p.posY, p.posZ);
+            try {
+                spawned = SpawnHelper.spawnPayload(world, spawnPos, payload.getId(),
+                        battleTargetPlayerUuid, battleSite, this.warLevel, loadoutRole, puppet.getSkinKey());
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.error("[BattleManagers] Contact release error: {}", t.getMessage());
+            }
+            p.setDead();
+            break; // exactly one
+        }
+        pruneDeadPuppets();
+        if (puppetEntityIds.isEmpty()) setDead();
+        return spawned;
     }
 
     private void spawnPuppets() {

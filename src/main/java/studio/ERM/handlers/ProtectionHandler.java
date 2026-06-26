@@ -59,11 +59,47 @@ public class ProtectionHandler extends WorldSavedData {
 
     @SubscribeEvent
     public static void onExplosionDetonate(ExplosionEvent.Detonate event) {
-        if (event.getWorld().isRemote) return;
-        ProtectionHandler instance = get(event.getWorld());
+        World world = event.getWorld();
+        if (world.isRemote) return;
+        ProtectionHandler instance = get(world);
+        WarWorldData war = WarWorldData.get(world);
 
-        // Remove protected blocks from explosion damage list
-        event.getAffectedBlocks().removeIf(pos -> instance.protectedStates.containsKey(pos.toImmutable()));
+        // Walk the blast's block list ONCE and decide each block's fate:
+        //  - protector-stick blocks: pull out of the blast (indestructible, as before).
+        //  - CLAIMED land: make the damage RECOVERABLE -- record the original for /war repair and leave a
+        //    passable scaffold, exactly like the siege's own antigrief damageBlock(). This is what makes
+        //    explosion damage (air bombs, sapper TNT, stray ordnance) repairable instead of permanently
+        //    griefing a claimed build -- the gap the player reported where /war repair "left structure
+        //    unrepaired". Unclaimed / rival land is left to vanilla (battles really do wreck rival walls).
+        java.util.List<BlockPos> toScaffold = new java.util.ArrayList<>();
+        java.util.Iterator<BlockPos> it = event.getAffectedBlocks().iterator();
+        while (it.hasNext()) {
+            BlockPos pos = it.next().toImmutable();
+            if (instance.protectedStates.containsKey(pos)) { it.remove(); continue; }
+            if (war != null && EpochRunnerMod.scaffold != null && isClaimedForRepair(war, pos)) {
+                try {
+                    IBlockState st = world.getBlockState(pos);
+                    if (!world.isAirBlock(pos) && st.getBlockHardness(world, pos) >= 0) {
+                        war.addRepairOrder(pos, st);
+                        toScaffold.add(pos);
+                    }
+                } catch (Throwable ignored) {}
+                it.remove(); // take it out of the blast so vanilla can't destroy/drop it
+            }
+        }
+        for (BlockPos pos : toScaffold) {
+            try { world.setBlockState(pos, EpochRunnerMod.scaffold.getDefaultState(), 2); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** True if this position is on a player-claimed (recoverable) chunk -- not neutral / rival land. */
+    private static boolean isClaimedForRepair(WarWorldData war, BlockPos pos) {
+        try {
+            String owner = war.getOwner(new net.minecraft.util.math.ChunkPos(pos));
+            return owner != null && !"NEUTRAL".equals(owner) && !"RIVAL".equals(owner);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     @SubscribeEvent
