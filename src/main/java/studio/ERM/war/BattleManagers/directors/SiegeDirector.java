@@ -478,12 +478,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
             int j = i;
             while (j + 1 < route.size() && taskFamily(route.get(j + 1).obstacle) == taskFamily(ob)) j++;
             EngWork w = workFor(ob);
-            if (w == EngWork.BREACH) {
-                engQueue.add(new EngTask(EngWork.BREACH, ob, i, j, 100)); // the wall: top priority
-                engQueue.add(new EngTask(EngWork.LADDER, ob, i, j, 40));  // escalade alongside the breach
-            } else {
-                engQueue.add(new EngTask(w, ob, i, j, 50 - i));          // nearest-to-staging first
-            }
+            // The breach + the ramp-up (levelBreachPath) ARE the path in -- no LADDER task (the old
+            // escalade ladders placed floating on the breached wall and did nothing).
+            engQueue.add(new EngTask(w, ob, i, j, w == EngWork.BREACH ? 100 : 50 - i));
             i = j + 1;
         }
 
@@ -493,7 +490,6 @@ public class SiegeDirector implements IPhasedBattleDirector {
         for (EngTask t : engQueue) if (t.work == EngWork.BREACH) { haveBreach = true; break; }
         if (!haveBreach && breachIdx >= 0) {
             engQueue.add(new EngTask(EngWork.BREACH, Obstacle.WALL, breachIdx, breachIdx, 100));
-            engQueue.add(new EngTask(EngWork.LADDER, Obstacle.WALL, breachIdx, breachIdx, 40));
         }
         engQueue.sort((a, b) -> b.priority - a.priority);
         EpochRunnerMod.logger.info("[Siege] MilitaryRoute: " + route.size() + " nodes; "
@@ -861,23 +857,48 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void beginSurge(World world) {
         phase = P_SURGE;
         lastPhaseChangeTick = tickAge;
-        EpochRunnerMod.logger.info("[Siege] -> SURGE: airstrike + line commits (warLevel=" + warLevel + ")");
+        EpochRunnerMod.logger.info("[Siege] -> SURGE: invasion through the breach (warLevel=" + warLevel + ")");
 
         int surgeWaves = (warLevel >= 8) ? 3 : (warLevel >= 5) ? 2 : 1;
         AirStrikeController.launchHostileSurge(world, site, warLevel, surgeWaves);
 
-        // CAVALRY CHARGE: mounted shock troops sweep in ahead of the infantry. Each carrier releases
-        // its mounted soldiers (CAVALRY card -> horse) right at the wall, who then charge the defender.
-        int cavUnits = (warLevel >= 7) ? 3 : 2;
+        // The whole assault line now drives for the CORE through the breach, releasing its soldiers
+        // INSIDE the base instead of at the wall -- the invasion, not a parade at the gate.
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead || c.isEngineerMode()) continue;
+            c.setBattleContext(activator, site);
+        }
+
+        // CAVALRY CHARGE: a real wave of mounted knights (CAVALRY card -> horse + sword/shield) sweeps in
+        // through the breach ahead of the infantry. A high contact cap makes it read as a CHARGE, not a
+        // trickle, and they too drive for the core through the breach.
+        int cavUnits = (warLevel >= 7) ? 4 : 3;
         for (int i = 0; i < cavUnits; i++) {
-            double lateral = (i - (cavUnits - 1) / 2.0) * 12.0;
-            BlockPos at = frontPoint(world, WALL_RING + 3.0, lateral);
+            double lateral = (i - (cavUnits - 1) / 2.0) * 8.0;
+            BlockPos at = frontPoint(world, WALL_RING + 6.0, lateral);
             EntityFormationCarrier cav = spawnCarrierAt(world, at, getCard("LightCavalry"), true);
-            if (cav != null) cav.setBattleContext(activator, at); // release here; the horsemen then charge
+            if (cav != null) {
+                cav.setContactSliceCap(8);             // a whole troop of horsemen
+                cav.setBattleContext(activator, site); // charge IN through the breach
+            }
         }
 
         // A fresh armoured push commits with the line.
         if (warLevel >= 6) spawnArmourColumn(world, WALL_RING + 6.0);
+    }
+
+    /** INVASION movement: drive every non-engineer assault carrier THROUGH the breach the engineers
+     *  opened, then up the ramp into the core. Outside the wall they head for the breach gap; once past
+     *  it they push to the core, releasing their contact-slice soldiers INSIDE the base. */
+    private void advanceThroughBreach(World world, double speed) {
+        if (breachCorridor == null) { advanceLine(world, WALL_RING, speed); return; }
+        double breachDist = Math.hypot(breachCorridor.getX() - site.getX(), breachCorridor.getZ() - site.getZ());
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead || c.isEngineerMode()) continue;
+            double dCore = c.getDistance(site.getX(), site.getY(), site.getZ());
+            if (dCore > breachDist + 5) c.setMoveTarget(breachCorridor, speed); // head for the gap
+            else c.setMoveTarget(site, speed);                                   // through -> into the core
+        }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -948,12 +969,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 break;
 
             case P_SURGE:
-                advanceLine(world, WALL_RING, 0.06 + warLevel * 0.004);
+                // INVASION: funnel the army THROUGH the breach the engineers opened and up the ramp
+                // into the base, instead of milling at the wall. This is the assault going in.
+                advanceThroughBreach(world, 0.06 + warLevel * 0.004);
                 if (tsp >= PHASE_SURGE_TICKS || waveDefeated(tsp)) beginInteriorAssault(world);
                 break;
 
             case P_ASSAULT:
-                advanceLine(world, ASSAULT_RING - 4.0, 0.06 + warLevel * 0.004);
+                advanceThroughBreach(world, 0.07 + warLevel * 0.004);
                 if (waveDefeated(tsp)) {
                     forceResolve(BattleOutcome.VICTORY); // the assault was fought off
                 } else if (tsp >= PHASE_ASSAULT_TICKS) {
@@ -1048,12 +1071,19 @@ public class SiegeDirector implements IPhasedBattleDirector {
         if (roll < 5) {
             target = defender; // the occasional terrifying near-miss on the player
         } else {
-            // Converge on the ONE breach corridor with a tight cluster, so the gap actually opens
-            // instead of pockmarking the whole wall. Aim at the breach FOOT Y (ground level), NOT
-            // surfaceY -- surfaceY at a wall column is the ROOF, which is why the barrage was landing
-            // on top of the castle instead of opening a ground-level breach.
-            int sx = breachCorridor.getX() + world.rand.nextInt(5) - 2;
-            int sz = breachCorridor.getZ() + world.rand.nextInt(5) - 2;
+            // CREEPING BARRAGE: as the bombardment goes on, march the aim point inward from the wall
+            // toward the core, so the army ERASES MORE of the castle over time instead of digging one
+            // hole at the wall (the "advance the target as they stop doing damage" note). Scales with
+            // level -- at L10 it walks deep into the base and pulverises it. Aim at the breach FOOT Y
+            // (ground), NOT surfaceY (which is the roof). Real artillery SPREAD, not machine-accuracy.
+            int maxCreep = (warLevel >= 9) ? 26 : (warLevel >= 6) ? 16 : 8;
+            int creep = Math.min(maxCreep, (tickAge - lastPhaseChangeTick) / 25);
+            double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
+            int cx = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * creep);
+            int cz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * creep);
+            int spread = (warLevel >= 9) ? 6 : 4;
+            int sx = cx + world.rand.nextInt(spread * 2 + 1) - spread;
+            int sz = cz + world.rand.nextInt(spread * 2 + 1) - spread;
             target = new BlockPos(sx, breachCorridor.getY(), sz);
         }
 
@@ -1083,8 +1113,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int boulders = Math.max(2, Math.min(5, 2 + warLevel / 3));
         world.playSound(null, from, SoundEvents.ENTITY_GENERIC_EXPLODE, SoundCategory.HOSTILE, 2.4F, 0.7F);
         for (int b = 0; b < boulders; b++) {
-            int tx = target.getX() + (b == 0 ? 0 : world.rand.nextInt(5) - 2);
-            int tz = target.getZ() + (b == 0 ? 0 : world.rand.nextInt(5) - 2);
+            // Every boulder scatters (even the first) -- the barrage felt machine-accurate before.
+            int tx = target.getX() + world.rand.nextInt(7) - 3;
+            int tz = target.getZ() + world.rand.nextInt(7) - 3;
             int ty = target.getY();
             double vx = ((tx + 0.5) - launchX) / dragFactor;
             double vz = ((tz + 0.5) - launchZ) / dragFactor;

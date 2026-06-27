@@ -304,6 +304,19 @@ public class AirStrikeController {
         }
     }
 
+    /**
+     * Server-tick driver for air operations. Registered on the Forge bus by EpochRunnerMod.init().
+     * WITHOUT this, AirStrikeController.tick() was never called, so the whole air-operations system --
+     * surge waves, aircraft loiter/cleanup -- was DEAD and aircraft never properly ran their missions.
+     */
+    @net.minecraftforge.fml.common.eventhandler.SubscribeEvent
+    public static void onWorldTick(net.minecraftforge.fml.common.gameevent.TickEvent.WorldTickEvent e) {
+        if (e.phase != net.minecraftforge.fml.common.gameevent.TickEvent.Phase.END) return;
+        if (e.world == null || e.world.isRemote || !(e.world instanceof WorldServer)) return;
+        try { tick((WorldServer) e.world); }
+        catch (Throwable t) { EpochRunnerMod.logger.warn("[AIR] tick handler failed: " + t.getMessage()); }
+    }
+
     // ============================================================
     // CORE LAUNCH
     // ============================================================

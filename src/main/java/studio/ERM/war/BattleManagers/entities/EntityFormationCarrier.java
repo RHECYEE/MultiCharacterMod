@@ -150,6 +150,11 @@ public class EntityFormationCarrier extends EntityCreature {
 
     public boolean isEngineerMode() { return engineerMode; }
 
+    /** Size of the simultaneous contact slice this formation commits (e.g. a cavalry CHARGE wants more). */
+    public void setContactSliceCap(int cap) {
+        this.contactSliceCap = Math.max(1, cap);
+    }
+
     /**
      * Director-driven commit: release up to {@code count} of this carrier's puppets as real soldiers
      * RIGHT NOW, regardless of player proximity. Lets the SiegeDirector promote only a small "contact
