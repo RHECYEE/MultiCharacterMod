@@ -71,16 +71,15 @@ public final class BattleManagersClientRenderRegistrar {
                 RenderingRegistry.registerEntityRenderingHandler(
                         studio.ERM.war.vehicle.EntityAIPilot.class, RenderSkinnable::new));
 
-        // Airstrike aircraft: the REAL Flan model renderer. The CME blocker is solved -- RenderGhost-
-        // Aircraft now builds its dummy EntityPlane in a client TICK (onClientTick, phase START),
-        // OUTSIDE RenderGlobal's entity iteration, so the constructor's seat-spawn can't corrupt the
-        // entity list. doRender renders the real ModelPlane (planes AND helis are Flan PlaneType), and
-        // falls back to a box per-type if the model can't be resolved -- so worst case is the old box,
-        // never a crash. Real Flan models dragged across the sky, which is what the player wants.
+        // Airstrike aircraft: the BOX renderer is the REGISTERED one because it has ZERO Flan imports,
+        // so it can never fail to class-load -> aircraft are always visible. It ATTEMPTS the real Flan
+        // model via an isolated FlanGhostModel.render() guarded by try/catch -- if that Flan-importing
+        // class fails to load or render, it silently falls back to the box. Registering the real renderer
+        // directly (last attempt) risked total invisibility if its Flan classes failed at render time.
         safeRegister("EntityGhostAircraft", () ->
                 RenderingRegistry.registerEntityRenderingHandler(
                         studio.ERM.war.air.EntityGhostAircraft.class,
-                        new studio.ERM.war.air.RenderGhostAircraft.Factory()));
+                        new studio.ERM.war.air.RenderGhostAircraftSafe.Factory()));
     }
 
     /** Run one renderer registration, swallowing any Throwable (incl. NoClassDefFoundError). */

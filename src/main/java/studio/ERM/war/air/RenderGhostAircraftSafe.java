@@ -48,6 +48,13 @@ public class RenderGhostAircraftSafe extends Render<EntityGhostAircraft> {
 
     @Override
     public void doRender(EntityGhostAircraft entity, double x, double y, double z, float entityYaw, float partialTicks) {
+        // Attempt the REAL Flan model first, via the isolated FlanGhostModel (which has the Flan imports).
+        // It's wrapped in try/catch so that if that class fails to load/render, this box renderer -- which
+        // has ZERO Flan imports and so always loads -- still draws the aircraft. Never invisible.
+        try {
+            if (studio.ERM.war.air.FlanGhostModel.render(entity, x, y, z, partialTicks)) return;
+        } catch (Throwable ignored) {}
+
         // Draw a simple team-coloured airframe. The "render nothing + drag a real Flan plane" approach
         // was abandoned because spawning a live Flan EntityPlane crashes the server (its physics tick
         // NPEs without a real pilot). This box has ZERO Flan dependencies, so airstrikes are visible

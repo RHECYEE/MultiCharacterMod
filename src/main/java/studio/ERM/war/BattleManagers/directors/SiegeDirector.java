@@ -283,9 +283,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
         double toStage = Math.atan2(edgeOutside.getZ() - site.getZ(), edgeOutside.getX() - site.getX());
         int nx = site.getX() + (int) Math.round(Math.cos(toStage) * 16);
         int nz = site.getZ() + (int) Math.round(Math.sin(toStage) * 16);
-        BlockPos nearCore = new BlockPos(nx, site.getY(), nz);
+        // Anchor the breach foot at the TERRAIN GROUND at that column, NOT site.getY() (the core's roof) --
+        // that roof Y made the ramp build up in the air. Ground = where the army stands + the ramp begins.
+        BlockPos nearCore = new BlockPos(nx, terrainGroundY(world, nx, nz), nz);
         BlockPos wall = detectWallOnPath(world, outsidePoint(world, nearCore, 12.0), nearCore);
-        breachCorridor = (wall != null) ? new BlockPos(wall.getX(), site.getY(), wall.getZ()) : nearCore;
+        breachCorridor = (wall != null)
+                ? new BlockPos(wall.getX(), terrainGroundY(world, wall.getX(), wall.getZ()), wall.getZ())
+                : nearCore;
         EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (near core "
                 + site.getX() + "," + site.getZ() + ", army side; "
                 + (edge != null ? "perimeter def=" + (int) edge.defenseHeat : "landward") + ")");
@@ -381,7 +385,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
 
         // Hostile aircraft work the area during the barrage (BF109/Lancaster/heli pool by level).
-        if (warLevel >= 3) AirStrikeController.requestHostileCAS(world, site, warLevel);
+        if (warLevel >= 3) {
+            boolean cas = AirStrikeController.requestHostileCAS(world, site, warLevel);
+            EpochRunnerMod.logger.info("[Siege] bombardment CAS requested -> launched=" + cas);
+        }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -876,20 +883,22 @@ public class SiegeDirector implements IPhasedBattleDirector {
         EpochRunnerMod.logger.info("[Siege] -> SURGE: invasion through the breach (warLevel=" + warLevel + ")");
 
         int surgeWaves = (warLevel >= 8) ? 3 : (warLevel >= 5) ? 2 : 1;
-        AirStrikeController.launchHostileSurge(world, site, warLevel, surgeWaves);
+        boolean airLaunched = AirStrikeController.launchHostileSurge(world, site, warLevel, surgeWaves);
+        EpochRunnerMod.logger.info("[Siege] surge airstrike requested (" + surgeWaves + " waves) -> launched=" + airLaunched);
 
-        // The release point: a REACHABLE spot just inside the breach (up the ramp, ~14 blocks in). The
-        // deep core is walled off by interior buildings, so carriers aimed at it stalled at the ramp foot
-        // and never released (no invasion, no cavalry). Releasing here lands soldiers INSIDE -- and they
-        // get a home pos there (SpawnHelper), so they hold/press the interior toward the defender.
+        // RELEASE AT THE BREACH (reachable, ground level), NOT a deep interior point. Aiming carriers at
+        // a point inside the castle (walled off by buildings) meant they never reached release range and
+        // never spawned a soldier -- the army just stood at the ramp foot. Releasing at the breach lands
+        // the soldiers right there; they have full pathfinding + a home pos, so THEY climb the ramp and
+        // press the defender. interiorObjective (a short way up the ramp) is just the movement goal.
         double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
-        int ix = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * 14);
-        int iz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * 14);
-        interiorObjective = new BlockPos(ix, surfaceY(world, ix, iz), iz);
+        int ix = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * 8);
+        int iz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * 8);
+        interiorObjective = new BlockPos(ix, terrainGroundY(world, ix, iz), iz);
 
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
-            c.setBattleContext(activator, interiorObjective);
+            c.setBattleContext(activator, breachCorridor); // release at the breach -> soldiers climb in
         }
 
         spawnCavalryCharge(world);
@@ -1460,6 +1469,26 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private int surfaceY(World world, double x, double z) {
         return Math.max(62, world.getTopSolidOrLiquidBlock(
                 new BlockPos((int) Math.floor(x), 64, (int) Math.floor(z))).getY());
+    }
+
+    /**
+     * The NATURAL TERRAIN ground in a column -- scan DOWN from the surface past any man-made blocks to
+     * the first natural solid block, and stand on top of it. surfaceY returns the ROOF when a building
+     * (or the player) is in the column, which made the breach foot + ramp anchor at roof height and
+     * "build the ramp way up in the air". This returns the actual ground the structure sits on.
+     */
+    private int terrainGroundY(World world, int x, int z) {
+        int top = surfaceY(world, x, z);
+        for (int y = top; y > Math.max(4, top - 48); y--) {
+            try {
+                IBlockState st = world.getBlockState(new BlockPos(x, y, z));
+                net.minecraft.block.material.Material m = st.getMaterial();
+                if (m.isSolid() && !m.isLiquid() && !studio.ERM.war.strategy.SiegeTargeting.isManMade(st)) {
+                    return y + 1; // stand on top of the first natural terrain block
+                }
+            } catch (Throwable ignored) {}
+        }
+        return Math.max(62, top - 10);
     }
 
     /** True if there is an actual wall/structure at an impact point worth carving (vs open ground). */
