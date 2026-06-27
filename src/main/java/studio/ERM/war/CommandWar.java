@@ -187,40 +187,77 @@ public class CommandWar extends CommandBase {
         World world = player.world;
         if (world.isRemote) return;
 
-        int radius = 4;
+        int radius = 8;
         if (args.length >= 2) {
             try { radius = Math.max(1, Math.min(12, Integer.parseInt(args[1]))); } catch (NumberFormatException ignored) {}
         }
-        int cx = player.getPosition().getX() >> 4;
-        int cz = player.getPosition().getZ() >> 4;
 
-        studio.ERM.war.strategy.WarHeatMap map = studio.ERM.war.strategy.WarHeatMap.get(world);
-        java.util.List<studio.ERM.war.strategy.StrategicChunk> scanned = map.scanArea(world, cx, cz, radius);
+        // Run the EXACT targeting the SiegeDirector uses, so the board shows what the siege WILL hit.
+        BlockPos here = player.getPosition();
+        studio.ERM.war.strategy.SiegeTargeting.Result r =
+                studio.ERM.war.strategy.SiegeTargeting.resolve(world, here, 256, 120, radius);
 
-        studio.ERM.war.strategy.StrategicChunk hottest = map.hottest();
-        if (hottest == null || hottest.totalHeat() < 30) {
-            msg(sender, TextFormatting.YELLOW + "Scanned " + scanned.size() + " chunks (r=" + radius
-                    + "); no base detected nearby.");
-            return;
+        BlockPos t = r.target;
+        msg(sender, TextFormatting.GOLD + "=== Siege Targeting ("
+                + r.scanned.size() + " chunks scanned, r=" + radius + ") ===");
+        // REAL block coordinates -- not chunk coords.
+        msg(sender, TextFormatting.GREEN + "TARGET: " + TextFormatting.WHITE
+                + t.getX() + ", " + t.getY() + ", " + t.getZ()
+                + TextFormatting.GRAY + "  (" + (int) Math.sqrt(here.distanceSq(t)) + " blocks away)");
+        String why;
+        switch (r.reason) {
+            case "protected": why = "your PROTECTED blocks (" + r.protectedBlocks.size() + " found) -- strongest signal"; break;
+            case "structure": why = "man-made STRUCTURE scan (no protected blocks nearby)"; break;
+            case "heat":      why = "tile-entity HEAT core (no protected blocks / structure found)"; break;
+            default:          why = "NO castle signal found -> falling back to where you stand"; break;
         }
-        java.util.List<studio.ERM.war.strategy.StrategicChunk> cluster = map.cluster(hottest, 30.0);
-        studio.ERM.war.strategy.StrategicChunk core = map.coreOf(cluster);
-
-        double clusterHeat = 0;
-        for (studio.ERM.war.strategy.StrategicChunk c : cluster) clusterHeat += c.totalHeat();
-
-        msg(sender, TextFormatting.GOLD + "=== Strategic Heat (r=" + radius + ", " + scanned.size() + " chunks scanned) ===");
-        msg(sender, TextFormatting.GRAY + "Base cluster: " + TextFormatting.WHITE + cluster.size()
-                + " chunks, total heat " + (int) clusterHeat);
-        if (core != null) {
-            msg(sender, TextFormatting.GREEN + "CORE @ chunk [" + core.chunkX + ", " + core.chunkZ + "] = "
-                    + TextFormatting.WHITE + core.classification + " (heat " + (int) core.totalHeat() + ")");
+        msg(sender, TextFormatting.YELLOW + "WHY: " + TextFormatting.WHITE + why);
+        msg(sender, TextFormatting.GRAY + "Protected blocks near you: " + r.protectedBlocks.size()
+                + "   |   Hottest chunk heat: " + (r.hottest != null ? (int) r.hottest.totalHeat() : 0));
+        if (r.heatCore != null) {
+            int hx = (r.heatCore.chunkX << 4) + 8, hz = (r.heatCore.chunkZ << 4) + 8;
+            msg(sender, TextFormatting.GRAY + "Heat core would be at block " + hx + ", " + hz
+                    + " (" + r.heatCore.classification + ", heat " + (int) r.heatCore.totalHeat() + ")");
         }
-        cluster.sort((a, b) -> Double.compare(b.totalHeat(), a.totalHeat()));
-        int shown = 0;
-        for (studio.ERM.war.strategy.StrategicChunk c : cluster) {
-            if (shown++ >= 8) break;
-            msg(sender, TextFormatting.GRAY + " " + c.toString());
+        if ("trigger".equals(r.reason)) {
+            msg(sender, TextFormatting.RED + "No base detected -- protect-stick your walls or stand nearer the castle.");
+        }
+        msg(sender, TextFormatting.AQUA + "Showing the heat board for 30s: tall WHITE beam = target, "
+                + "pink = your protected blocks, coloured bars = chunk heat by type.");
+
+        // --- Build the visual board ---
+        java.util.List<studio.ERM.war.strategy.WarHeatDebug.Marker> markers = new java.util.ArrayList<>();
+        for (studio.ERM.war.strategy.StrategicChunk c : r.scanned) {
+            if (c == null || c.totalHeat() < 30) continue; // skip cold clutter
+            int bx = (c.chunkX << 4) + 8, bz = (c.chunkZ << 4) + 8;
+            int by = studio.ERM.war.strategy.SiegeTargeting.surfaceY(world, bx, bz);
+            float[] col = classColor(c.classification);
+            int h = Math.min(12, 2 + (int) (c.totalHeat() / 80.0));
+            markers.add(new studio.ERM.war.strategy.WarHeatDebug.Marker(new BlockPos(bx, by, bz), col[0], col[1], col[2], h));
+        }
+        // Protected blocks (sampled so we don't spam thousands of particles).
+        int step = Math.max(1, r.protectedBlocks.size() / 80);
+        for (int i = 0; i < r.protectedBlocks.size(); i += step) {
+            BlockPos p = r.protectedBlocks.get(i);
+            markers.add(new studio.ERM.war.strategy.WarHeatDebug.Marker(p, 1.0f, 0.3f, 0.6f, 2));
+        }
+        // The chosen TARGET: a tall bright white beacon.
+        markers.add(new studio.ERM.war.strategy.WarHeatDebug.Marker(t, 1.0f, 1.0f, 1.0f, 28));
+        studio.ERM.war.strategy.WarHeatDebug.show(world, markers, 30 * 20);
+    }
+
+    /** Map a chunk classification to an RGB particle colour for the heat board. */
+    private static float[] classColor(studio.ERM.war.strategy.StrategicChunk.Classification cl) {
+        switch (cl) {
+            case CORE:      return new float[]{1.0f, 0.0f, 0.0f}; // red
+            case STORAGE:   return new float[]{0.1f, 0.3f, 1.0f}; // blue
+            case MACHINE:   return new float[]{1.0f, 0.5f, 0.0f}; // orange
+            case POWER:     return new float[]{0.7f, 0.0f, 1.0f}; // purple
+            case LIVING:    return new float[]{0.0f, 1.0f, 0.0f}; // green
+            case DEFENSE:   return new float[]{1.0f, 1.0f, 0.0f}; // yellow
+            case LOGISTICS: return new float[]{0.0f, 1.0f, 1.0f}; // cyan
+            case PERIMETER: return new float[]{0.6f, 0.6f, 0.6f}; // grey
+            default:        return new float[]{0.4f, 0.4f, 0.4f}; // faint
         }
     }
 

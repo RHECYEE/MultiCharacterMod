@@ -153,6 +153,11 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(new co.runed.multicharacter.handlers.AIInjectionHandler());
             logger.info("[MCM] AIInjectionHandler registered (Flan-gun infantry AI is LIVE)");
 
+            // /war heat in-world debug board (temporary heat/target particle visualization).
+            // Static @SubscribeEvent -> register the CLASS, not an instance.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.war.strategy.WarHeatDebug.class);
+            logger.info("[War] WarHeatDebug registered (/war heat visual board is LIVE)");
+
             // CRITICAL FIX: populate the battle-director registry. It was never initialized, so the
             // map's "Deploy Battle" menu listed ZERO battle types (empty dropdown) and any registry
             // lookup returned nothing. init() is idempotent and self-guards on `initialized`.

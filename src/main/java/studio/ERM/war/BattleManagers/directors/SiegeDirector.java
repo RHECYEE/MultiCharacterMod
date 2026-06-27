@@ -182,34 +182,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
         //   2. STRUCTURE scan -- man-made building blocks, for a base that wasn't protect-sticked.
         //   3. HEAT core -- tile-entity (chest/machine) concentration.
         //   4. the trigger point.
+        // Shared resolver -- IDENTICAL to what `/war heat` shows, so the debug board reflects the siege.
         try {
-            BlockPos protectedCore = findProtectedCore(world, site, 256);
-            if (protectedCore != null) {
-                this.site = protectedCore;
-                EpochRunnerMod.logger.info("[Siege] PROTECTED-block castle found -> siege aimed at " + site);
-            } else {
-                BlockPos fortress = findFortressCenter(world, site, 120);
-                if (fortress != null) {
-                    this.site = fortress;
-                    EpochRunnerMod.logger.info("[Siege] FORTRESS structure found -> siege aimed at " + site);
-                } else {
-                    WarHeatMap map = WarHeatMap.get(world);
-                    map.scanArea(world, site.getX() >> 4, site.getZ() >> 4, 8);
-                    StrategicChunk hot = map.hottest();
-                    if (hot != null && hot.totalHeat() >= 60) {
-                        baseCluster = map.cluster(hot, 30.0);
-                        baseCore = map.coreOf(baseCluster);
-                        if (baseCore != null) {
-                            int coreX = (baseCore.chunkX << 4) + 8, coreZ = (baseCore.chunkZ << 4) + 8;
-                            this.site = new BlockPos(coreX, surfaceY(world, coreX, coreZ), coreZ);
-                            EpochRunnerMod.logger.info("[Siege] heat core @ chunk [" + baseCore.chunkX
-                                    + "," + baseCore.chunkZ + "] -- siege re-aimed at the core");
-                        }
-                    } else {
-                        EpochRunnerMod.logger.info("[Siege] no castle signal found -> besieging trigger point " + site);
-                    }
-                }
-            }
+            studio.ERM.war.strategy.SiegeTargeting.Result tr =
+                    studio.ERM.war.strategy.SiegeTargeting.resolve(world, site, 256, 120, 8);
+            this.site = tr.target;
+            this.baseCluster = tr.heatCluster; // may be null (protected/structure path); breach falls back fine
+            this.baseCore = tr.heatCore;
+            EpochRunnerMod.logger.info("[Siege] target = " + site + " via " + tr.reason
+                    + " (protectedBlocks=" + tr.protectedBlocks.size()
+                    + ", hottest=" + (tr.hottest != null ? (int) tr.hottest.totalHeat() : 0) + ")");
         } catch (Throwable t) {
             EpochRunnerMod.logger.warn("[Siege] targeting failed: " + t);
         }
@@ -314,8 +296,8 @@ public class SiegeDirector implements IPhasedBattleDirector {
             // same height as its approach reads as man-made, not as a jump). Breach at the OUTSIDE foot.
             boolean built = false;
             try {
-                built = isManMade(world.getBlockState(new BlockPos(x, prevSurf + 1, z)))
-                     || isManMade(world.getBlockState(new BlockPos(x, prevSurf + 2, z)));
+                built = studio.ERM.war.strategy.SiegeTargeting.isManMade(world.getBlockState(new BlockPos(x, prevSurf + 1, z)))
+                     || studio.ERM.war.strategy.SiegeTargeting.isManMade(world.getBlockState(new BlockPos(x, prevSurf + 2, z)));
             } catch (Throwable ignored) {}
             if (surf - prevSurf >= 3 || built) {
                 return new BlockPos(x, prevSurf, z);
@@ -1238,87 +1220,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 new BlockPos((int) Math.floor(x), 64, (int) Math.floor(z))).getY());
     }
 
-    /**
-     * Find the defender's castle from the blocks THEY protected with the protection stick -- the
-     * strongest, most authoritative "this is my base" signal there is. Protected positions are stored
-     * globally (no chunk-load / scan-radius limit), so this finds the castle even when the siege is
-     * triggered from far away. Seeds on the protected block nearest the trigger, then returns the
-     * centroid of that local cluster (the castle the player is at). Null if too few protected blocks.
-     */
-    private BlockPos findProtectedCore(World world, BlockPos around, int radius) {
-        java.util.List<BlockPos> pts =
-                studio.ERM.handlers.ProtectionHandler.protectedPositionsNear(world, around, radius);
-        if (pts.size() < 8) return null;
-        BlockPos seed = null; long best = Long.MAX_VALUE;
-        for (BlockPos p : pts) {
-            long dx = p.getX() - around.getX(), dz = p.getZ() - around.getZ();
-            long d = dx * dx + dz * dz;
-            if (d < best) { best = d; seed = p; }
-        }
-        long sx = 0, sz = 0; int n = 0; final long clusterR2 = 80L * 80L;
-        for (BlockPos p : pts) {
-            long dx = p.getX() - seed.getX(), dz = p.getZ() - seed.getZ();
-            if (dx * dx + dz * dz <= clusterR2) { sx += p.getX(); sz += p.getZ(); n++; }
-        }
-        if (n < 6) return null;
-        int cx = (int) (sx / n), cz = (int) (sz / n);
-        return new BlockPos(cx, surfaceY(world, cx, cz), cz);
-    }
-
-    /**
-     * Find the besieged FORTRESS by its STRUCTURE. Grid-scan around the trigger point counting man-made
-     * building blocks per column (above the natural surface), and return the build-weighted centroid --
-     * the castle. Backstop for when the defender did not protect-stick their walls. Returns null if no
-     * real structure is nearby, so the caller can fall back to heat / the trigger point.
-     */
-    private BlockPos findFortressCenter(World world, BlockPos around, int radius) {
-        long sumX = 0, sumZ = 0, weight = 0;
-        final int step = 3;
-        for (int dx = -radius; dx <= radius; dx += step) {
-            for (int dz = -radius; dz <= radius; dz += step) {
-                int x = around.getX() + dx, z = around.getZ() + dz;
-                int surf = surfaceY(world, x, z);
-                int built = 0;
-                for (int y = surf - 3; y <= surf + 22; y++) {
-                    try {
-                        if (isManMade(world.getBlockState(new BlockPos(x, y, z)))) built++;
-                    } catch (Throwable ignored) {}
-                }
-                if (built >= 3) { // this column is part of a wall/building, not natural ground
-                    sumX += (long) x * built; sumZ += (long) z * built; weight += built;
-                }
-            }
-        }
-        if (weight < 24) return null; // not enough structure to call it a fortress
-        int cx = (int) (sumX / weight), cz = (int) (sumZ / weight);
-        return new BlockPos(cx, surfaceY(world, cx, cz), cz);
-    }
-
-    /** True for common player-built fortress materials (not natural terrain). Used for target + breach. */
-    private boolean isManMade(IBlockState st) {
-        try {
-            net.minecraft.block.Block b = st.getBlock();
-            if (b == Blocks.AIR) return false;
-            net.minecraft.util.ResourceLocation rn = b.getRegistryName();
-            if (rn == null) return false;
-            String n = rn.getPath();
-            return n.contains("cobblestone") || n.contains("stonebrick") || n.contains("stone_brick")
-                || n.contains("brick") || n.contains("planks") || n.contains("log") || n.contains("_wall")
-                || n.contains("fence") || n.contains("_stairs") || n.contains("_slab") || n.contains("glass")
-                || n.contains("concrete") || n.contains("nether_brick") || n.contains("quartz")
-                || n.contains("sandstone") || n.contains("obsidian") || n.contains("iron_bars")
-                || n.contains("_door") || n.contains("polished") || n.contains("chiseled")
-                || n.contains("pillar") || n.contains("terracotta") || n.contains("prismarine");
-        } catch (Throwable t) { return false; }
-    }
-
     /** True if there is an actual wall/structure at an impact point worth carving (vs open ground). */
     private boolean hasStructureAt(World world, BlockPos at) {
         try {
             for (int dx = -1; dx <= 1; dx++)
                 for (int dz = -1; dz <= 1; dz++)
                     for (int dy = 0; dy <= 4; dy++) {
-                        if (isManMade(world.getBlockState(new BlockPos(at.getX() + dx, at.getY() + dy, at.getZ() + dz))))
+                        if (studio.ERM.war.strategy.SiegeTargeting.isManMade(
+                                world.getBlockState(new BlockPos(at.getX() + dx, at.getY() + dy, at.getZ() + dz))))
                             return true;
                     }
         } catch (Throwable ignored) {}
