@@ -274,10 +274,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
             edgeOutside = frontPoint(world, ENCIRCLE_RING, 0.0);
         }
         routeStart = edgeOutside;
-        breachCorridor = detectWallOnPath(world, edgeOutside, site);
-        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (wall on assault axis "
-                + edgeOutside.getX() + "," + edgeOutside.getZ() + " -> core " + site.getX() + "," + site.getZ()
-                + (edge != null ? "; perimeter chunk def=" + (int) edge.defenseHeat : "; landward bearing") + ")");
+
+        // Put the breach NEAR THE CORE (the heat), ~16 blocks out from it toward the army -- then snap to
+        // a real wall within ~12 blocks of that point. The base is a dense cluster around the core, so
+        // breaching its IMMEDIATE perimeter (and then the creeping barrage marches INTO the core) keeps
+        // the whole siege on the heat. Walking in from far staging stopped at the FIRST outlying fence on
+        // the village edge ~70 blocks from the heat -- that is why the engineers worked an empty outskirt.
+        double toStage = Math.atan2(edgeOutside.getZ() - site.getZ(), edgeOutside.getX() - site.getX());
+        int nx = site.getX() + (int) Math.round(Math.cos(toStage) * 16);
+        int nz = site.getZ() + (int) Math.round(Math.sin(toStage) * 16);
+        BlockPos nearCore = new BlockPos(nx, site.getY(), nz);
+        BlockPos wall = detectWallOnPath(world, outsidePoint(world, nearCore, 12.0), nearCore);
+        breachCorridor = (wall != null) ? new BlockPos(wall.getX(), site.getY(), wall.getZ()) : nearCore;
+        EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (near core "
+                + site.getX() + "," + site.getZ() + ", army side; "
+                + (edge != null ? "perimeter def=" + (int) edge.defenseHeat : "landward") + ")");
     }
 
     /**
@@ -1062,20 +1073,30 @@ public class SiegeDirector implements IPhasedBattleDirector {
         Iterator<CatapultShot> it = catapultShots.iterator();
         while (it.hasNext()) {
             CatapultShot s = it.next();
-            if (tickAge >= s.impactTick) {
-                boolean corridorHit = breachCorridor != null
-                        && Math.abs(s.target.getX() - breachCorridor.getX()) <= 5
-                        && Math.abs(s.target.getZ() - breachCorridor.getZ()) <= 5;
-                // Only carve terrain where there is an ACTUAL wall/structure. Hitting open ground used to
-                // dig pointless craters in the field (the "catapult is digging holes" report) -- now a
-                // round that lands on open grass just makes a visual blast, no excavation.
-                if (corridorHit && hasStructureAt(world, s.target)) {
-                    openGroundBreach(world, s.target); // carve the wall down to ground at the corridor
-                } else if (hasStructureAt(world, s.target)) {
-                    breachWall(world, s.target, 2);    // a stray round that still hit a wall: crater it
+            // Track the live boulder so we know where it actually came to rest (it can clip a building
+            // mid-arc and place a cobblestone block on a rooftop -- that was the "cobblestone that
+            // doesn't blow up" litter).
+            boolean alive = s.block != null && !s.block.isDead;
+            if (alive) {
+                s.lastX = (int) Math.floor(s.block.posX);
+                s.lastY = (int) Math.floor(s.block.posY);
+                s.lastZ = (int) Math.floor(s.block.posZ);
+            }
+            boolean landed = !alive && s.lastY != Integer.MIN_VALUE;
+            if (landed || tickAge >= s.impactTick) {
+                if (landed) { // remove the cobblestone the falling block left where it came to rest
+                    try {
+                        BlockPos lp = new BlockPos(s.lastX, s.lastY, s.lastZ);
+                        if (world.getBlockState(lp).getBlock() == Blocks.COBBLESTONE) world.setBlockToAir(lp);
+                        if (world.getBlockState(lp.down()).getBlock() == Blocks.COBBLESTONE) world.setBlockToAir(lp.down());
+                    } catch (Throwable ignored) {}
                 }
+                // ALWAYS demolish the structure at the intended target (ground -> roof). On open sand this
+                // is just a shallow divot, never a deep hole (openGroundBreach floors at the ground). The
+                // creeping barrage now ERASES the base instead of pockmarking + littering it.
+                openGroundBreach(world, s.target);
                 explosionEffect(world, s.target);
-                if (s.block != null && !s.block.isDead) s.block.setDead();
+                if (alive) s.block.setDead();
                 it.remove();
             }
         }
@@ -1191,7 +1212,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // raised terrain those differ, and using the core Y left a lip / hole short of the real opening.
         // Width AND depth scale with tech level: at L9-10 the barrage pulverises a wide, deep section of
         // the front into rubble (13 wide x 5 deep) so the engineers barely have to finish the breach.
-        int floorY = Math.min(at.getY(), site.getY());
+        // Carve from the breach FOOT (ground) UP to each column's top -- NEVER below ground. On a
+        // building this demolishes the whole structure column; on open sand it only shaves the top ~2
+        // blocks (a shallow divot), so it destroys STRUCTURES but never digs deep holes (the player's
+        // exact ask). Using min(at,core) before could dig down to a lower core Y = the deep-hole bug.
+        int floorY = at.getY();
         int half = (warLevel >= 9) ? 6 : (warLevel >= 6) ? 4 : 2;   // front width (13 / 9 / 5)
         int depth = (warLevel >= 9) ? 4 : (warLevel >= 6) ? 2 : 1;  // blocks carved INTO the wall
         double ang = Math.atan2(at.getZ() - site.getZ(), at.getX() - site.getX());
@@ -1234,10 +1259,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
             int baseX = (int) Math.round(bp.getX() + ux * s);
             int baseZ = (int) Math.round(bp.getZ() + uz * s);
             int surf = surfaceY(world, baseX, baseZ);
-            // Climb toward the interior floor at a walkable grade (±1/step) -> a ramp UP onto the platform.
+            // Climb toward the interior floor at a walkable grade (±1/step) -> a ramp UP onto the platform,
+            // but CAP the rise to +5 so it ramps onto a low platform and never builds a cobblestone TOWER
+            // up the side of a tall building (the weird off-center spire the engineers made before).
             if (surf > rampY + 1) rampY++;
             else if (surf < rampY - 1) rampY--;
             else rampY = surf;
+            rampY = Math.min(rampY, bp.getY() + 5);
             for (int w = -hw; w <= hw; w++) {
                 int x = (int) Math.round(baseX + px * w);
                 int z = (int) Math.round(baseZ + pz * w);
@@ -1904,6 +1932,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         final EntityFallingBlock block;
         final BlockPos target;
         final int impactTick;
+        int lastX, lastY = Integer.MIN_VALUE, lastZ; // last live position (for cleaning the landed block)
         CatapultShot(EntityFallingBlock block, BlockPos target, int impactTick) {
             this.block = block;
             this.target = target;

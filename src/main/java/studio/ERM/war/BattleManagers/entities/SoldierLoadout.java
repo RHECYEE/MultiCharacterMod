@@ -50,7 +50,18 @@ public final class SoldierLoadout {
                 if (ModItems.MAG_25 != null) {
                     soldier.setItemStackToSlot(EntityEquipmentSlot.OFFHAND, new ItemStack(ModItems.MAG_25, 4));
                 }
-                applyArmor(soldier, idx);
+                // L10 stock base armour: the Flan KSK modern kit for EVERY L10 troop (user-specified).
+                // Falls back to the configured armour table if KSK isn't installed.
+                ItemStack h = createStack("flansmod:kskhelmet"), c = createStack("flansmod:kskbody"),
+                          l = createStack("flansmod:kskpants"),  f = createStack("flansmod:kskboots");
+                if (!h.isEmpty() || !c.isEmpty() || !l.isEmpty() || !f.isEmpty()) {
+                    if (!h.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.HEAD,  h);
+                    if (!c.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.CHEST, c);
+                    if (!l.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.LEGS,  l);
+                    if (!f.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.FEET,  f);
+                } else {
+                    applyArmor(soldier, idx);
+                }
                 for (EntityEquipmentSlot slot : EntityEquipmentSlot.values()) {
                     soldier.setDropChance(slot, 0.0F);
                 }
@@ -73,7 +84,10 @@ public final class SoldierLoadout {
                 offhandId = safeGet(WarWeaponsConfig.shieldwallOffhand, idx);
                 break;
             case "CAVALRY":
+                // Mounted knight: sword + SHIELD at L1-9 (the L10 override above gives the modern Uzi).
                 weaponId = safeGet(WarWeaponsConfig.meleeWeapons, idx);
+                offhandId = safeGet(WarWeaponsConfig.shieldwallOffhand, idx);
+                if (offhandId == null || "none".equalsIgnoreCase(offhandId)) offhandId = "minecraft:shield";
                 break;
             case "SPECIAL":
                 // Special gets one tier higher melee + shield
