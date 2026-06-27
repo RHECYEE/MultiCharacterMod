@@ -881,21 +881,36 @@ public class SiegeDirector implements IPhasedBattleDirector {
             c.setBattleContext(activator, interiorObjective);
         }
 
-        // CAVALRY CHARGE: a real wave of mounted knights (CAVALRY card -> horse + sword/shield) sweeps in
-        // through the breach ahead of the infantry. A high contact cap makes it read as a CHARGE.
-        int cavUnits = (warLevel >= 7) ? 4 : 3;
-        for (int i = 0; i < cavUnits; i++) {
-            double lateral = (i - (cavUnits - 1) / 2.0) * 8.0;
-            BlockPos at = frontPoint(world, WALL_RING + 6.0, lateral);
-            EntityFormationCarrier cav = spawnCarrierAt(world, at, getCard("LightCavalry"), true);
-            if (cav != null) {
-                cav.setContactSliceCap(8);                          // a whole troop of horsemen
-                cav.setBattleContext(activator, interiorObjective); // charge IN through the breach
-            }
-        }
+        spawnCavalryCharge(world);
 
         // A fresh armoured push commits with the line.
         if (warLevel >= 6) spawnArmourColumn(world, WALL_RING + 6.0);
+    }
+
+    /**
+     * CAVALRY CHARGE. The carrier -> contact-slice -> mount path NEVER produced a single horseman (the
+     * carriers stalled before release range, so they never released and never mounted). Spawn the mounted
+     * knights DIRECTLY instead: each "soldier:cavalry" payload is an EntitySoldier mounted on a horse
+     * (SpawnHelper.spawnCavalryMount), aggroed on the defender and homed at the interior objective, so a
+     * real wave of horsemen appears at the wall and charges through the breach. Guaranteed to show.
+     */
+    private void spawnCavalryCharge(World world) {
+        int cavCount = (warLevel >= 7) ? 8 : 5;
+        java.util.UUID tgt = (activator != null) ? activator.getUniqueID() : null;
+        BlockPos home = (interiorObjective != null) ? interiorObjective : breachCorridor;
+        int spawned = 0;
+        for (int i = 0; i < cavCount; i++) {
+            double lateral = (i - (cavCount - 1) / 2.0) * 3.0;
+            BlockPos at = frontPoint(world, WALL_RING + 8.0, lateral);
+            try {
+                net.minecraft.entity.Entity e = studio.ERM.war.BattleManagers.core.SpawnHelper.spawnPayload(
+                        world, at, "soldier:cavalry", tgt, home, warLevel, "CAVALRY", "");
+                if (e != null) spawned++;
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.warn("[Siege] cavalry spawn failed: " + t.getMessage());
+            }
+        }
+        EpochRunnerMod.logger.info("[Siege] CAVALRY CHARGE: spawned " + spawned + "/" + cavCount + " mounted knights");
     }
 
     /** INVASION movement: drive every non-engineer assault carrier THROUGH the breach the engineers
