@@ -406,7 +406,21 @@ public class AirStrikeController {
                 aircraft.setTargetPlayer(focusPlayer);
             }
 
-            int runY = Math.max(30, (int) prof.altitude);
+            // Fly ABOVE the target's structures, not at an absolute low Y. prof.altitude is absolute
+            // (~80), so over a tall desert base (towers near y100) the run flew INTO the buildings: the
+            // aircraft collided, was destroyed, and was NEVER visible. Scan the whole run for the tallest
+            // column and clear it by ~16 -- low enough to read as a dramatic pass, high enough to survive.
+            int maxSurf = target.getY();
+            for (int s = 0; s <= 12; s++) {
+                double tt = s / 12.0;
+                int sx = (int) Math.round(baseStartPos.getX() + (baseEndPos.getX() - baseStartPos.getX()) * tt);
+                int sz = (int) Math.round(baseStartPos.getZ() + (baseEndPos.getZ() - baseStartPos.getZ()) * tt);
+                try {
+                    int top = world.getTopSolidOrLiquidBlock(new BlockPos(sx, 64, sz)).getY();
+                    if (top > maxSurf) maxSurf = top;
+                } catch (Throwable ignored) {}
+            }
+            int runY = Math.min(230, Math.max((int) prof.altitude, maxSurf + 16));
             BlockPos startPos = new BlockPos(baseStartPos.getX(), runY, baseStartPos.getZ());
             BlockPos endPos = new BlockPos(baseEndPos.getX(), runY, baseEndPos.getZ());
 

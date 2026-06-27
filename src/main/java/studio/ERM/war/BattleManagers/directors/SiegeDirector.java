@@ -101,6 +101,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // siege has a single objective: open this corridor (not swiss-cheese the whole wall).
     private BlockPos breachCorridor = null;
 
+    // The INVASION release point: a reachable spot just INSIDE the breach (up the ramp on the platform).
+    // The deep core is usually blocked by interior buildings, so carriers targeting it piled at the ramp
+    // bottom and never released; releasing here puts soldiers (with an interior home pos) inside the base.
+    private BlockPos interiorObjective = null;
+
     // The defender's REAL base, mapped by the strategic heat map at siege start. The siege re-aims at
     // the cluster CORE (storage/machine/living concentration) and breaches a low-defense PERIMETER
     // chunk facing the army -- "conduct a siege against the base", not "attack where the player stood".
@@ -862,24 +867,30 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int surgeWaves = (warLevel >= 8) ? 3 : (warLevel >= 5) ? 2 : 1;
         AirStrikeController.launchHostileSurge(world, site, warLevel, surgeWaves);
 
-        // The whole assault line now drives for the CORE through the breach, releasing its soldiers
-        // INSIDE the base instead of at the wall -- the invasion, not a parade at the gate.
+        // The release point: a REACHABLE spot just inside the breach (up the ramp, ~14 blocks in). The
+        // deep core is walled off by interior buildings, so carriers aimed at it stalled at the ramp foot
+        // and never released (no invasion, no cavalry). Releasing here lands soldiers INSIDE -- and they
+        // get a home pos there (SpawnHelper), so they hold/press the interior toward the defender.
+        double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
+        int ix = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * 14);
+        int iz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * 14);
+        interiorObjective = new BlockPos(ix, surfaceY(world, ix, iz), iz);
+
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
-            c.setBattleContext(activator, site);
+            c.setBattleContext(activator, interiorObjective);
         }
 
         // CAVALRY CHARGE: a real wave of mounted knights (CAVALRY card -> horse + sword/shield) sweeps in
-        // through the breach ahead of the infantry. A high contact cap makes it read as a CHARGE, not a
-        // trickle, and they too drive for the core through the breach.
+        // through the breach ahead of the infantry. A high contact cap makes it read as a CHARGE.
         int cavUnits = (warLevel >= 7) ? 4 : 3;
         for (int i = 0; i < cavUnits; i++) {
             double lateral = (i - (cavUnits - 1) / 2.0) * 8.0;
             BlockPos at = frontPoint(world, WALL_RING + 6.0, lateral);
             EntityFormationCarrier cav = spawnCarrierAt(world, at, getCard("LightCavalry"), true);
             if (cav != null) {
-                cav.setContactSliceCap(8);             // a whole troop of horsemen
-                cav.setBattleContext(activator, site); // charge IN through the breach
+                cav.setContactSliceCap(8);                          // a whole troop of horsemen
+                cav.setBattleContext(activator, interiorObjective); // charge IN through the breach
             }
         }
 
@@ -892,12 +903,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
      *  it they push to the core, releasing their contact-slice soldiers INSIDE the base. */
     private void advanceThroughBreach(World world, double speed) {
         if (breachCorridor == null) { advanceLine(world, WALL_RING, speed); return; }
-        double breachDist = Math.hypot(breachCorridor.getX() - site.getX(), breachCorridor.getZ() - site.getZ());
+        BlockPos goal = (interiorObjective != null) ? interiorObjective : breachCorridor;
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
-            double dCore = c.getDistance(site.getX(), site.getY(), site.getZ());
-            if (dCore > breachDist + 5) c.setMoveTarget(breachCorridor, speed); // head for the gap
-            else c.setMoveTarget(site, speed);                                   // through -> into the core
+            // Two-leg path: outside the wall -> head for the breach GAP; once at/through it -> push up the
+            // ramp to the interior objective. Aiming at the deep core (blocked by buildings) made them
+            // pile at the ramp foot; the interior objective is reachable, so they actually go in.
+            double dBreach = c.getDistance(breachCorridor.getX(), breachCorridor.getY(), breachCorridor.getZ());
+            c.setMoveTarget(dBreach > 6 ? breachCorridor : goal, speed);
         }
     }
 
@@ -1667,7 +1680,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void setCampBlock(World world, BlockPos pos, IBlockState state) {
         try {
             BlockPos p = pos.toImmutable();
-            if (!campOriginals.containsKey(p)) campOriginals.put(p, world.getBlockState(p));
+            IBlockState orig = world.getBlockState(p);
+            if (!campOriginals.containsKey(p)) campOriginals.put(p, orig);
+            // On CLAIMED land ALSO record a repair order, so /war repair cleans up siege cobblestone
+            // (bridges, ramps, rubble) too -- the player ran /war repair and it only cleared the
+            // bombardment scaffolds, leaving the engineer cobblestone (which until now only reverted
+            // wholesale on siege END via restoreCamp). Both paths revert to the same original; harmless.
+            try {
+                if (isClaimedLand(world, p)) {
+                    WarWorldData data = WarWorldData.get(world);
+                    boolean isScaffold = EpochRunnerMod.scaffold != null && orig.getBlock() == EpochRunnerMod.scaffold;
+                    if (data != null && !isScaffold && !data.getRepairMap().containsKey(p)) {
+                        data.addRepairOrder(p, orig);
+                    }
+                }
+            } catch (Throwable ignored) {}
             world.setBlockState(p, state, 2);
         } catch (Throwable ignored) {}
     }
