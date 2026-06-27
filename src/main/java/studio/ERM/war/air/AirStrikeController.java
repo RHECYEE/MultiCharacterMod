@@ -65,16 +65,24 @@ public class AirStrikeController {
      * ShortName makes the client fall back to an invisible placeholder box.
      */
     private static String[] defaultAircraftPool(int level) {
-        if (level <= 2) {
-            return new String[] { "Camel", "Fokker" };
-        } else if (level <= 4) {
-            return new String[] { "BF109", "Spitfire", "Mustang", "yak9", "zero" };
-        } else if (level <= 6) {
-            return new String[] { "Mustang", "Lancaster", "A10", "SU25" };
-        } else if (level <= 8) {
-            return new String[] { "A10", "SU25", "tornado", "cobra", "hind" };
+        // Era-scaled by rival level -- real Flan ShortNames (planes AND Flan helis, which are PlaneType).
+        // Higher levels ADD heavier assets, escalating the air war per the faction doctrine.
+        if (level <= 3) {
+            return new String[] { "Camel", "Fokker" };                                  // recon scouts
+        } else if (level == 4) {
+            return new String[] { "BF109", "Spitfire", "zero", "yak9" };                // WW2 fighters
+        } else if (level == 5) {
+            return new String[] { "BF109", "Spitfire", "Mustang", "Lancaster" };        // + bomber
+        } else if (level == 6) {
+            return new String[] { "Spitfire", "Mustang", "Lancaster", "LittleBird", "cobra" }; // + light heli
+        } else if (level == 7) {
+            return new String[] { "Mustang", "LittleBird", "cobra", "hind", "BlackHawk" };     // + assault/transport heli
+        } else if (level == 8) {
+            return new String[] { "A10", "SU25", "ApacheAH64", "EC665", "cobra", "hind" };     // modern attack
+        } else if (level == 9) {
+            return new String[] { "A10", "SU25", "ApacheAH64", "EC665", "hind", "chinook" };   // + heavy lift
         }
-        return new String[] { "tornado", "f22", "B52", "ApacheAH64", "hind" };
+        return new String[] { "B52", "f22", "tornado", "A10", "ApacheAH64", "EC665" };  // L10 escalation
     }
 
     // ============================================================

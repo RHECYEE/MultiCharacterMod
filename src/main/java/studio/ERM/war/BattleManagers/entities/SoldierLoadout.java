@@ -50,18 +50,7 @@ public final class SoldierLoadout {
                 if (ModItems.MAG_25 != null) {
                     soldier.setItemStackToSlot(EntityEquipmentSlot.OFFHAND, new ItemStack(ModItems.MAG_25, 4));
                 }
-                // L10 stock base armour: the Flan KSK modern kit for EVERY L10 troop (user-specified).
-                // Falls back to the configured armour table if KSK isn't installed.
-                ItemStack h = createStack("flansmod:kskhelmet"), c = createStack("flansmod:kskbody"),
-                          l = createStack("flansmod:kskpants"),  f = createStack("flansmod:kskboots");
-                if (!h.isEmpty() || !c.isEmpty() || !l.isEmpty() || !f.isEmpty()) {
-                    if (!h.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.HEAD,  h);
-                    if (!c.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.CHEST, c);
-                    if (!l.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.LEGS,  l);
-                    if (!f.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.FEET,  f);
-                } else {
-                    applyArmor(soldier, idx);
-                }
+                applyArmor(soldier, idx); // KSK kit (applied to all troops now)
                 for (EntityEquipmentSlot slot : EntityEquipmentSlot.values()) {
                     soldier.setDropChance(slot, 0.0F);
                 }
@@ -125,15 +114,20 @@ public final class SoldierLoadout {
     }
 
     private static void applyArmor(EntitySoldier soldier, int idx) {
-        String head  = safeGet(WarWeaponsConfig.armorHead,  idx);
-        String chest = safeGet(WarWeaponsConfig.armorChest, idx);
-        String legs  = safeGet(WarWeaponsConfig.armorLegs,  idx);
-        String feet  = safeGet(WarWeaponsConfig.armorFeet,  idx);
-
-        if (head  != null && !"none".equalsIgnoreCase(head))  { ItemStack s = createStack(head);  if (!s.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.HEAD,  s); }
-        if (chest != null && !"none".equalsIgnoreCase(chest)) { ItemStack s = createStack(chest); if (!s.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.CHEST, s); }
-        if (legs  != null && !"none".equalsIgnoreCase(legs))  { ItemStack s = createStack(legs);  if (!s.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.LEGS,  s); }
-        if (feet  != null && !"none".equalsIgnoreCase(feet))  { ItemStack s = createStack(feet);  if (!s.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.FEET,  s); }
+        // ALL troops wear the Flan KSK kit as base armour (user: "push all armor now"). Fall back to the
+        // configured per-level armour table ONLY when KSK isn't installed in the pack.
+        ItemStack h = createStack("flansmod:kskhelmet"), c = createStack("flansmod:kskbody"),
+                  l = createStack("flansmod:kskpants"),  f = createStack("flansmod:kskboots");
+        if (h.isEmpty() && c.isEmpty() && l.isEmpty() && f.isEmpty()) {
+            h = createStack(safeGet(WarWeaponsConfig.armorHead,  idx));
+            c = createStack(safeGet(WarWeaponsConfig.armorChest, idx));
+            l = createStack(safeGet(WarWeaponsConfig.armorLegs,  idx));
+            f = createStack(safeGet(WarWeaponsConfig.armorFeet,  idx));
+        }
+        if (!h.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.HEAD,  h);
+        if (!c.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.CHEST, c);
+        if (!l.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.LEGS,  l);
+        if (!f.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.FEET,  f);
     }
 
     // ══════════════════════════════════════════════

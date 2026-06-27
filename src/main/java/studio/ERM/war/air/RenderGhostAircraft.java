@@ -58,7 +58,42 @@ public class RenderGhostAircraft extends Render<EntityGhostAircraft> {
 
         if (!EVENT_REGISTERED) {
             EVENT_REGISTERED = true;
-            // MinecraftForge.EVENT_BUS.register(this); // disabled (render-only class)
+            // Register for the client tick so we can build dummy planes OUTSIDE the render loop.
+            MinecraftForge.EVENT_BUS.register(this);
+        }
+    }
+
+    /**
+     * Build pending dummy planes at TICK START -- OUTSIDE RenderGlobal's entity iteration. Flan's
+     * EntityPlane constructor spawns seat entities into the world; doing that during render (where the
+     * old addScheduledTask ran, immediately, on the render thread) CME'd the entity list. At tick start
+     * the list is not being iterated, so the spawn-then-remove is safe and the real model can render.
+     */
+    @SubscribeEvent
+    public void onClientTick(net.minecraftforge.fml.common.gameevent.TickEvent.ClientTickEvent event) {
+        if (event.phase != net.minecraftforge.fml.common.gameevent.TickEvent.Phase.START) return;
+        if (pendingDummy.isEmpty()) return;
+        World world = Minecraft.getMinecraft().world;
+        if (world == null) { pendingDummy.clear(); return; }
+        for (Integer id : new ArrayList<>(pendingDummy)) {
+            pendingDummy.remove(id);
+            try {
+                net.minecraft.entity.Entity e = world.getEntityByID(id);
+                if (!(e instanceof EntityGhostAircraft)) continue;
+                EntityGhostAircraft ghost = (EntityGhostAircraft) e;
+                PlaneType type = resolvePlaneType(ghost);
+                if (type == null || type.model == null) continue;
+                NBTTagCompound tag = new NBTTagCompound();
+                tag.setString("Type", type.shortName);
+                tag.setInteger("paintjobID", 0);
+                DriveableData data = new DriveableData(tag);
+                EntityPlane plane = new EntityPlane(world, ghost.posX, ghost.posY, ghost.posZ, type, data);
+                removeDummySeats(plane); // we only need the plane object for the model
+                dummyPlanes.put(id, plane);
+                dummyPlaneTypes.put(id, type.shortName);
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.warn("[GHOST-AIR] dummy build (tick) failed for id " + id + ": " + t.getMessage());
+            }
         }
     }
 
@@ -196,33 +231,10 @@ public class RenderGhostAircraft extends Render<EntityGhostAircraft> {
         EntityPlane existing = dummyPlanes.get(id);
         if (existing != null && shortName.equals(dummyPlaneTypes.get(id))) return existing;
 
-        // DO NOT construct the EntityPlane here. We are inside RenderGlobal's entity-render loop, and
-        // Flan's plane constructor spawns seat entities into the world -> mutating the entity list
-        // while it's being iterated -> ConcurrentModificationException crash. Build the dummy off the
-        // render thread (between frames) and render the fallback box until it's ready.
-        if (pendingDummy.add(id)) {
-            final double px = ghost.posX, py = ghost.posY, pz = ghost.posZ;
-            final PlaneType ptype = type;
-            Minecraft.getMinecraft().addScheduledTask(() -> {
-                try {
-                    World world = Minecraft.getMinecraft().world;
-                    if (world != null) {
-                        NBTTagCompound tag = new NBTTagCompound();
-                        tag.setString("Type", shortName);
-                        tag.setString("driveableType", shortName);
-                        tag.setInteger("paintjobID", 0);
-                        DriveableData data = new DriveableData(tag);
-                        EntityPlane plane = new EntityPlane(world, px, py, pz, ptype, data);
-                        removeDummySeats(plane); // we only need the plane object for the model
-                        dummyPlanes.put(id, plane);
-                        dummyPlaneTypes.put(id, shortName);
-                    }
-                } catch (Throwable t) {
-                    EpochRunnerMod.logger.warn("[GHOST-AIR] dummy plane build failed for " + shortName + ": " + t.getMessage());
-                }
-                pendingDummy.remove(id);
-            });
-        }
+        // DO NOT construct the EntityPlane here -- we are inside RenderGlobal's entity-render loop and
+        // Flan's plane constructor spawns seat entities, CME'ing the entity list. Just REQUEST a build;
+        // onClientTick() constructs it at tick start (outside render). Render the box until it's ready.
+        pendingDummy.add(id);
         return null;
     }
 

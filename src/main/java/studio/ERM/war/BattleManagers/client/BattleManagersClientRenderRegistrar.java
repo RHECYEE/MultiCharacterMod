@@ -71,17 +71,16 @@ public final class BattleManagersClientRenderRegistrar {
                 RenderingRegistry.registerEntityRenderingHandler(
                         studio.ERM.war.vehicle.EntityAIPilot.class, RenderSkinnable::new));
 
-        // Airstrike aircraft: crash-proof placeholder box. RenderGhostAircraft draws the real Flan
-        // model but only by building a live Flan EntityPlane, whose constructor spawns seat entities
-        // into the world -> ConcurrentModificationException when it happens during RenderGlobal's
-        // entity iteration. Deferring via Minecraft.addScheduledTask does NOT help: that method runs
-        // the task immediately when called from the client (render) thread. Real plane models need a
-        // render path that never constructs a live EntityPlane (the archived working version). Box =
-        // visible aircraft, zero crash, until that path is restored.
+        // Airstrike aircraft: the REAL Flan model renderer. The CME blocker is solved -- RenderGhost-
+        // Aircraft now builds its dummy EntityPlane in a client TICK (onClientTick, phase START),
+        // OUTSIDE RenderGlobal's entity iteration, so the constructor's seat-spawn can't corrupt the
+        // entity list. doRender renders the real ModelPlane (planes AND helis are Flan PlaneType), and
+        // falls back to a box per-type if the model can't be resolved -- so worst case is the old box,
+        // never a crash. Real Flan models dragged across the sky, which is what the player wants.
         safeRegister("EntityGhostAircraft", () ->
                 RenderingRegistry.registerEntityRenderingHandler(
                         studio.ERM.war.air.EntityGhostAircraft.class,
-                        new studio.ERM.war.air.RenderGhostAircraftSafe.Factory()));
+                        new studio.ERM.war.air.RenderGhostAircraft.Factory()));
     }
 
     /** Run one renderer registration, swallowing any Throwable (incl. NoClassDefFoundError). */
