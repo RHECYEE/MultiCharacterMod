@@ -396,7 +396,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
             int bz = (int) Math.round(breachCorridor.getZ() + pz * off);
             BlockPos start = outsidePoint(world, new BlockPos(bx, surfaceY(world, bx, bz), bz), 12.0);
             EntityFormationCarrier eng = spawnCarrierAt(world, start, getCard("SiegeUnit"), true);
-            if (eng != null) engCrews.add(new EngCrew(eng));
+            if (eng != null) {
+                eng.setEngineerMode(true); // construction crew: NEVER releases combat soldiers
+                EngCrew crew = new EngCrew(eng);
+                crew.id = i;
+                engCrews.add(crew);
+            }
         }
 
         // 3) ESCORT: shield-wall infantry stand BETWEEN the workers and the defender and HOLD (no chase),
@@ -493,6 +498,100 @@ public class SiegeDirector implements IPhasedBattleDirector {
         engQueue.sort((a, b) -> b.priority - a.priority);
         EpochRunnerMod.logger.info("[Siege] MilitaryRoute: " + route.size() + " nodes; "
                 + engQueue.size() + " engineering tasks " + summarizeQueue());
+        publishEngineerPlanDebug(world);
+    }
+
+    /**
+     * ENGINEER DEBUG OVERLAY. Show -- big and in-world -- exactly what the engineers decided: the
+     * objective beam, the planned route line, a coloured box on every obstacle with a floating label of
+     * the obstacle type + the tool chosen + the tools REJECTED (red X), and full logs of all of it
+     * (including the bombardment foot-Y vs roof-Y check). Lets the player SEE the engineers' reasoning.
+     */
+    private void publishEngineerPlanDebug(World world) {
+        try {
+            java.util.List<studio.ERM.war.strategy.WarHeatDebug.Marker> mk = new ArrayList<>();
+            java.util.List<studio.ERM.war.strategy.WarHeatDebug.Label> lb = new ArrayList<>();
+
+            // OBJECTIVE -- tall green beam + label. Also log the foot-Y vs roof-Y so we can see whether
+            // the bombardment is aiming at ground level (breach) or the roof (surfaceY).
+            int roofY = surfaceY(world, breachCorridor.getX(), breachCorridor.getZ());
+            mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.beam(breachCorridor, 0f, 1f, 0f, 32));
+            lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(breachCorridor.up(33),
+                    "OBJECTIVE: BREACH " + xyz(breachCorridor) + "  footY=" + breachCorridor.getY()
+                    + " roofY=" + roofY));
+            EpochRunnerMod.logger.info("[EngDebug] ===== ENGINEER PLAN =====");
+            EpochRunnerMod.logger.info("[EngDebug] objective=BREACH @ " + xyz(breachCorridor)
+                    + "  bombard footY=" + breachCorridor.getY() + " (ground) vs roofY=" + roofY
+                    + " -> catapults aim footY (" + (breachCorridor.getY() < roofY ? "GOOD: ground" : "check") + ")");
+
+            // ROUTE -- cyan line staging -> breach.
+            if (routeStart != null) {
+                mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.line(routeStart, breachCorridor, 0f, 1f, 1f));
+                lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(routeStart.up(3),
+                        "STAGING " + xyz(routeStart) + " -> route " + route.size() + " nodes"));
+                double straight = Math.sqrt(routeStart.distanceSq(breachCorridor));
+                EpochRunnerMod.logger.info("[EngDebug] route: staging " + xyz(routeStart) + " -> breach "
+                        + xyz(breachCorridor) + "  straight=" + (int) straight + " blocks, " + route.size() + " nodes");
+            }
+
+            // OBSTACLES -- a coloured box + tool label per task, plus a red X for the rejected tools.
+            int idx = 0;
+            for (EngTask t : engQueue) {
+                RouteNode wn = route.get(t.fromIdx);
+                BlockPos at = new BlockPos(wn.x, wn.gradeY, wn.z);
+                float[] col = obstacleColor(t.obstacle);
+                int span = t.toIdx - t.fromIdx + 1;
+                mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.box(at, col[0], col[1], col[2], 2));
+                lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(at.up(5),
+                        t.obstacle + " -> " + toolLabel(t.work) + "  (span " + span + ", prio " + t.priority + ")"));
+                // rejected tools: a red X a couple blocks to the side + the reason.
+                BlockPos rej = at.add(3, 0, 0);
+                mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.cross(rej, 2));
+                lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(rej.up(3), "REJECTED: " + rejectedReason(t.obstacle)));
+                EpochRunnerMod.logger.info("[EngDebug] obstacle #" + (idx++) + " " + t.obstacle + " @ " + xyz(at)
+                        + " span=" + span + " -> TOOL=" + toolLabel(t.work) + " | rejected: " + rejectedReason(t.obstacle));
+            }
+
+            studio.ERM.war.strategy.WarHeatDebug.show(world, mk, lb, 90 * 20);
+            EpochRunnerMod.logger.info("[EngDebug] crews=" + engCrews.size() + " (all engineerMode=combat-disabled), "
+                    + "showing plan board for 90s. Watch [EngDebug] EXEC logs for live tool work.");
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[EngDebug] publish failed: " + t);
+        }
+    }
+
+    private static String xyz(BlockPos p) { return p.getX() + "," + p.getY() + "," + p.getZ(); }
+
+    private static float[] obstacleColor(Obstacle o) {
+        switch (o) {
+            case WATER: return new float[]{0.1f, 0.4f, 1.0f}; // blue
+            case LAVA:  return new float[]{1.0f, 0.4f, 0.0f}; // orange
+            case GAP:   return new float[]{0.7f, 0.0f, 1.0f}; // purple
+            case CLIFF: return new float[]{1.0f, 1.0f, 0.0f}; // yellow
+            case WALL:  return new float[]{1.0f, 0.0f, 0.0f}; // red
+            default:    return new float[]{1.0f, 1.0f, 1.0f};
+        }
+    }
+    private static String toolLabel(EngWork w) {
+        switch (w) {
+            case BRIDGE: return "BRIDGE(cobblestone)";
+            case RAMP:   return "RAMP/CUT(cobblestone)";
+            case LADDER: return "LADDER(scale wall)";
+            case BREACH: return "BREACH(mine 3x4 gap)";
+            default:     return "CLEAR(head)";
+        }
+    }
+    private static String rejectedReason(Obstacle o) {
+        switch (o) {
+            case WATER: case LAVA: case GAP:
+                return "LADDER(no wall), RAMP(no step), BREACH(not solid)";
+            case CLIFF:
+                return "BRIDGE(no liquid/gap), BREACH(not man-made)";
+            case WALL:
+                return "BRIDGE/RAMP(it's a vertical wall, must mine/ladder)";
+            default:
+                return "BRIDGE/BREACH(passable already)";
+        }
     }
 
     /** Classify one route column from its surface height vs the current walkable grade. */
@@ -615,6 +714,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
             EntityFormationCarrier eng = crew.carrier;
             if (eng == null || eng.isDead) { releaseTask(crew); continue; } // give the task back
 
+            // COMBAT-HIJACK CHECK (logged once per crew): an engineer must be in engineerMode so it can
+            // never release combat soldiers / chase the player. If this ever logs hijack=true, that's the
+            // bug where engineers "turned into hostile mobs".
+            if (!crew.hijackChecked) {
+                crew.hijackChecked = true;
+                EpochRunnerMod.logger.info("[EngDebug] crew#" + crew.id + " combatHijack="
+                        + (!eng.isEngineerMode()) + " (engineerMode=" + eng.isEngineerMode() + ")");
+            }
+
             // Sapper charge cooking: pull back from the blast, then resume.
             if (tickAge < crew.retreatUntil) {
                 eng.setMoveTarget(outsidePoint(world, breachCorridor, 12.0), 0.11 + warLevel * 0.004);
@@ -622,7 +730,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
             }
 
             EngTask t = crew.current;
-            if (t == null || t.done) t = reserveNextTask(crew);
+            if (t == null || t.done) {
+                t = reserveNextTask(crew);
+                if (t != null) {
+                    crew.reservedAtTick = tickAge; crew.arrived = false;
+                    RouteNode wn = route.get(t.fromIdx);
+                    EpochRunnerMod.logger.info("[EngDebug] crew#" + crew.id + " RESERVED " + t.work + "/"
+                            + t.obstacle + " @ " + xyz(new BlockPos(wn.x, wn.gradeY, wn.z)) + "  dist="
+                            + (int) eng.getDistance(wn.x, wn.gradeY, wn.z) + "  tool=" + toolLabel(t.work));
+                }
+            }
             if (t == null) { // queue drained: form up at the breach
                 eng.setMoveTarget(breachCorridor, 0.06 + warLevel * 0.004);
                 continue;
@@ -630,7 +747,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
             BlockPos wp = workPos(world, t);
             double d = eng.getDistance(wp.getX(), wp.getY(), wp.getZ());
-            if (d > ARRIVE_DIST) { eng.setMoveTarget(wp, 0.07 + warLevel * 0.004); continue; }
+            // If a crew can't PATH to the work in time (e.g. a moat it refuses to wade), build it
+            // remotely anyway so the obstacle is still cleared -- the engineering must not just stall.
+            boolean stuck = (tickAge - crew.reservedAtTick) > 120;
+            if (d > ARRIVE_DIST && !stuck) { eng.setMoveTarget(wp, 0.07 + warLevel * 0.004); continue; }
+
+            if (!crew.arrived) {
+                crew.arrived = true;
+                EpochRunnerMod.logger.info("[EngDebug] crew#" + crew.id
+                        + (d > ARRIVE_DIST ? " STUCK pathing (d=" + (int) d + ") -> building remotely"
+                                           : " ARRIVED (d=" + (int) d + ")")
+                        + " -> executing " + toolLabel(t.work) + " on " + t.obstacle);
+            }
 
             crew.workTicks++;
             doTaskWork(world, crew, t); // one unit of visible work
@@ -666,6 +794,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
         if (t.progress >= taskNeeded(t)) {
             t.done = true;
+            EpochRunnerMod.logger.info("[EngDebug] crew#" + crew.id + " COMPLETED " + t.work + "/" + t.obstacle);
             if (t.work == EngWork.BREACH) {                 // open + floor the corridor through the gap
                 openGroundBreach(world, breachCorridor);
                 levelBreachPath(world, breachCorridor);
@@ -697,13 +826,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
         crew.current = null;
     }
 
-    /** Where a crew stands to work a task: just OUTSIDE the node it faces. Breach/ladder anchor on the
-     *  wall (fromIdx); road work anchors on the segment MIDPOINT (a stable spot, so the crew actually
-     *  "arrives" and builds instead of forever chasing a target that races ahead of it). */
+    /** Where a crew stands to work a task: just OUTSIDE the NEAR edge of the obstacle (fromIdx), on the
+     *  army side. It must be a spot the crew can actually stand on -- the old midpoint anchor for a water
+     *  segment sat IN the moat, which the carrier avoids (water path-priority -1), so it never "arrived"
+     *  and never built. The director places the blocks across the span regardless of the exact stance. */
     private BlockPos workPos(World world, EngTask t) {
-        int idx = (t.work == EngWork.BREACH || t.work == EngWork.LADDER)
-                ? t.fromIdx : (t.fromIdx + t.toIdx) / 2;
-        RouteNode wn = route.get(idx);
+        RouteNode wn = route.get(t.fromIdx);
         return outsidePoint(world, new BlockPos(wn.x, wn.gradeY, wn.z), 2.0);
     }
 
@@ -914,10 +1042,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
             target = defender; // the occasional terrifying near-miss on the player
         } else {
             // Converge on the ONE breach corridor with a tight cluster, so the gap actually opens
-            // instead of pockmarking the whole wall.
+            // instead of pockmarking the whole wall. Aim at the breach FOOT Y (ground level), NOT
+            // surfaceY -- surfaceY at a wall column is the ROOF, which is why the barrage was landing
+            // on top of the castle instead of opening a ground-level breach.
             int sx = breachCorridor.getX() + world.rand.nextInt(5) - 2;
             int sz = breachCorridor.getZ() + world.rand.nextInt(5) - 2;
-            target = new BlockPos(sx, surfaceY(world, sx, sz), sz);
+            target = new BlockPos(sx, breachCorridor.getY(), sz);
         }
 
         // Launch from ABOVE the timber frame, nudged toward the target, so the projectile clears the
@@ -1661,9 +1791,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
     /** One engineer squad that pulls tasks off the shared queue and builds them. */
     private static final class EngCrew {
         final EntityFormationCarrier carrier;
+        int id = 0;
         EngTask current = null;
         int workTicks = 0;
-        int retreatUntil = 0; // tickAge before which the crew pulls back from a planted charge
+        int retreatUntil = 0;     // tickAge before which the crew pulls back from a planted charge
+        int reservedAtTick = -1;  // when the current task was reserved (for stuck detection)
+        boolean arrived = false;  // logged once it reaches / gives up reaching the work
+        boolean hijackChecked = false; // logged the combat-hijack check once
         EngCrew(EntityFormationCarrier carrier) { this.carrier = carrier; }
     }
 

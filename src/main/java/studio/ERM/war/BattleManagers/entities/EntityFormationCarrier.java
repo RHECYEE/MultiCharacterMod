@@ -88,6 +88,13 @@ public class EntityFormationCarrier extends EntityCreature {
     // instead of scattered packets that dismount and sprint at the defender.
     private boolean directorManaged = false;
 
+    // When true this carrier is an ENGINEER construction crew: it NEVER releases combat soldiers and
+    // never fights, no matter how close it gets to the objective. Its puppets are just a visual crew;
+    // all its real work (bridging/laddering/breaching) is driven block-by-block by the SiegeDirector.
+    // Without this, an engineer reaching the wall (inside releaseRange of the base centre) tripped the
+    // contact-slice release and "turned into a dumb hostile mob chasing the player" instead of working.
+    private boolean engineerMode = false;
+
     public EntityFormationCarrier(World worldIn) {
         super(worldIn);
         this.setSize(1.2F, 1.9F);
@@ -135,6 +142,13 @@ public class EntityFormationCarrier extends EntityCreature {
     public void setDirectorManaged(boolean managed) {
         this.directorManaged = managed;
     }
+
+    /** Mark this carrier as an ENGINEER construction crew that never releases combat soldiers. */
+    public void setEngineerMode(boolean engineer) {
+        this.engineerMode = engineer;
+    }
+
+    public boolean isEngineerMode() { return engineerMode; }
 
     /**
      * Director-driven commit: release up to {@code count} of this carrier's puppets as real soldiers
@@ -240,6 +254,9 @@ public class EntityFormationCarrier extends EntityCreature {
         // breach / battleSite), driven there by the director. They never auto-rout into a chase --
         // that is what made sieges dissolve into a mob sprinting at the defender.
         if (directorManaged) {
+            // ENGINEER crews never fight -- they are construction units driven by the director. Hold the
+            // visual puppet squad sized to health and NEVER release combat soldiers (no contact slice).
+            if (engineerMode) { syncPuppetCountToHealth(); return; }
             boolean atObjective = battleSite != null
                     && this.getDistanceSq(battleSite.getX() + 0.5, battleSite.getY(), battleSite.getZ() + 0.5)
                        <= (double) (releaseRange * releaseRange);

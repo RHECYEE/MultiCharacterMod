@@ -568,7 +568,14 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
 
             if (!this.world.isRemote && source.getTrueSource() instanceof EntityPlayer) {
                 EntityPlayer player = (EntityPlayer) source.getTrueSource();
-                player.sendMessage(new TextComponentString(TextFormatting.RED + "You killed an enemy soldier"));
+                String veh = (this.vehicleToSummon != null) ? this.vehicleToSummon.trim() : "";
+                boolean inVehicle = this.isRiding() && this.getRidingEntity() instanceof EntitySeat
+                        && ((EntitySeat) this.getRidingEntity()).driveable != null;
+                if (inVehicle && !veh.isEmpty()) {
+                    player.sendMessage(new TextComponentString(TextFormatting.GOLD + "You destroyed the enemy " + veh));
+                } else {
+                    player.sendMessage(new TextComponentString(TextFormatting.RED + "You killed an enemy soldier"));
+                }
             }
 
             this.onDeath(source);
