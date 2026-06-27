@@ -337,7 +337,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // Position the catapults behind the centre of the line. Counts by level: L3-5=1, L6-7=2, L8+=3.
         catapultSites.clear();
         catapultCooldown = 20;
-        int guns = (warLevel >= 8) ? 3 : (warLevel >= 6) ? 2 : 1;
+        int guns = (warLevel >= 9) ? 4 : (warLevel >= 8) ? 3 : (warLevel >= 6) ? 2 : 1;
         double gmid = (guns - 1) / 2.0;
         for (int i = 0; i < guns; i++) {
             double lateral = (i - gmid) * 18.0;
@@ -649,10 +649,17 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * gap/liquid (bridge/fill) AND cut a head-high passage through any solid (ramp-cut/clear). Floor
      * blocks go through setCampBlock (revert on siege end); cuts go through damageBlock (antigrief-aware).
      */
+    /** Half-width of engineer lanes/breaches, scaled by tech level so high-level armies get a road wide
+     *  enough for TANKS and jeeps (L1-5 = 3 wide, L6-8 = 5 wide, L9-10 = 7 wide). */
+    private int laneHalf() { return (warLevel >= 9) ? 3 : (warLevel >= 6) ? 2 : 1; }
+    /** Headroom of the lane (taller at high level so vehicles fit under). */
+    private int laneHeight() { return (warLevel >= 6) ? 4 : 3; }
+
     private void buildRouteNode(World world, RouteNode node) {
         double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
         double px = -Math.sin(ang), pz = Math.cos(ang);
-        for (int w = -1; w <= 1; w++) {
+        int hw = laneHalf(), hh = laneHeight();
+        for (int w = -hw; w <= hw; w++) {
             int x = (int) Math.round(node.x + px * w);
             int z = (int) Math.round(node.z + pz * w);
             try {
@@ -660,7 +667,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
                     setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
                 }
-                for (int y = node.gradeY; y <= node.gradeY + 2; y++) {
+                for (int y = node.gradeY; y <= node.gradeY + hh; y++) {
                     BlockPos hp = new BlockPos(x, y, z);
                     Material m = world.getBlockState(hp).getMaterial();
                     if (m.isLiquid()) setCampBlock(world, hp, Blocks.AIR.getDefaultState());
@@ -670,17 +677,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
-    /** Carve a 3-wide, 4-tall walk-through gap THROUGH the wall, one block deeper toward the core each step. */
+    /** Carve a level-scaled (3-7 wide, 4-5 tall) walk-through gap THROUGH the wall, deeper each step. */
     private void breachStep(World world, RouteNode wn, int depth) {
         double inAng = Math.atan2(site.getZ() - wn.z, site.getX() - wn.x);
         double ix = Math.cos(inAng), iz = Math.sin(inAng);  // inward toward the core
         double px = -iz, pz = ix;                            // along the wall face (width)
         int cx = (int) Math.round(wn.x + ix * depth);
         int cz = (int) Math.round(wn.z + iz * depth);
-        for (int w = -1; w <= 1; w++) {
+        int hw = laneHalf(), hh = laneHeight();
+        for (int w = -hw; w <= hw; w++) {
             int x = (int) Math.round(cx + px * w);
             int z = (int) Math.round(cz + pz * w);
-            for (int y = wn.gradeY; y <= wn.gradeY + 3; y++) damageBlock(world, new BlockPos(x, y, z));
+            for (int y = wn.gradeY; y <= wn.gradeY + hh; y++) damageBlock(world, new BlockPos(x, y, z));
         }
         explosionEffect(world, new BlockPos(cx, wn.gradeY + 1, cz));
     }
@@ -835,15 +843,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
         return outsidePoint(world, new BlockPos(wn.x, wn.gradeY, wn.z), 2.0);
     }
 
-    /** Plant a real primed-TNT sapper charge at ground level + guarantee the gap with openGroundBreach. */
+    /** Sapper charge: the dramatic blast EFFECT + the antigrief-aware ground breach -- but NO real
+     *  damaging TNT entity. A live EntityTNTPrimed here cratered the engineers' own escort and the
+     *  nearby line (a major friendly-fire source); openGroundBreach already opens the gap, repairably. */
     private void plantSapperCharge(World world, BlockPos at) {
         try {
-            net.minecraft.entity.item.EntityTNTPrimed tnt = new net.minecraft.entity.item.EntityTNTPrimed(
-                    world, at.getX() + 0.5, at.getY() + 0.5, at.getZ() + 0.5, null);
-            tnt.setFuse(30);
-            world.spawnEntity(tnt);
             world.playSound(null, at, SoundEvents.ENTITY_CREEPER_PRIMED, SoundCategory.HOSTILE, 1.2F, 0.8F);
         } catch (Throwable ignored) {}
+        explosionEffect(world, at);
         openGroundBreach(world, at);
     }
 
@@ -999,7 +1006,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void tickCatapults(World world) {
         if (!catapultSites.isEmpty()) {
             if (catapultCooldown > 0) catapultCooldown--;
-            else { launchCatapult(world); catapultCooldown = Math.max(25, 60 - warLevel * 3); }
+            else { launchCatapult(world); catapultCooldown = Math.max(10, 50 - warLevel * 4); } // ~150% more shots, faster at high level
         }
         Iterator<CatapultShot> it = catapultShots.iterator();
         while (it.hasNext()) {
@@ -1123,15 +1130,24 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void openGroundBreach(World world, BlockPos at) {
         // Carve from the breach FOOT (the route grade at the wall), not the core ground -- on sloped or
         // raised terrain those differ, and using the core Y left a lip / hole short of the real opening.
+        // Width AND depth scale with tech level: at L9-10 the barrage pulverises a wide, deep section of
+        // the front into rubble (13 wide x 5 deep) so the engineers barely have to finish the breach.
         int floorY = Math.min(at.getY(), site.getY());
+        int half = (warLevel >= 9) ? 6 : (warLevel >= 6) ? 4 : 2;   // front width (13 / 9 / 5)
+        int depth = (warLevel >= 9) ? 4 : (warLevel >= 6) ? 2 : 1;  // blocks carved INTO the wall
         double ang = Math.atan2(at.getZ() - site.getZ(), at.getX() - site.getX());
-        double px = -Math.sin(ang), pz = Math.cos(ang); // perpendicular = along the wall (corridor width)
-        for (int w = -2; w <= 2; w++) {
-            int x = (int) Math.round(at.getX() + px * w);
-            int z = (int) Math.round(at.getZ() + pz * w);
-            int top = surfaceY(world, x, z);
-            for (int y = floorY; y <= top + 2; y++) {
-                damageBlock(world, new BlockPos(x, y, z));
+        double px = -Math.sin(ang), pz = Math.cos(ang); // along the wall (front width)
+        double ix = (site.getX() - at.getX()), iz = (site.getZ() - at.getZ());
+        double ilen = Math.max(0.001, Math.hypot(ix, iz));
+        ix /= ilen; iz /= ilen;                          // inward toward the core (carve depth)
+        for (int d = 0; d <= depth; d++) {
+            for (int w = -half; w <= half; w++) {
+                int x = (int) Math.round(at.getX() + px * w + ix * d);
+                int z = (int) Math.round(at.getZ() + pz * w + iz * d);
+                int top = surfaceY(world, x, z);
+                for (int y = floorY; y <= top + 2; y++) {
+                    damageBlock(world, new BlockPos(x, y, z));
+                }
             }
         }
     }
@@ -1141,29 +1157,38 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // ════════════════════════════════════════════════════════════
 
     /**
-     * Once a lane is breached, clear AND floor a wide (5x3) corridor from the wall inward to the base
-     * at ground level, so the assault pours straight through instead of bottlenecking on rubble or
-     * dropping into holes. Clears via damageBlock (antigrief-aware); floors gaps via setCampBlock so
-     * the added cobblestone reverts when the siege ends. This is the "make it bigger + level it out".
+     * Once a lane is breached, cut AND floor a wide corridor from the breach foot inward to the base --
+     * but as a walkable RAMP that climbs to follow the interior floor (the castle usually sits on a
+     * raised platform, so a flat trench at moat level left "no real path up"). Width + headroom scale
+     * with level so tanks can drive in. Floors gaps via setCampBlock (reverts on siege end); cuts via
+     * damageBlock (antigrief-aware).
      */
     private void levelBreachPath(World world, BlockPos bp) {
-        int floorY = bp.getY();
         double dist = Math.hypot(site.getX() - bp.getX(), site.getZ() - bp.getZ());
         if (dist < 1.0) return;
         double ux = (site.getX() - bp.getX()) / dist, uz = (site.getZ() - bp.getZ()) / dist; // toward core
         double px = -uz, pz = ux; // corridor width axis
-        int steps = (int) Math.min(dist, 32);
+        int hw = laneHalf(), hh = laneHeight();
+        int steps = (int) Math.min(dist, 40);
+        int rampY = bp.getY();
         for (int s = 0; s <= steps; s++) {
-            for (int w = -2; w <= 2; w++) {
-                int x = (int) Math.round(bp.getX() + ux * s + px * w);
-                int z = (int) Math.round(bp.getZ() + uz * s + pz * w);
-                BlockPos floor = new BlockPos(x, floorY - 1, z);
+            int baseX = (int) Math.round(bp.getX() + ux * s);
+            int baseZ = (int) Math.round(bp.getZ() + uz * s);
+            int surf = surfaceY(world, baseX, baseZ);
+            // Climb toward the interior floor at a walkable grade (±1/step) -> a ramp UP onto the platform.
+            if (surf > rampY + 1) rampY++;
+            else if (surf < rampY - 1) rampY--;
+            else rampY = surf;
+            for (int w = -hw; w <= hw; w++) {
+                int x = (int) Math.round(baseX + px * w);
+                int z = (int) Math.round(baseZ + pz * w);
+                BlockPos floor = new BlockPos(x, rampY - 1, z);
                 try {
                     if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
                         setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
                     }
                 } catch (Throwable ignored) {}
-                for (int y = floorY; y <= floorY + 2; y++) {
+                for (int y = rampY; y <= rampY + hh; y++) {
                     damageBlock(world, new BlockPos(x, y, z));
                 }
             }

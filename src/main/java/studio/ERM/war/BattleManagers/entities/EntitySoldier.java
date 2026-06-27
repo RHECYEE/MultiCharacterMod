@@ -101,8 +101,9 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         this.tasks.addTask(8, new EntityAIWatchClosest(this, EntityPlayer.class, 12.0F));
         this.tasks.addTask(9, new EntityAILookIdle(this));
 
-        // Targeting — attack players and non-empire living entities
-        this.targetTasks.addTask(1, new EntityAIHurtByTarget(this, true));
+        // Targeting — attack players and non-empire living entities. callForHelp=false: a stray friendly
+        // hit must not rally the whole squad onto an ally (that was the friendly-fire cascade).
+        this.targetTasks.addTask(1, new EntityAIHurtByTarget(this, false));
         this.targetTasks.addTask(2, new EntityAINearestAttackableTarget<>(this, EntityPlayer.class, true));
         this.targetTasks.addTask(3, new EntityAINearestAttackableTarget<>(this, EntityLivingBase.class, 10, true, false, this::shouldAttackEntity));
     }
@@ -434,6 +435,25 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     // ══════════════════════════════════════
     //  MISC
     // ══════════════════════════════════════
+
+    /** Never retaliate against an ally: a friendly's stray bullet / blast must not make us target them.
+     *  This (with team-filtered proactive targeting) is what stops attacking forces friendly-firing. */
+    @Override
+    public void setRevengeTarget(EntityLivingBase entity) {
+        if (entity != null && isOnSameTeam(entity)) return;
+        super.setRevengeTarget(entity);
+    }
+
+    /** Report the kill so director-controlled soldiers register like vehicles do ("You killed an enemy
+     *  soldier"). Also the capture hook for the future Tree of Remembrance enemies branch. */
+    @Override
+    public void onDeath(net.minecraft.util.DamageSource cause) {
+        if (!this.world.isRemote && cause.getTrueSource() instanceof EntityPlayer) {
+            ((EntityPlayer) cause.getTrueSource()).sendMessage(new net.minecraft.util.text.TextComponentString(
+                    net.minecraft.util.text.TextFormatting.RED + "You killed an enemy soldier"));
+        }
+        super.onDeath(cause);
+    }
 
     @Override
     public boolean isOnSameTeam(Entity other) {
