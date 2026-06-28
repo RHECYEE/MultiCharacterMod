@@ -114,6 +114,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // siege has a single objective: open this corridor (not swiss-cheese the whole wall).
     private BlockPos breachCorridor = null;
 
+    // The REAL deployment/staging centre -- where the army actually forms up (front line + camp). The
+    // engineer route + bridge MUST start here, not at some independently-computed perimeter point, or the
+    // bridge "only does half the distance" and doesn't connect to where everything spawned.
+    private BlockPos stagingCenter = null;
+
     // The INVASION release point: a reachable spot just INSIDE the breach (up the ramp on the platform).
     // The deep core is usually blocked by interior buildings, so carriers targeting it piled at the ramp
     // bottom and never released; releasing here puts soldiers (with an interior home pos) inside the base.
@@ -216,6 +221,8 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
         // Pick the bearing that stages the army on the MOST land (don't form up on open ocean).
         this.frontBearing = pickLandwardBearing(world);
+        // Lock in the staging centre = where the army forms up. The engineer route/bridge starts HERE.
+        this.stagingCenter = frontPoint(world, ENCIRCLE_RING, 0.0);
 
         // Lay down the staging camp FIRST (flatten a pad over water/rough ground + pitch tents) so the
         // line and catapults spawn on solid, level ground instead of out on open water.
@@ -277,15 +284,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // straight in toward the base core and drop the breach on the FIRST real wall (the first sharp
         // upward jump in the surface). The old random ±9 scan kept landing the breach in an open field
         // SHORT of the castle -- this guarantees it lands ON the wall, on the assault axis.
-        BlockPos edgeOutside;
-        StrategicChunk edge = pickPerimeterChunkTowardAttack();
-        if (edge != null) {
-            int ex = (edge.chunkX << 4) + 8, ez = (edge.chunkZ << 4) + 8;
-            BlockPos edgeCenter = new BlockPos(ex, surfaceY(world, ex, ez), ez);
-            edgeOutside = outsidePoint(world, edgeCenter, 30.0); // step OUT toward the army from the edge
-        } else {
-            edgeOutside = frontPoint(world, ENCIRCLE_RING, 0.0);
-        }
+        // The route ALWAYS starts at the real staging centre (where the army formed up) so the bridge/
+        // road connects the deployment zone to the breach -- not some independent perimeter point that
+        // left the bridge floating halfway across the water, disconnected from where everything spawned.
+        BlockPos edgeOutside = (stagingCenter != null) ? stagingCenter : frontPoint(world, ENCIRCLE_RING, 0.0);
         routeStart = edgeOutside;
 
         // Put the breach NEAR THE CORE (the heat), ~16 blocks out from it toward the army -- then snap to
@@ -313,8 +315,8 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int gOut = Math.max(Math.min(s3, s6), Math.min(Math.max(s3, s6), s9)); // median of the 3 samples
         breachCorridor = new BlockPos(wallPos.getX(), gOut, wallPos.getZ());
         EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (near core "
-                + site.getX() + "," + site.getZ() + ", army side; "
-                + (edge != null ? "perimeter def=" + (int) edge.defenseHeat : "landward") + ")");
+                + site.getX() + "," + site.getZ() + "; route starts at staging " + routeStart.getX()
+                + "," + routeStart.getZ() + ")");
     }
 
     /**
@@ -1354,15 +1356,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // catapult only SOFTENS the wall; the ENGINEERS open the real ground breach. breachWall is a
                 // friendly-safe, antigrief sphere of damageBlock (claimed land -> repairable scaffold), and
                 // scatterDebris flings a few rubble blocks that are also logged for /war repair.
-                breachWall(world, s.target, 2);
-                scatterDebris(world, s.target);
+                // ONE real blast a tad smaller than vanilla TNT (3.5 vs 4.0) that ACTUALLY destroys the
+                // structure + damages defenders. Terrain damage is ON: ProtectionHandler.onExplosionDetonate
+                // routes claimed blocks through the repair system (scaffold = invisible + /war repairable)
+                // and spares protected blocks, so it visibly blows the base apart but stays recoverable.
+                // (Removed scatterDebris -- it was ADDING cobblestone, the "shots just add cobblestone" bug;
+                // and breachWall, whose claimed-land scaffolds looked like the shot did nothing.)
                 explosionEffect(world, s.target);
-                // A real ENTITY-damaging blast a tad smaller than vanilla TNT (3.5 vs 4.0). Terrain damage
-                // is OFF -- breachWall above already does the antigrief-safe wall damage -- so this only
-                // hurts whoever is standing at the impact (the defenders), it doesn't double-raze blocks.
                 try {
                     world.newExplosion(null, s.target.getX() + 0.5, s.target.getY() + 0.5, s.target.getZ() + 0.5,
-                            3.5F, false, false);
+                            3.5F, false, true);
                 } catch (Throwable ignored) {}
                 if (alive) s.block.setDead();
                 it.remove();

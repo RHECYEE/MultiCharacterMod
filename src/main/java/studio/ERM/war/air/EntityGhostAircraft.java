@@ -929,12 +929,17 @@ public class EntityGhostAircraft extends EntityLiving {
 
         boolean result = super.attackEntityFrom(source, amount);
 
-        if (getHealth() <= 0) {
+        // ONE-SHOT: attackEntityFrom fires several times once health hits 0 (the death explosion + any
+        // other hits the same tick), which printed "You shot down ..." 4x per plane. Guard it.
+        if (getHealth() <= 0 && !aircraftDestroyed) {
+            aircraftDestroyed = true;
             onAircraftDestroyed(trueSrc != null ? trueSrc : src);
         }
 
         return result;
     }
+
+    private boolean aircraftDestroyed = false;
 
     private void onAircraftDestroyed(Entity killer) {
         world.newExplosion(this, posX, posY, posZ, 3.0f, true, true);

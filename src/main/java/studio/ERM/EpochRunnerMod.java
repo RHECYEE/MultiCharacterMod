@@ -121,6 +121,22 @@ public class EpochRunnerMod {
     @Mod.EventHandler
     public void init(FMLInitializationEvent event) {
         try {
+            // RECIPE-BOOK CRASH GUARD: the "Ticking player -> sendRecipeBook NPE" crash happens when a
+            // recipe in the registry has a null registry name (its SPacketRecipeBook serialization NPEs
+            // on getRegistryName().toString()). Registered recipes SHOULD all have names, but some packs/
+            // mods slip a null-name one in; assign a fallback so it can never crash the recipe book.
+            try {
+                int fixed = 0;
+                for (net.minecraft.item.crafting.IRecipe r : net.minecraft.item.crafting.CraftingManager.REGISTRY) {
+                    if (r != null && r.getRegistryName() == null) {
+                        r.setRegistryName(new net.minecraft.util.ResourceLocation(MODID, "nullname_recipe_fix_" + (fixed++)));
+                    }
+                }
+                if (fixed > 0) logger.warn("[RecipeGuard] assigned fallback names to " + fixed
+                        + " null-name recipe(s) -- this was the sendRecipeBook crash source.");
+                else logger.info("[RecipeGuard] no null-name recipes in the registry (crash is likely a bad advancement->recipe ref).");
+            } catch (Throwable t) { logger.warn("[RecipeGuard] scan failed: " + t); }
+
             // INITIALIZE: This variable must exist before EventBus registration
             invasionHandlerInstance = new studio.ERM.handlers.InvasionHandler();
 
