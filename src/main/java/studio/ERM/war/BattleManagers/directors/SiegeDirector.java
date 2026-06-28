@@ -82,6 +82,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // Units the director spawns DIRECTLY (cavalry knights + their horses), tracked so stop() removes
     // them -- spawnCavalryCharge used to drop them untracked, so they lingered after the siege ended.
     private final List<net.minecraft.entity.Entity> looseUnits = new ArrayList<>();
+
+    // PHASE 2 -- INTERIOR HEATSPOT CAPTURE + LOOTING. After the breach, scan the base interior for
+    // valuable tile entities (chests/beds/furnaces/machines/ME drives), build a loot DEPOT (a 6x6 pad of
+    // chests) at the breach, build stairs/ramps to any elevated/blocked heatspot, march squads to each,
+    // and TELEPORT the looted items straight into the depot chests. "A breach is not success; a reachable,
+    // looted objective is success."
+    private List<BlockPos> heatspots = new ArrayList<>();
+    private final java.util.Set<BlockPos> capturedSpots = new java.util.HashSet<>();
+    private final List<BlockPos> lootChests = new ArrayList<>();
+    private BlockPos lootDepot = null;
     private BlockPos routeStart = null;                        // staging foot on the army side of the route
     private boolean engineersComplete = false;
     // PHASE 2 of the engineer push: once the wall breach is open, each crew mines a staircase/tunnel from
@@ -1172,15 +1182,189 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void beginInteriorAssault(World world) {
         phase = P_ASSAULT;
         lastPhaseChangeTick = tickAge;
-        EpochRunnerMod.logger.info("[Siege] -> INTERIOR ASSAULT (warLevel=" + warLevel + ")");
+        EpochRunnerMod.logger.info("[Siege] -> INTERIOR ASSAULT / LOOTING (warLevel=" + warLevel + ")");
 
-        // Crack the core with a couple of friendly-safe interior breaches.
-        int interior = (warLevel <= 4) ? 1 : 2;
-        for (int i = 0; i < interior; i++) {
-            double lateral = (i - (interior - 1) / 2.0) * 10.0;
-            BlockPos at = frontPoint(world, ASSAULT_RING * 0.6, lateral);
-            breachWall(world, at, 3);
-            explosionEffect(world, at);
+        // PHASE 2: getting inside was only HALF the objective. Now find the actual valuables, build a loot
+        // depot, cut stairs/ramps to any blocked spot, and the squads go room-to-room emptying them.
+        scanHeatspots(world);
+        buildLootDepot(world);
+        for (BlockPos spot : heatspots) buildAccessRamp(world, spot); // always stairs/ramps to each
+        EpochRunnerMod.logger.info("[Siege] LOOT: " + heatspots.size() + " heatspots, depot @ "
+                + (lootDepot != null ? xyz(lootDepot) : "?") + " with " + lootChests.size() + " chests");
+    }
+
+    /** Scan the base interior for valuable tile entities (anything with an inventory + beds) = heatspots. */
+    private void scanHeatspots(World world) {
+        heatspots.clear();
+        capturedSpots.clear();
+        int ccx = site.getX() >> 4, ccz = site.getZ() >> 4, r = 4;
+        java.util.List<BlockPos> found = new ArrayList<>();
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                net.minecraft.world.chunk.Chunk chunk = world.getChunkProvider().getLoadedChunk(ccx + dx, ccz + dz);
+                if (chunk == null) continue;
+                for (Map.Entry<BlockPos, net.minecraft.tileentity.TileEntity> e
+                        : new ArrayList<>(chunk.getTileEntityMap().entrySet())) {
+                    net.minecraft.tileentity.TileEntity te = e.getValue();
+                    if (te == null) continue;
+                    BlockPos p = e.getKey().toImmutable();
+                    boolean valuable = (te instanceof net.minecraft.inventory.IInventory)
+                            || te.hasCapability(net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, null);
+                    try {
+                        if (!valuable && world.getBlockState(p).getBlock() instanceof net.minecraft.block.BlockBed) valuable = true;
+                    } catch (Throwable ignored) {}
+                    if (valuable) found.add(p);
+                }
+            }
+        }
+        // Nearest-to-core first; cap so we don't queue hundreds.
+        found.sort((a, b) -> Double.compare(a.distanceSq(site), b.distanceSq(site)));
+        int cap = (warLevel >= 6) ? 24 : 14;
+        heatspots = new ArrayList<>(found.subList(0, Math.min(cap, found.size())));
+    }
+
+    /** Build the loot DEPOT just inside the breach: a 6x6 stone pad with 4-8 chests on it (persists). */
+    private void buildLootDepot(World world) {
+        lootChests.clear();
+        BlockPos c = (interiorObjective != null) ? interiorObjective : breachCorridor;
+        int y = surfaceY(world, c.getX(), c.getZ());
+        lootDepot = new BlockPos(c.getX(), y, c.getZ());
+        for (int dx = -3; dx <= 2; dx++) {
+            for (int dz = -3; dz <= 2; dz++) {
+                BlockPos floor = new BlockPos(c.getX() + dx, y - 1, c.getZ() + dz);
+                try { world.setBlockState(floor, Blocks.STONEBRICK.getDefaultState(), 2); } catch (Throwable ignored) {}
+                for (int h = 0; h <= 2; h++) damageBlock(world, new BlockPos(c.getX() + dx, y + h, c.getZ() + dz));
+            }
+        }
+        int chests = (warLevel >= 6) ? 8 : 4;
+        for (int i = 0; i < chests; i++) {
+            BlockPos cp = new BlockPos(c.getX() - 2 + (i % 4), y, c.getZ() - 1 + (i / 4) * 2);
+            try {
+                world.setBlockState(cp, Blocks.CHEST.getDefaultState(), 2); // persists (the loot reward)
+                lootChests.add(cp);
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /** ALWAYS stairs/ramps: cut a walkable cobblestone staircase from an elevated heatspot down to the
+     *  depot floor, stepping outward toward the depot, so squads (and the look) can reach it. */
+    private void buildAccessRamp(World world, BlockPos spot) {
+        int floorY = (lootDepot != null) ? lootDepot.getY() : breachCorridor.getY();
+        if (spot.getY() <= floorY + 1) return; // already at walkable level
+        BlockPos toward = (lootDepot != null) ? lootDepot : breachCorridor;
+        double ang = Math.atan2(toward.getZ() - spot.getZ(), toward.getX() - spot.getX());
+        double ux = Math.cos(ang), uz = Math.sin(ang);
+        int steps = spot.getY() - floorY + 2;
+        for (int s = 0; s <= steps; s++) {
+            int x = spot.getX() + (int) Math.round(ux * s);
+            int z = spot.getZ() + (int) Math.round(uz * s);
+            int y = Math.max(floorY, spot.getY() - s);
+            try {
+                BlockPos st = new BlockPos(x, y - 1, z);
+                if (world.isAirBlock(st) || world.getBlockState(st).getMaterial().isLiquid())
+                    setCampBlock(world, st, Blocks.COBBLESTONE.getDefaultState());
+                for (int h = 0; h <= 2; h++) damageBlock(world, new BlockPos(x, y + h, z)); // headroom
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /** Drive squads room-to-room to the heatspots and LOOT each one into the depot when reached. */
+    private void tickLooting(World world, int tsp) {
+        if (heatspots.isEmpty()) return;
+        // Each assault carrier heads for the nearest UNCAPTURED heatspot.
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead || c.isEngineerMode()) continue;
+            BlockPos tgt = nearestUncaptured(c.getPosition());
+            c.setMoveTarget(tgt != null ? tgt : (lootDepot != null ? lootDepot : breachCorridor),
+                    0.07 + warLevel * 0.004);
+        }
+        if (tickAge % 10 != 0) return; // throttle the capture scan
+        for (BlockPos spot : new ArrayList<>(heatspots)) {
+            if (capturedSpots.contains(spot)) continue;
+            boolean reached = false;
+            for (EntityFormationCarrier c : carriers) {
+                if (c != null && !c.isDead && c.getDistanceSq(spot) <= 25.0) { reached = true; break; }
+            }
+            // Staggered timeout so the loot always happens even if a squad can't path to that exact block.
+            boolean timedOut = tsp > 160 + heatspots.indexOf(spot) * 25;
+            if (reached || timedOut) {
+                int moved = lootContainer(world, spot);
+                capturedSpots.add(spot);
+                EpochRunnerMod.logger.info("[Siege] LOOT captured " + xyz(spot) + " (" + moved
+                        + " stacks -> depot) [" + capturedSpots.size() + "/" + heatspots.size() + "]");
+            }
+        }
+    }
+
+    private BlockPos nearestUncaptured(BlockPos from) {
+        BlockPos best = null; double bd = Double.MAX_VALUE;
+        for (BlockPos s : heatspots) {
+            if (capturedSpots.contains(s)) continue;
+            double d = s.distanceSq(from);
+            if (d < bd) { bd = d; best = s; }
+        }
+        return best;
+    }
+
+    /** Teleport a container's items straight into the depot chests (modded via IItemHandler, else vanilla
+     *  IInventory). Removes from the source + populates the depot, exactly as the player asked. */
+    private int lootContainer(World world, BlockPos pos) {
+        int moved = 0;
+        try {
+            net.minecraft.tileentity.TileEntity te = world.getTileEntity(pos);
+            if (te == null) return 0;
+            net.minecraftforge.items.IItemHandler src = te.getCapability(
+                    net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, null);
+            if (src != null) {
+                for (int i = 0; i < src.getSlots(); i++) {
+                    net.minecraft.item.ItemStack got = src.extractItem(i, 64, false);
+                    if (!got.isEmpty()) { depositToDepot(world, got); moved++; }
+                }
+            } else if (te instanceof net.minecraft.inventory.IInventory) {
+                net.minecraft.inventory.IInventory inv = (net.minecraft.inventory.IInventory) te;
+                for (int i = 0; i < inv.getSizeInventory(); i++) {
+                    net.minecraft.item.ItemStack st = inv.getStackInSlot(i);
+                    if (st != null && !st.isEmpty()) {
+                        depositToDepot(world, st.copy());
+                        inv.setInventorySlotContents(i, net.minecraft.item.ItemStack.EMPTY);
+                        moved++;
+                    }
+                }
+                inv.markDirty();
+            }
+        } catch (Throwable ignored) {}
+        return moved;
+    }
+
+    /** Put a stack into the first depot chest with room; drop at the depot if every chest is full. */
+    private void depositToDepot(World world, net.minecraft.item.ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return;
+        for (BlockPos cp : lootChests) {
+            net.minecraft.tileentity.TileEntity te = world.getTileEntity(cp);
+            if (!(te instanceof net.minecraft.inventory.IInventory)) continue;
+            net.minecraft.inventory.IInventory chest = (net.minecraft.inventory.IInventory) te;
+            for (int i = 0; i < chest.getSizeInventory() && !stack.isEmpty(); i++) {
+                net.minecraft.item.ItemStack slot = chest.getStackInSlot(i);
+                if (slot.isEmpty()) {
+                    int n = Math.min(stack.getCount(), stack.getMaxStackSize());
+                    net.minecraft.item.ItemStack put = stack.copy(); put.setCount(n);
+                    chest.setInventorySlotContents(i, put);
+                    stack.shrink(n);
+                } else if (net.minecraft.item.ItemStack.areItemsEqual(slot, stack)
+                        && net.minecraft.item.ItemStack.areItemStackTagsEqual(slot, stack)
+                        && slot.getCount() < slot.getMaxStackSize()) {
+                    int add = Math.min(slot.getMaxStackSize() - slot.getCount(), stack.getCount());
+                    slot.grow(add); stack.shrink(add);
+                }
+            }
+            chest.markDirty();
+            if (stack.isEmpty()) return;
+        }
+        if (!stack.isEmpty() && lootDepot != null) {
+            try {
+                world.spawnEntity(new net.minecraft.entity.item.EntityItem(world,
+                        lootDepot.getX() + 0.5, lootDepot.getY() + 1.0, lootDepot.getZ() + 0.5, stack));
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -1248,14 +1432,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 break;
 
             case P_ASSAULT:
-                advanceThroughBreach(world, 0.07 + warLevel * 0.004);
+                tickLooting(world, tsp);
                 if (waveDefeated(tsp)) {
                     forceResolve(BattleOutcome.VICTORY); // the assault was fought off
-                } else if (tsp >= PHASE_ASSAULT_TICKS) {
-                    forceResolve(BattleOutcome.VICTORY); // window elapsed without breaking the defender
+                } else if (capturedSpots.size() >= heatspots.size() || tsp >= PHASE_ASSAULT_TICKS) {
+                    forceResolve(BattleOutcome.VICTORY); // every heatspot looted, or the window elapsed
                 }
-                // NOTE: the attacker-wins -> OCCUPATION path is the next system; the siege currently
-                // resolves when the army is wiped or the assault window elapses.
                 break;
 
             default:
@@ -2147,6 +2329,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
             if (e != null && !e.isDead) { try { e.setDead(); } catch (Throwable ignored) {} }
         }
         looseUnits.clear();
+        // Phase-2 tracking. The depot CHESTS + their loot are left standing (the spoils of the siege);
+        // only the access ramps revert (they went through setCampBlock -> restoreCamp).
+        heatspots.clear();
+        capturedSpots.clear();
+        lootChests.clear();
+        lootDepot = null;
         vehicles.clear();
         carriers.clear();
         frontLine.clear();
