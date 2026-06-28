@@ -1106,7 +1106,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
 
         // A fresh armoured push commits with the line.
-        if (warLevel >= 6) spawnArmourColumn(world, WALL_RING + 6.0);
+        if (warLevel >= 6) spawnArmourColumn(world, ENCIRCLE_RING - 2.0); // from the staging zone, not the wall
     }
 
     /**
@@ -1123,7 +1123,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int spawned = 0;
         for (int i = 0; i < cavCount; i++) {
             double lateral = (i - (cavCount - 1) / 2.0) * 3.0;
-            BlockPos at = frontPoint(world, WALL_RING + 8.0, lateral);
+            // Spawn at the STAGING ZONE (where the army formed up), NOT at the wall -- nothing teleports in
+            // at the breach. They then CHARGE in from staging toward the interior objective.
+            BlockPos at = frontPoint(world, ENCIRCLE_RING - 4.0, lateral);
             try {
                 net.minecraft.entity.Entity e = studio.ERM.war.BattleManagers.core.SpawnHelper.spawnPayload(
                         world, at, "soldier:cavalry", tgt, home, warLevel, "CAVALRY", "");
