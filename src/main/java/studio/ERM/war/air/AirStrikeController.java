@@ -523,11 +523,21 @@ public class AirStrikeController {
             double offsetX = (i - aircraftCount / 2.0) * 10;
             double offsetZ = rand.nextDouble() * 5 - 2.5;
 
+            // Spawn EXACTLY at cruising altitude (no random +/-10 Y), so the plane doesn't appear high
+            // and visibly "fall ~20 blocks" to its run height on spawn-in.
             aircraft.setPosition(
                     startPos.getX() + offsetX,
-                    startPos.getY() + rand.nextInt(20) - 10,
+                    startPos.getY(),
                     startPos.getZ() + offsetZ
             );
+            // Face the run direction IMMEDIATELY (matching the entity's own yaw convention in
+            // moveTowardTarget: atan2(dz,dx)*180/PI - 90), so it doesn't spawn pointing east and then
+            // snap 90 degrees on its first movement tick.
+            double spawnDX = target.getX() - aircraft.posX, spawnDZ = target.getZ() - aircraft.posZ;
+            float spawnYaw = (float) (net.minecraft.util.math.MathHelper.atan2(spawnDZ, spawnDX) * (180D / Math.PI)) - 90.0F;
+            aircraft.rotationYaw = spawnYaw;
+            aircraft.prevRotationYaw = spawnYaw;
+            aircraft.rotationYawHead = spawnYaw;
 
             // HELICOPTERS SPLIT UP: each heli takes its OWN sector around the objective and runs an
             // independent gunship pattern, instead of all stacking on one hover point. Planes

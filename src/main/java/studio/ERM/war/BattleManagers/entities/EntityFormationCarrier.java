@@ -101,6 +101,10 @@ public class EntityFormationCarrier extends EntityCreature {
         this.enablePersistence();
         this.setPathPriority(PathNodeType.WATER, -1.0F);
         this.experienceValue = 0;
+        // The carrier is only the FORMATION ANCHOR -- the visible bodies are its armoured puppets, which
+        // surround it. Rendering the anchor too drew a default-skin, un-armoured "Steve" standing in the
+        // centre of every formation (the player's report). Hide it; the puppets are the squad.
+        this.setInvisible(true);
     }
 
     @Override

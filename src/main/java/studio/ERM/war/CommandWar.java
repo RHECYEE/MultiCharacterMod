@@ -17,6 +17,7 @@ import studio.ERM.war.BattleManagers.cards.UnitCard;
 import studio.ERM.war.BattleManagers.cards.UnitCardRegistry;
 import studio.ERM.war.BattleManagers.core.BattleEngine;
 import studio.ERM.war.BattleManagers.directors.SiegeDirector;
+import studio.ERM.war.air.AirStrikeController;
 import studio.ERM.war.battle.WarBattleSystem;
 import studio.ERM.war.items.ItemAirTargetDesignator;
 import studio.ERM.war.rival.RivalCityGenerator;
@@ -71,7 +72,8 @@ public class CommandWar extends CommandBase {
         if (args.length == 1) {
             return getListOfStringsMatchingLastWord(args,
                     "siege", "debug", "stop", "status", "airstrike",
-                    "summon", "rival", "claim", "unclaim", "cp", "sync", "repair", "heat");
+                    "summon", "rival", "claim", "unclaim", "cp", "sync", "repair", "heat",
+                    "chinook", "fastrope");
         }
         if (args.length == 2 && "rival".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, "guards", "city", "status");
@@ -102,6 +104,10 @@ public class CommandWar extends CommandBase {
             case "sync":    syncMap(sender);           break;
             case "repair":  repair(sender, args);      break;
             case "heat":    heat(sender, args);        break;
+            case "chinook": insertion(sender, "chinook");   break;
+            case "fastrope":
+            case "heli":
+            case "insertion": insertion(sender, args.length >= 2 ? args[1] : "littlebird"); break;
             default:
                 msg(sender, TextFormatting.RED + "Unknown subcommand: " + sub);
                 help(sender);
@@ -326,6 +332,33 @@ public class CommandWar extends CommandBase {
         msg(sender, TextFormatting.GREEN + "Gave Air Target Designator — level " + level + " (" + pkg.name + ").");
     }
 
+    // ===== /war chinook | fastrope [heliType] — test the helicopter insertion / fast-rope =====
+
+    /**
+     * Dispatch a hostile transport helicopter that flies in and fast-ropes a KSK troop payload at a drop
+     * point ~12 blocks in front of you, so the heli insertion mechanic can be tested on demand.
+     * {@code /war chinook} forces a Chinook (heavy lift); {@code /war fastrope [type]} lets you pick the
+     * transport (default LittleBird). Level scales with the nearest rival city.
+     */
+    private void insertion(ICommandSender sender, String heliType) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        int level = Math.max(1, RivalCityManager.getRivalCityLevel());
+        Vec3d look = player.getLookVec();
+        BlockPos drop = new BlockPos(player.posX + look.x * 12.0, player.posY, player.posZ + look.z * 12.0);
+
+        boolean ok = AirStrikeController.launchInsertion(world, drop, level, heliType);
+        if (ok) {
+            msg(sender, TextFormatting.GREEN + "Inbound " + heliType + " insertion (L" + level
+                    + ") — fast-roping at " + posStr(drop) + ". Watch it run in and drop troops.");
+        } else {
+            msg(sender, TextFormatting.RED + "Insertion failed (see server log; is '" + heliType
+                    + "' a loaded Flan helicopter ShortName?).");
+        }
+    }
+
     // ===== /war summon <vehicle> [count] =====
 
     private void summonVehicle(ICommandSender sender, String[] args) throws CommandException {
@@ -524,6 +557,8 @@ public class CommandWar extends CommandBase {
                 TextFormatting.YELLOW + "/war stop" + TextFormatting.GRAY + " - force-end the active battle",
                 TextFormatting.YELLOW + "/war status" + TextFormatting.GRAY + " - show faction/battle/raid status",
                 TextFormatting.YELLOW + "/war airstrike [1-10]" + TextFormatting.GRAY + " - give yourself an Air Target Designator",
+                TextFormatting.YELLOW + "/war chinook" + TextFormatting.GRAY + " - call a Chinook insertion (fast-rope) in front of you",
+                TextFormatting.YELLOW + "/war fastrope [heli]" + TextFormatting.GRAY + " - test a heli fast-rope (default LittleBird)",
                 TextFormatting.YELLOW + "/war summon <vehicle> [n]" + TextFormatting.GRAY + " - spawn enemy Flan's vehicles",
                 TextFormatting.YELLOW + "/war rival guards [n] [lvl]" + TextFormatting.GRAY + " - spawn rival guards",
                 TextFormatting.YELLOW + "/war rival city [lvl]" + TextFormatting.GRAY + " - seed a rival city here (heavy)",

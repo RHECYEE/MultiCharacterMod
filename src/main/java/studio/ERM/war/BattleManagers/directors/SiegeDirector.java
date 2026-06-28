@@ -23,6 +23,7 @@ import studio.ERM.war.BattleManagers.api.IPhasedBattleDirector.BattlePhase;
 import studio.ERM.war.BattleManagers.cards.UnitCard;
 import studio.ERM.war.BattleManagers.cards.UnitCardRegistry;
 import studio.ERM.war.BattleManagers.entities.EntityFormationCarrier;
+import studio.ERM.war.BattleManagers.entities.EntitySoldier;
 import studio.ERM.war.air.AirStrikeController;
 import studio.ERM.war.rival.RivalCityManager;
 import studio.ERM.war.strategy.StrategicChunk;
@@ -282,6 +283,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
         // Commit to ONE breach corridor now; everything bombards it and the engineers exploit it.
         chooseBreachCorridor(world);
+
+        // If the base sits in/by the sea, send a naval picket of Flan S100 boats to ring it on the
+        // water -- jeeps can't drive the ocean, so a water base gets boats instead.
+        maybeSpawnNavalPatrol(world);
     }
 
     /**
@@ -1188,9 +1193,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // depot, cut stairs/ramps to any blocked spot, and the squads go room-to-room emptying them.
         scanHeatspots(world);
         buildLootDepot(world);
-        for (BlockPos spot : heatspots) buildAccessRamp(world, spot); // always stairs/ramps to each
+        for (BlockPos spot : heatspots) buildAccessRamp(world, spot); // always CONNECTED stairs/ramps to each
+
+        // Put real bodies on the ground to STORM the interior. The surge only trickles a thin contact
+        // slice (which is why everyone just stood at the breach), so commit a controlled slice of every
+        // surviving formation to soldiers now, then drive them room-to-room to the objectives.
+        int forced = 0;
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead || c.isEngineerMode()) continue;
+            forced += c.releaseContactSlice(3);
+        }
+        driveSoldiersToObjectives(world, true);
+        publishAssaultDebug(world);
         EpochRunnerMod.logger.info("[Siege] LOOT: " + heatspots.size() + " heatspots, depot @ "
-                + (lootDepot != null ? xyz(lootDepot) : "?") + " with " + lootChests.size() + " chests");
+                + (lootDepot != null ? xyz(lootDepot) : "?") + " with " + lootChests.size() + " chests; "
+                + "committed " + forced + " assault troops to SEEK objectives");
     }
 
     /** Scan the base interior for valuable tile entities (anything with an inventory + beds) = heatspots. */
@@ -1246,53 +1263,146 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
-    /** ALWAYS stairs/ramps: cut a walkable cobblestone staircase from an elevated heatspot down to the
-     *  depot floor, stepping outward toward the depot, so squads (and the look) can reach it. */
+    /**
+     * ALWAYS stairs/ramps -- and CONNECTED. Cut one continuous, 3-wide, walkable cobblestone staircase
+     * the WHOLE way from the loot depot (just inside the breach) to the heatspot, following the terrain
+     * (clamped to +-1 step per block) and clearing head-high. The old version only built a short stub at
+     * the spot itself, so "most ramps are disconnected and not useful" -- this lays a real path the squads
+     * can actually walk room-to-room. Treads floor via setCampBlock (revert on siege end); headroom via
+     * the antigrief-aware damageBlock.
+     */
     private void buildAccessRamp(World world, BlockPos spot) {
-        int floorY = (lootDepot != null) ? lootDepot.getY() : breachCorridor.getY();
-        if (spot.getY() <= floorY + 1) return; // already at walkable level
-        BlockPos toward = (lootDepot != null) ? lootDepot : breachCorridor;
-        double ang = Math.atan2(toward.getZ() - spot.getZ(), toward.getX() - spot.getX());
-        double ux = Math.cos(ang), uz = Math.sin(ang);
-        int steps = spot.getY() - floorY + 2;
-        for (int s = 0; s <= steps; s++) {
-            int x = spot.getX() + (int) Math.round(ux * s);
-            int z = spot.getZ() + (int) Math.round(uz * s);
-            int y = Math.max(floorY, spot.getY() - s);
-            try {
-                BlockPos st = new BlockPos(x, y - 1, z);
-                if (world.isAirBlock(st) || world.getBlockState(st).getMaterial().isLiquid())
-                    setCampBlock(world, st, Blocks.COBBLESTONE.getDefaultState());
-                for (int h = 0; h <= 2; h++) damageBlock(world, new BlockPos(x, y + h, z)); // headroom
-            } catch (Throwable ignored) {}
+        BlockPos from = (lootDepot != null) ? lootDepot : breachCorridor;
+        if (from == null) return;
+        double dx = spot.getX() - from.getX(), dz = spot.getZ() - from.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 2.0) return;
+        double ux = dx / dist, uz = dz / dist;
+        double px = -uz, pz = ux;                  // across-path axis (for the 3-wide tread)
+        int n = (int) Math.min(Math.ceil(dist), 80);
+        int gradeY = from.getY();
+        for (int s = 0; s <= n; s++) {
+            int bx = (int) Math.round(from.getX() + ux * s);
+            int bz = (int) Math.round(from.getZ() + uz * s);
+            int grnd = terrainGroundY(world, bx, bz);
+            if (grnd > gradeY + 1) gradeY++;        // climb one step (staircase up)
+            else if (grnd < gradeY - 1) gradeY--;   // descend one step (staircase down)
+            else gradeY = grnd;
+            for (int w = -1; w <= 1; w++) {
+                int x = bx + (int) Math.round(px * w);
+                int z = bz + (int) Math.round(pz * w);
+                try {
+                    BlockPos tread = new BlockPos(x, gradeY - 1, z);
+                    if (world.isAirBlock(tread) || world.getBlockState(tread).getMaterial().isLiquid())
+                        setCampBlock(world, tread, Blocks.COBBLESTONE.getDefaultState());
+                    for (int h = 0; h <= 2; h++) damageBlock(world, new BlockPos(x, gradeY + h, z)); // headroom
+                } catch (Throwable ignored) {}
+            }
         }
     }
 
-    /** Drive squads room-to-room to the heatspots and LOOT each one into the depot when reached. */
+    /** Drive the assault troops room-to-room to the heatspots and LOOT each into the depot when a soldier
+     *  actually REACHES it (or a staggered timeout fires, so a spot a squad can't path to still resolves). */
     private void tickLooting(World world, int tsp) {
         if (heatspots.isEmpty()) return;
-        // Each assault carrier heads for the nearest UNCAPTURED heatspot.
-        for (EntityFormationCarrier c : carriers) {
-            if (c == null || c.isDead || c.isEngineerMode()) continue;
-            BlockPos tgt = nearestUncaptured(c.getPosition());
-            c.setMoveTarget(tgt != null ? tgt : (lootDepot != null ? lootDepot : breachCorridor),
-                    0.07 + warLevel * 0.004);
-        }
+        // Move the actual released SOLDIERS (the visible troops), not the spent carriers, so the assault
+        // force SEEKS AND CAPTURES instead of milling at the breach.
+        driveSoldiersToObjectives(world, true);
+        // Refresh the debug overlay every 5s so captured/uncaptured states update live.
+        if (tickAge % 100 == 0) publishAssaultDebug(world);
+
         if (tickAge % 10 != 0) return; // throttle the capture scan
         for (BlockPos spot : new ArrayList<>(heatspots)) {
             if (capturedSpots.contains(spot)) continue;
+            // A spot is captured when one of OUR soldiers is standing on it (room-to-room clearing).
             boolean reached = false;
-            for (EntityFormationCarrier c : carriers) {
-                if (c != null && !c.isDead && c.getDistanceSq(spot) <= 25.0) { reached = true; break; }
+            double R = 6.0;
+            net.minecraft.util.math.AxisAlignedBB sb = new net.minecraft.util.math.AxisAlignedBB(
+                    spot.getX() - R, spot.getY() - R, spot.getZ() - R,
+                    spot.getX() + R, spot.getY() + R, spot.getZ() + R);
+            for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, sb)) {
+                if (s != null && !s.isDead) { reached = true; break; }
+            }
+            if (!reached) for (EntityFormationCarrier c : carriers) {
+                if (c != null && !c.isDead && c.getDistanceSq(spot) <= 36.0) { reached = true; break; }
             }
             // Staggered timeout so the loot always happens even if a squad can't path to that exact block.
-            boolean timedOut = tsp > 160 + heatspots.indexOf(spot) * 25;
+            boolean timedOut = tsp > 200 + heatspots.indexOf(spot) * 30;
             if (reached || timedOut) {
                 int moved = lootContainer(world, spot);
                 capturedSpots.add(spot);
                 EpochRunnerMod.logger.info("[Siege] LOOT captured " + xyz(spot) + " (" + moved
-                        + " stacks -> depot) [" + capturedSpots.size() + "/" + heatspots.size() + "]");
+                        + " stacks -> depot) [" + capturedSpots.size() + "/" + heatspots.size() + "]"
+                        + (reached ? " by troops" : " (timeout)"));
             }
+        }
+    }
+
+    /**
+     * Drive the actual released EntitySoldiers (the VISIBLE troops) to their objectives so the assault
+     * force SEEKS AND CAPTURES instead of standing at the breach. Each soldier is HOMED on its goal --
+     * EntityAIMoveTowardsRestriction then walks it there room-to-room -- and idle soldiers also get a
+     * direct march order so they actually cross the breach and climb the engineer stairs. Their combat
+     * AI is left intact, so they still fight anything they meet on the way in.
+     *
+     * @param assault true during the interior assault (each soldier seeks the nearest UNCAPTURED heatspot);
+     *                false during the surge (everyone flows to the single interior objective / breach).
+     */
+    private void driveSoldiersToObjectives(World world, boolean assault) {
+        if (site == null) return;
+        double R = 140.0;
+        net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                site.getX() - R, 0, site.getZ() - R, site.getX() + R, 255, site.getZ() + R);
+        for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
+            if (s == null || s.isDead) continue;
+            try { if (!"empire".equalsIgnoreCase(s.getTeam_())) continue; } catch (Throwable ignored) { continue; }
+            BlockPos goal;
+            if (assault) {
+                goal = nearestUncaptured(s.getPosition());
+                if (goal == null) goal = (lootDepot != null) ? lootDepot : interiorObjective;
+            } else {
+                goal = (interiorObjective != null) ? interiorObjective : breachCorridor;
+            }
+            if (goal == null) continue;
+            try { s.setHomePosAndDistance(goal, 3); } catch (Throwable ignored) {}
+            // Re-path only periodically -- the home restriction drives the continuous seek; issuing a
+            // fresh tryMoveToXYZ every tick would thrash the navigator and make the troops jitter in place.
+            if (tickAge % 10 == 0 && s.getAttackTarget() == null && s.getDistanceSq(goal) > 16.0) {
+                try { s.getNavigator().tryMoveToXYZ(goal.getX() + 0.5, goal.getY(), goal.getZ() + 0.5, 1.15D); }
+                catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    /**
+     * DEBUG OVERLAY for the interior assault: a tall beam on every heatspot the troops are told to SEEK
+     * (green = uncaptured objective, grey = already looted), a gold box + beam on the LOOT DEPOT, and a
+     * green line tracing each engineer-built access stair from the depot to its objective.
+     */
+    private void publishAssaultDebug(World world) {
+        try {
+            java.util.List<studio.ERM.war.strategy.WarHeatDebug.Marker> mk = new ArrayList<>();
+            java.util.List<studio.ERM.war.strategy.WarHeatDebug.Label> lb = new ArrayList<>();
+            if (lootDepot != null) {
+                mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.beam(lootDepot, 1f, 0.85f, 0f, 14));
+                mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.box(lootDepot, 1f, 0.85f, 0f, 3));
+                lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(lootDepot.up(15),
+                        "LOOT DEPOT (" + lootChests.size() + " chests)"));
+            }
+            for (BlockPos sp : heatspots) {
+                boolean done = capturedSpots.contains(sp);
+                float r = done ? 0.5f : 0f, g = done ? 0.5f : 1f, b = done ? 0.5f : 0.25f;
+                mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.beam(sp, r, g, b, done ? 6 : 18));
+                lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(sp.up(done ? 7 : 19),
+                        (done ? "LOOTED " : "OBJECTIVE: LOOT ") + xyz(sp)));
+                if (lootDepot != null)
+                    mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.line(lootDepot, sp, 0f, 1f, 0.4f));
+            }
+            studio.ERM.war.strategy.WarHeatDebug.show(world, mk, lb, 120 * 20);
+            EpochRunnerMod.logger.info("[Siege] assault debug: " + heatspots.size() + " objective beams, "
+                    + capturedSpots.size() + " looted, depot " + (lootDepot != null ? xyz(lootDepot) : "?"));
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[Siege] assault debug failed: " + t);
         }
     }
 
@@ -1428,6 +1538,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // INVASION: funnel the army THROUGH the breach the engineers opened and up the ramp
                 // into the base, instead of milling at the wall. This is the assault going in.
                 advanceThroughBreach(world, 0.06 + warLevel * 0.004);
+                // Also flow the already-released soldiers INTO the base (homed on the interior objective)
+                // so they don't pile up at the breach mouth waiting for the assault phase.
+                if (tickAge % 5 == 0) driveSoldiersToObjectives(world, false);
                 if (tsp >= PHASE_SURGE_TICKS || waveDefeated(tsp)) beginInteriorAssault(world);
                 break;
 
@@ -1928,6 +2041,70 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 boolean carrier = low.contains("halftrack") || low.contains("sdkfz251") || low.contains("m3");
                 if (carrier) p.setRallyPoint(outsidePoint(world, breachCorridor, 8.0 + i * 2.0));
             }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  NAVAL PATROL  (S100 boats when the base is on the water)
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * When the target base is girdled by water, spawn a small flotilla of Flan S100 patrol boats that
+     * picket the sea around it (crude patrol: each boat takes station at a point on the water ring),
+     * instead of land jeeps that can't drive the ocean. Boats sit on the water surface; if "s100" isn't
+     * a loaded Flan ShortName the pilot summon simply no-ops (logged), so this is safe to always attempt.
+     */
+    private void maybeSpawnNavalPatrol(World world) {
+        int waterRing = 0, samples = 0;
+        for (int a = 0; a < 12; a++) {
+            double ang = a * (Math.PI * 2 / 12);
+            int x = site.getX() + (int) Math.round(Math.cos(ang) * 36);
+            int z = site.getZ() + (int) Math.round(Math.sin(ang) * 36);
+            samples++;
+            try {
+                BlockPos top = world.getTopSolidOrLiquidBlock(new BlockPos(x, 64, z));
+                if (world.getBlockState(top).getMaterial() == Material.WATER
+                 || world.getBlockState(top.down()).getMaterial() == Material.WATER) waterRing++;
+            } catch (Throwable ignored) {}
+        }
+        if (waterRing < samples / 2) return; // not a water base; the jeeps are fine
+        int boats = (warLevel >= 6) ? 4 : 2;
+        int placed = 0;
+        for (int i = 0; i < boats; i++) {
+            double ang = (Math.PI * 2 * i) / boats;
+            int x = site.getX() + (int) Math.round(Math.cos(ang) * 40);
+            int z = site.getZ() + (int) Math.round(Math.sin(ang) * 40);
+            BlockPos water = findWaterSurface(world, x, z);
+            if (water == null) continue;
+            EntityAIPilot boat = spawnBoatAt(world, water, "s100");
+            if (boat != null) { boat.setRallyPoint(water); placed++; }
+        }
+        EpochRunnerMod.logger.info("[Siege] naval patrol: water ring " + waterRing + "/" + samples
+                + " -> spawned " + placed + " S100 boat(s)");
+    }
+
+    /** The water surface block in a column, or null if the column isn't open water. */
+    private BlockPos findWaterSurface(World world, int x, int z) {
+        try {
+            BlockPos top = world.getTopSolidOrLiquidBlock(new BlockPos(x, 64, z));
+            if (world.getBlockState(top).getMaterial() == Material.WATER) return top;
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    /** Spawn one EntityAIPilot-crewed Flan boat on the water (tracked in {@link #vehicles} for cleanup). */
+    private EntityAIPilot spawnBoatAt(World world, BlockPos at, String shortName) {
+        try {
+            EntityAIPilot pilot = new EntityAIPilot(world);
+            pilot.setPosition(at.getX() + 0.5, at.getY() + 1.0, at.getZ() + 0.5);
+            pilot.setVehicleType(shortName);
+            pilot.setMcmTeam("empire");
+            world.spawnEntity(pilot);
+            vehicles.add(pilot);
+            return pilot;
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[Siege] boat '" + shortName + "' spawn failed: " + t.getMessage());
+            return null;
         }
     }
 
