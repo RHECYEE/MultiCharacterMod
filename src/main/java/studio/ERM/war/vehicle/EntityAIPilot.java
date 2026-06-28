@@ -528,7 +528,7 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
             if (matches(name, MODERN_MBT)) hp = 800.0F;
             else if (matches(name, HEAVY_TANKS)) hp = 550.0F;
             else hp = 350.0F;
-            this.setSize(6.0F, 4.0F);
+            this.setSize(9.0F, 5.0F); // bigger hitbox so the tank is actually hittable (was 6x4)
         } else if (cat == VehicleCategory.STATIC) {
             if (matches(name, HEAVY_ARTILLERY)) hp = 400.0F;
             else if (matches(name, AA_GUNS)) hp = 300.0F;

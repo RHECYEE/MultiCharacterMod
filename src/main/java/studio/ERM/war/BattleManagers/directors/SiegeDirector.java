@@ -1364,10 +1364,17 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // and spares protected blocks, so it visibly blows the base apart but stays recoverable.
                 // (Removed scatterDebris -- it was ADDING cobblestone, the "shots just add cobblestone" bug;
                 // and breachWall, whose claimed-land scaffolds looked like the shot did nothing.)
-                explosionEffect(world, s.target);
+                // Detonate at the ACTUAL impact point. s.target.getY() is the breach-FOOT ground; once the
+                // creeping barrage marches into the higher interior that Y is UNDERGROUND, so the blast went
+                // off below the surface -- invisible + destroying nothing ("many not exploding"). Use where
+                // the round actually came to rest (landed), else the surface column at the target.
+                BlockPos impact = landed
+                        ? new BlockPos(s.lastX, s.lastY, s.lastZ)
+                        : new BlockPos(s.target.getX(), surfaceY(world, s.target.getX(), s.target.getZ()), s.target.getZ());
+                explosionEffect(world, impact);
                 try {
-                    world.newExplosion(null, s.target.getX() + 0.5, s.target.getY() + 0.5, s.target.getZ() + 0.5,
-                            3.5F, false, true);
+                    world.newExplosion(null, impact.getX() + 0.5, impact.getY() + 0.5, impact.getZ() + 0.5,
+                            3.8F, false, true);
                 } catch (Throwable ignored) {}
                 if (alive) s.block.setDead();
                 it.remove();
