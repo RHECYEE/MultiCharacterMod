@@ -114,20 +114,43 @@ public final class SoldierLoadout {
     }
 
     private static void applyArmor(EntitySoldier soldier, int idx) {
-        // ALL troops wear the Flan KSK kit as base armour (user: "push all armor now"). Fall back to the
-        // configured per-level armour table ONLY when KSK isn't installed in the pack.
+        applyKskArmor(soldier);
+    }
+
+    private static boolean loggedKskMissing = false;
+
+    /**
+     * Equip the Flan KSK kit on ANY living unit (soldiers AND the formation puppets -- the puppets are
+     * the bulk of what the player sees, and they had NO armour, which is why "no one has any armor").
+     * Falls back to vanilla IRON if KSK isn't installed, so there is ALWAYS visible armour.
+     */
+    public static void applyKskArmor(net.minecraft.entity.EntityLivingBase e) {
+        if (e == null) return;
         ItemStack h = createStack("flansmod:kskhelmet"), c = createStack("flansmod:kskbody"),
                   l = createStack("flansmod:kskpants"),  f = createStack("flansmod:kskboots");
         if (h.isEmpty() && c.isEmpty() && l.isEmpty() && f.isEmpty()) {
-            h = createStack(safeGet(WarWeaponsConfig.armorHead,  idx));
-            c = createStack(safeGet(WarWeaponsConfig.armorChest, idx));
-            l = createStack(safeGet(WarWeaponsConfig.armorLegs,  idx));
-            f = createStack(safeGet(WarWeaponsConfig.armorFeet,  idx));
+            if (!loggedKskMissing) {
+                loggedKskMissing = true;
+                studio.ERM.EpochRunnerMod.logger.warn("[Loadout] flansmod KSK armour not found -> using vanilla iron. "
+                        + "Check the exact registry names if you want KSK.");
+            }
+            h = new ItemStack(net.minecraft.init.Items.IRON_HELMET);
+            c = new ItemStack(net.minecraft.init.Items.IRON_CHESTPLATE);
+            l = new ItemStack(net.minecraft.init.Items.IRON_LEGGINGS);
+            f = new ItemStack(net.minecraft.init.Items.IRON_BOOTS);
         }
-        if (!h.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.HEAD,  h);
-        if (!c.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.CHEST, c);
-        if (!l.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.LEGS,  l);
-        if (!f.isEmpty()) soldier.setItemStackToSlot(EntityEquipmentSlot.FEET,  f);
+        if (!h.isEmpty()) e.setItemStackToSlot(EntityEquipmentSlot.HEAD,  h);
+        if (!c.isEmpty()) e.setItemStackToSlot(EntityEquipmentSlot.CHEST, c);
+        if (!l.isEmpty()) e.setItemStackToSlot(EntityEquipmentSlot.LEGS,  l);
+        if (!f.isEmpty()) e.setItemStackToSlot(EntityEquipmentSlot.FEET,  f);
+        try {
+            // setDropChance is EntityLiving-only; e is typed EntityLivingBase. Soldiers/puppets ARE
+            // EntityLiving (players/armor-stands aren't, and have no equipment-drop chance anyway).
+            if (e instanceof net.minecraft.entity.EntityLiving) {
+                net.minecraft.entity.EntityLiving el = (net.minecraft.entity.EntityLiving) e;
+                for (EntityEquipmentSlot s : EntityEquipmentSlot.values()) el.setDropChance(s, 0.0F);
+            }
+        } catch (Throwable ignored) {}
     }
 
     // ══════════════════════════════════════════════

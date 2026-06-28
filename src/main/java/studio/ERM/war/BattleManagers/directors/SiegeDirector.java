@@ -79,8 +79,17 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private final List<RouteNode> route = new ArrayList<>();   // the saved MilitaryRoute (staging->core)
     private final List<EngTask> engQueue = new ArrayList<>();  // shared obstacle/work queue
     private final List<EngCrew> engCrews = new ArrayList<>();  // engineer squads that pull from the queue
+    // Units the director spawns DIRECTLY (cavalry knights + their horses), tracked so stop() removes
+    // them -- spawnCavalryCharge used to drop them untracked, so they lingered after the siege ended.
+    private final List<net.minecraft.entity.Entity> looseUnits = new ArrayList<>();
     private BlockPos routeStart = null;                        // staging foot on the army side of the route
     private boolean engineersComplete = false;
+    // PHASE 2 of the engineer push: once the wall breach is open, each crew mines a staircase/tunnel from
+    // the breach interior up into the base to a heat spot the director bound to that crew. tunnelPhase
+    // flips true when phase 1 finishes; crewHeatSpot holds each crew's assigned interior objective.
+    private boolean tunnelPhase = false;
+    private final java.util.Map<EngCrew, BlockPos> crewHeatSpot = new HashMap<>();
+    private final List<BlockPos> completedHeatSpots = new ArrayList<>(); // dug-through spots, for the push
     // Real Flan armour (EntityAIPilot-crewed). The mis-named "VehiclePlatoon" card is just infantry;
     // THESE are the actual driving/firing tanks.
     private final List<EntityAIPilot> vehicles = new ArrayList<>();
@@ -89,6 +98,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private final List<BlockPos> catapultSites = new ArrayList<>();
     private final List<CatapultShot> catapultShots = new ArrayList<>();
     private int catapultCooldown = 0;
+    // Tick countdown for the BOMBARDMENT-phase jet/bomber dispatcher. Set on phase entry; the
+    // P_BOMBARD tick decrements it and fires one air event at zero, then re-arms it -- so jets and
+    // bombers come in on a rhythm over the whole barrage instead of all at once (or never).
+    private int airStrikeCooldown = 0;
     // Real AW2 siege-machine entities (catapult/ballista) spawned as the visible battery, tracked for
     // cleanup. Spawned reflectively so the vehicle module isn't a hard dependency.
     private final List<Entity> siegeMachines = new ArrayList<>();
@@ -283,13 +296,22 @@ public class SiegeDirector implements IPhasedBattleDirector {
         double toStage = Math.atan2(edgeOutside.getZ() - site.getZ(), edgeOutside.getX() - site.getX());
         int nx = site.getX() + (int) Math.round(Math.cos(toStage) * 16);
         int nz = site.getZ() + (int) Math.round(Math.sin(toStage) * 16);
-        // Anchor the breach foot at the TERRAIN GROUND at that column, NOT site.getY() (the core's roof) --
-        // that roof Y made the ramp build up in the air. Ground = where the army stands + the ramp begins.
         BlockPos nearCore = new BlockPos(nx, terrainGroundY(world, nx, nz), nz);
         BlockPos wall = detectWallOnPath(world, outsidePoint(world, nearCore, 12.0), nearCore);
-        breachCorridor = (wall != null)
-                ? new BlockPos(wall.getX(), terrainGroundY(world, wall.getX(), wall.getZ()), wall.getZ())
-                : nearCore;
+        BlockPos wallPos = (wall != null) ? wall : nearCore;
+        // Breach foot = the open-field ground just OUTSIDE the wall on the army side (where the assault
+        // forms up). Sample surfaceY at 3/6/9 blocks out and take the MEDIAN, which rejects a single tree's
+        // roof (too high) or a single pit (too low). Do NOT use terrainGroundY here: it dives past the
+        // castle's man-made foundation to natural rock and read ~6 blocks too low (the "ground marked too
+        // low" report). The open field outside the wall has no roof, so surfaceY there IS the real ground.
+        BlockPos o3 = outsidePoint(world, wallPos, 3.0);
+        BlockPos o6 = outsidePoint(world, wallPos, 6.0);
+        BlockPos o9 = outsidePoint(world, wallPos, 9.0);
+        int s3 = surfaceY(world, o3.getX(), o3.getZ());
+        int s6 = surfaceY(world, o6.getX(), o6.getZ());
+        int s9 = surfaceY(world, o9.getX(), o9.getZ());
+        int gOut = Math.max(Math.min(s3, s6), Math.min(Math.max(s3, s6), s9)); // median of the 3 samples
+        breachCorridor = new BlockPos(wallPos.getX(), gOut, wallPos.getZ());
         EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (near core "
                 + site.getX() + "," + site.getZ() + ", army side; "
                 + (edge != null ? "perimeter def=" + (int) edge.defenseHeat : "landward") + ")");
@@ -384,11 +406,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
             }
         }
 
-        // Hostile aircraft work the area during the barrage (BF109/Lancaster/heli pool by level).
+        // Hostile aircraft work the area during the barrage. Helicopters get an initial CAS pass
+        // (BF109/heli pool by level), then a TICK-DRIVEN dispatcher (tickBombardmentAir) layers
+        // level-scaled JET (L8+) and BOMBER (L9-10) strikes over the whole phase so the player
+        // actually SEES planes bombing/strafing the breach and base.
         if (warLevel >= 3) {
             boolean cas = AirStrikeController.requestHostileCAS(world, site, warLevel);
             EpochRunnerMod.logger.info("[Siege] bombardment CAS requested -> launched=" + cas);
         }
+        // First jet/bomber wave comes in shortly after deployment, not instantly (let the catapults open).
+        airStrikeCooldown = 8 * 20;
     }
 
     // ════════════════════════════════════════════════════════════
@@ -399,6 +426,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
         phase = P_ENGINEER;
         lastPhaseChangeTick = tickAge;
         engineersComplete = false;
+        tunnelPhase = false;
+        crewHeatSpot.clear();
+        completedHeatSpots.clear();
         EpochRunnerMod.logger.info("[Siege] -> ENGINEER PUSH: planning military route (warLevel=" + warLevel + ")");
 
         if (breachCorridor == null) chooseBreachCorridor(world);
@@ -521,6 +551,111 @@ public class SiegeDirector implements IPhasedBattleDirector {
     }
 
     /**
+     * PHASE 2 of the engineer push. The wall breach is open; now each engineer squad mines a real,
+     * terrain-following staircase/tunnel from the breach interior up INTO the base to the heat spot the
+     * director bound to that squad, and the assault then pushes in along those tunnels. Resets
+     * engineersComplete so tickEngineers keeps the crews working the new TUNNEL tasks.
+     */
+    private void beginEngineerTunnels(World world) {
+        tunnelPhase = true;
+        // Clear out any drained phase-1 tasks so the queue holds ONLY the tunnels (keeps the
+        // all-done check + reserveNextTask scan clean).
+        engQueue.removeIf(t -> t.done);
+        // Release every crew from its (completed) phase-1 task so it can take its bound tunnel.
+        for (EngCrew crew : engCrews) releaseTask(crew);
+
+        // The interior foot of the breach = ~3 blocks inside the wall, on the breach grade. Every tunnel
+        // starts here and fans out to its own heat spot.
+        double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
+        int ifx = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * 3);
+        int ifz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * 3);
+        BlockPos interiorFoot = new BlockPos(ifx, breachCorridor.getY(), ifz);
+
+        List<BlockPos> spots = enumerateHeatSpots(world);
+        if (spots.isEmpty()) { engineersComplete = true; return; } // nothing to dig to; let the surge fire
+
+        int planned = 0;
+        for (int ci = 0; ci < engCrews.size(); ci++) {
+            EngCrew crew = engCrews.get(ci);
+            if (crew == null || crew.carrier == null || crew.carrier.isDead) continue;
+            BlockPos spot = spots.get(ci % spots.size()); // round-robin if more crews than spots
+            crewHeatSpot.put(crew, spot);
+            EngTask tunnel = planEngineerTunnel(world, interiorFoot, spot, ci);
+            if (tunnel != null) {
+                tunnel.claimedBy = crew; // PRE-CLAIM: each squad owns ITS tunnel to ITS spot
+                crew.current = tunnel;
+                crew.reservedAtTick = tickAge;
+                crew.arrived = false;
+                engQueue.add(tunnel);
+                planned++;
+            }
+        }
+        engQueue.sort((a, b) -> b.priority - a.priority);
+        engineersComplete = (planned == 0); // if nothing got planned, allow the surge to proceed
+        EpochRunnerMod.logger.info("[Siege] PHASE2 tunnels: " + planned + " interior staircase(s) from "
+                + xyz(interiorFoot) + " to " + spots.size() + " heat spot(s)");
+    }
+
+    /**
+     * Enumerate the interior heat spots the tunnels target: the base-cluster chunks ranked by INTERIOR
+     * VALUE (storage+machine+living+power, the same metric WarHeatMap.coreOf uses), as world chunk
+     * centres. Falls back to the heat core, then the resolved site, so a protected/structure target
+     * (no cluster) still gets one objective.
+     */
+    private List<BlockPos> enumerateHeatSpots(World world) {
+        List<BlockPos> out = new ArrayList<>();
+        if (baseCluster != null && !baseCluster.isEmpty()) {
+            List<StrategicChunk> ranked = new ArrayList<>(baseCluster);
+            ranked.sort((a, b) -> Double.compare(
+                    (b.storageHeat + b.machineHeat + b.livingHeat + b.powerHeat),
+                    (a.storageHeat + a.machineHeat + a.livingHeat + a.powerHeat)));
+            int max = (warLevel >= 6) ? 4 : 3; // cap to the crew count band
+            for (StrategicChunk c : ranked) {
+                if (out.size() >= max) break;
+                int wx = (c.chunkX << 4) + 8, wz = (c.chunkZ << 4) + 8;
+                out.add(new BlockPos(wx, terrainGroundY(world, wx, wz), wz));
+            }
+        }
+        if (out.isEmpty() && baseCore != null) {
+            int wx = (baseCore.chunkX << 4) + 8, wz = (baseCore.chunkZ << 4) + 8;
+            out.add(new BlockPos(wx, terrainGroundY(world, wx, wz), wz));
+        }
+        if (out.isEmpty() && site != null) {
+            out.add(new BlockPos(site.getX(), terrainGroundY(world, site.getX(), site.getZ()), site.getZ()));
+        }
+        return out;
+    }
+
+    /**
+     * Ray-walk from the breach interior foot to one heat spot, appending terrain-following RouteNodes to
+     * the saved route whose gradeY STAIRS up/down (clamped +-1 per column, so it is a real staircase, not
+     * a vertical hole). Returns the EngTask spanning the appended nodes (work = TUNNEL), or null if the
+     * span is trivial.
+     */
+    private EngTask planEngineerTunnel(World world, BlockPos from, BlockPos spot, int crewIdx) {
+        double dx = spot.getX() - from.getX(), dz = spot.getZ() - from.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 2.0) return null;
+        double ux = dx / dist, uz = dz / dist;
+        int n = (int) Math.min(Math.ceil(dist), 64); // cap a runaway tunnel length
+        int fromIdx = route.size();
+        int gradeY = from.getY();
+        for (int s = 1; s <= n; s++) {
+            int x = (int) Math.round(from.getX() + ux * s);
+            int z = (int) Math.round(from.getZ() + uz * s);
+            int grnd = terrainGroundY(world, x, z); // follow the natural floor INSIDE the base
+            if (grnd > gradeY + 1) gradeY++;          // climb one step (staircase up)
+            else if (grnd < gradeY - 1) gradeY--;     // descend one step (staircase down)
+            else gradeY = grnd;
+            route.add(new RouteNode(x, z, gradeY, Obstacle.WALL)); // mined like a wall passage
+        }
+        int toIdx = route.size() - 1;
+        if (toIdx < fromIdx) return null;
+        // 60 - crewIdx keeps the tunnels distinct + ordered; far below the (already-done) breach's 100.
+        return new EngTask(EngWork.TUNNEL, Obstacle.WALL, fromIdx, toIdx, 60 - crewIdx);
+    }
+
+    /**
      * ENGINEER DEBUG OVERLAY. Show -- big and in-world -- exactly what the engineers decided: the
      * objective beam, the planned route line, a coloured box on every obstacle with a floating label of
      * the obstacle type + the tool chosen + the tools REJECTED (red X), and full logs of all of it
@@ -597,6 +732,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
             case RAMP:   return "RAMP/CUT(cobblestone)";
             case LADDER: return "LADDER(scale wall)";
             case BREACH: return "BREACH(mine 3x4 gap)";
+            case TUNNEL: return "TUNNEL(staircase to heat)";
             default:     return "CLEAR(head)";
         }
     }
@@ -651,6 +787,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         switch (t.work) {
             case BREACH: return 16;
             case LADDER: return RAMP_STEPS + RAMP_CREST;
+            case TUNNEL: return Math.max(1, t.toIdx - t.fromIdx + 1); // one mined node of work each
             default:     return Math.max(1, t.toIdx - t.fromIdx + 1);
         }
     }
@@ -694,6 +831,35 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 }
             } catch (Throwable ignored) {}
         }
+    }
+
+    /**
+     * PHASE-2 tunnel mining: carve one lane-wide, head-high, terrain-following node of the interior
+     * staircase. Identical block discipline to buildRouteNode (floor gaps via setCampBlock so they
+     * revert; cut solids via the antigrief-aware damageBlock), but ALWAYS floors the tread so the
+     * staircase is walkable even where the original floor was air/liquid.
+     */
+    private void mineTunnelNode(World world, RouteNode node) {
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang);
+        int hw = laneHalf(), hh = laneHeight();
+        for (int w = -hw; w <= hw; w++) {
+            int x = (int) Math.round(node.x + px * w);
+            int z = (int) Math.round(node.z + pz * w);
+            try {
+                BlockPos floor = new BlockPos(x, node.gradeY - 1, z);
+                if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
+                    setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
+                }
+                for (int y = node.gradeY; y <= node.gradeY + hh; y++) {
+                    BlockPos hp = new BlockPos(x, y, z);
+                    Material m = world.getBlockState(hp).getMaterial();
+                    if (m.isLiquid()) setCampBlock(world, hp, Blocks.AIR.getDefaultState());
+                    else if (m.isSolid()) damageBlock(world, hp); // carve the passage through the base
+                }
+            } catch (Throwable ignored) {}
+        }
+        explosionEffect(world, new BlockPos(node.x, node.gradeY + 1, node.z));
     }
 
     /** Carve a level-scaled (3-7 wide, 4-5 tall) walk-through gap THROUGH the wall, deeper each step. */
@@ -810,6 +976,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 placeLadderRungAt(world, route.get(t.fromIdx), t.progress);
                 t.progress++;
                 break;
+            case TUNNEL: {                                  // mine the staircase node-by-node (~2/tick)
+                for (int k = 0; k < 2 && t.progress < taskNeeded(t); k++, t.progress++) {
+                    int idx = Math.min(t.fromIdx + t.progress, t.toIdx);
+                    mineTunnelNode(world, route.get(idx));
+                }
+                break;
+            }
             case BREACH:
                 breachStep(world, route.get(t.fromIdx), t.progress / 2); // deepen every 2 ticks
                 if (warLevel >= 8 && t.progress == 6) {                  // high tech: a real TNT charge
@@ -825,6 +998,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
             if (t.work == EngWork.BREACH) {                 // open + floor the corridor through the gap
                 openGroundBreach(world, breachCorridor);
                 levelBreachPath(world, breachCorridor);
+            } else if (t.work == EngWork.TUNNEL) {          // this squad's staircase reached its heat spot
+                BlockPos spot = crewHeatSpot.get(crew);
+                if (spot != null) {
+                    completedHeatSpots.add(spot);
+                    interiorObjective = spot;              // the push now has an interior goal to flow to
+                    EpochRunnerMod.logger.info("[Siege] PHASE2 crew#" + crew.id
+                            + " tunnel broke through to heat spot " + xyz(spot));
+                }
             }
             releaseTask(crew);
         }
@@ -896,12 +1077,31 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int iz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * 8);
         interiorObjective = new BlockPos(ix, terrainGroundY(world, ix, iz), iz);
 
+        // If PHASE-2 tunnels broke through, send the army to the highest-value dug heat spot via the
+        // tunnels, not just the breach mouth. completedHeatSpots.get(0) is the top-ranked chunk
+        // (enumerateHeatSpots ranked them), so it is the priority objective. The actual interior push is
+        // driven by interiorObjective through advanceThroughBreach each P_SURGE/P_ASSAULT tick.
+        if (!completedHeatSpots.isEmpty()) {
+            interiorObjective = completedHeatSpots.get(0);
+            EpochRunnerMod.logger.info("[Siege] surge pushing through tunnels to heat spot "
+                    + xyz(interiorObjective));
+        }
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
-            c.setBattleContext(activator, breachCorridor); // release at the breach -> soldiers climb in
+            // Release at the breach (reachable); interiorObjective is the movement goal that flows them up
+            // the dug staircases into the base instead of milling at the mouth.
+            c.setBattleContext(activator, breachCorridor);
+            c.setMoveTarget(breachCorridor, 0.06 + warLevel * 0.004);
         }
 
         spawnCavalryCharge(world);
+
+        // KSK fast-rope insertion into the interior as the assault goes in (heavier transport at higher levels).
+        if (warLevel >= 6) {
+            BlockPos dz = (interiorObjective != null) ? interiorObjective : breachCorridor;
+            String heli = (warLevel >= 9) ? "chinook" : (warLevel >= 7) ? "blackhawk" : "littlebird";
+            AirStrikeController.launchInsertion(world, dz, warLevel, heli);
+        }
 
         // A fresh armoured push commits with the line.
         if (warLevel >= 6) spawnArmourColumn(world, WALL_RING + 6.0);
@@ -925,7 +1125,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
             try {
                 net.minecraft.entity.Entity e = studio.ERM.war.BattleManagers.core.SpawnHelper.spawnPayload(
                         world, at, "soldier:cavalry", tgt, home, warLevel, "CAVALRY", "");
-                if (e != null) spawned++;
+                if (e != null) {
+                    spawned++;
+                    looseUnits.add(e);                              // the rider
+                    if (e.getRidingEntity() != null) looseUnits.add(e.getRidingEntity()); // its horse
+                }
             } catch (Throwable t) {
                 EpochRunnerMod.logger.warn("[Siege] cavalry spawn failed: " + t.getMessage());
             }
@@ -939,13 +1143,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void advanceThroughBreach(World world, double speed) {
         if (breachCorridor == null) { advanceLine(world, WALL_RING, speed); return; }
         BlockPos goal = (interiorObjective != null) ? interiorObjective : breachCorridor;
-        for (EntityFormationCarrier c : carriers) {
+        // Spread axis along the wall, so once through the breach the formations FAN OUT into the base to
+        // different lanes instead of all stacking at one doorway (crude version of "seek different
+        // hotspots" -- each carrier's own lateral slot becomes its interior lane).
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang);
+        for (LineUnit u : frontLine) {
+            EntityFormationCarrier c = u.carrier;
             if (c == null || c.isDead || c.isEngineerMode()) continue;
-            // Two-leg path: outside the wall -> head for the breach GAP; once at/through it -> push up the
-            // ramp to the interior objective. Aiming at the deep core (blocked by buildings) made them
-            // pile at the ramp foot; the interior objective is reachable, so they actually go in.
             double dBreach = c.getDistance(breachCorridor.getX(), breachCorridor.getY(), breachCorridor.getZ());
-            c.setMoveTarget(dBreach > 6 ? breachCorridor : goal, speed);
+            if (dBreach > 6) { c.setMoveTarget(breachCorridor, speed); continue; } // funnel to the gap
+            BlockPos lane = new BlockPos(                                            // then fan out inside
+                    goal.getX() + (int) Math.round(px * u.lateral * 0.5),
+                    goal.getY(),
+                    goal.getZ() + (int) Math.round(pz * u.lateral * 0.5));
+            c.setMoveTarget(lane, speed);
         }
     }
 
@@ -997,6 +1209,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
             case P_BOMBARD:
                 tickCatapults(world);
                 refreshBombardment();
+                tickBombardmentAir(world);
                 advanceLine(world, BOMBARD_RING, 0.045 + warLevel * 0.003);
                 if (tsp >= PHASE_BOMBARD_TICKS || waveDefeated(tsp)) beginEngineerPush(world);
                 break;
@@ -1011,8 +1224,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // Only advance early once the engineers GENUINELY finished (engineersComplete now means
                 // every task is done, not "all dead") AND a minimum dwell has passed, so they actually
                 // get seen laddering / mining / sapping.
+                // PHASE 1 -> PHASE 2 handoff: when the WALL breach (phase-1 tasks) is done, don't end the
+                // phase -- start the interior tunnel dig instead. Only AFTER the tunnels finish (or the
+                // phase timer runs out) do we surge.
+                if (engineersComplete && !tunnelPhase && tsp >= MIN_PHASE_DWELL) {
+                    beginEngineerTunnels(world);
+                }
+                boolean engineeringDone = engineersComplete && (tunnelPhase || engQueue.isEmpty());
                 if (tsp >= PHASE_ENGINEER_TICKS
-                        || (engineersComplete && tsp >= MIN_PHASE_DWELL)
+                        || (engineeringDone && tsp >= MIN_PHASE_DWELL)
                         || waveDefeated(tsp)) beginSurge(world);
                 break;
 
@@ -1066,6 +1286,35 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
+    /**
+     * BOMBARDMENT-phase air dispatcher. Runs every tick during P_BOMBARD, but only ACTS when the
+     * cooldown reaches zero, so jets/bombers arrive on a rhythm (~one event every 7-9s, a little
+     * faster at higher levels) instead of spamming. Levels:
+     *   L8     -> jet strafing/gun runs on the breach
+     *   L9     -> jets + occasional Lancaster carpet run
+     *   L10    -> jets + B52 carpet bombing
+     * Targets alternate between the chosen breach corridor and the base core/site so the player sees
+     * both the wall AND the interior get hit. Spawn geometry is handled by AirStrikeController at the
+     * standard approach distance (verified visible: spawn < ~135 blocks from the player, under the
+     * 180-block despawn radius), so high passes are not culled on arrival.
+     */
+    private void tickBombardmentAir(World world) {
+        if (warLevel < 8) return;                 // L3-7 rely on the initial CAS heli pass only
+        if (airStrikeCooldown > 0) { airStrikeCooldown--; return; }
+
+        // Alternate target: breach corridor (open the wall) vs base core (terrorise the interior).
+        BlockPos coreTgt = (baseCore != null)
+                ? new BlockPos((baseCore.chunkX << 4) + 8, surfaceY(world, (baseCore.chunkX << 4) + 8, (baseCore.chunkZ << 4) + 8), (baseCore.chunkZ << 4) + 8)
+                : site;
+        BlockPos tgt = (breachCorridor != null && (tickAge / 20) % 2 == 0) ? breachCorridor : coreTgt;
+
+        boolean launched = AirStrikeController.dispatchBombers(world, tgt, warLevel);
+        EpochRunnerMod.logger.info("[Siege] bombardment air dispatch -> " + tgt + " launched=" + launched + " L" + warLevel);
+
+        // Re-arm. Higher levels get a slightly tighter cadence; floor keeps it from ever spamming.
+        airStrikeCooldown = Math.max(5 * 20, (9 * 20) - warLevel * 6);
+    }
+
     private boolean waveDefeated(int ticksSincePhase) {
         return ticksSincePhase >= MIN_PHASE_DWELL && carriers.isEmpty();
     }
@@ -1100,11 +1349,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
                         if (world.getBlockState(lp.down()).getBlock() == Blocks.COBBLESTONE) world.setBlockToAir(lp.down());
                     } catch (Throwable ignored) {}
                 }
-                // ALWAYS demolish the structure at the intended target (ground -> roof). On open sand this
-                // is just a shallow divot, never a deep hole (openGroundBreach floors at the ground). The
-                // creeping barrage now ERASES the base instead of pockmarking + littering it.
-                openGroundBreach(world, s.target);
+                // A single TNT-SIZED (a tad smaller) blast where the round lands -- NOT openGroundBreach,
+                // which razed whole columns to the ground ("levels entire chunks in single blocks"). The
+                // catapult only SOFTENS the wall; the ENGINEERS open the real ground breach. breachWall is a
+                // friendly-safe, antigrief sphere of damageBlock (claimed land -> repairable scaffold), and
+                // scatterDebris flings a few rubble blocks that are also logged for /war repair.
+                breachWall(world, s.target, 2);
+                scatterDebris(world, s.target);
                 explosionEffect(world, s.target);
+                // A real ENTITY-damaging blast a tad smaller than vanilla TNT (3.5 vs 4.0). Terrain damage
+                // is OFF -- breachWall above already does the antigrief-safe wall damage -- so this only
+                // hurts whoever is standing at the impact (the defenders), it doesn't double-raze blocks.
+                try {
+                    world.newExplosion(null, s.target.getX() + 0.5, s.target.getY() + 0.5, s.target.getZ() + 0.5,
+                            3.5F, false, false);
+                } catch (Throwable ignored) {}
                 if (alive) s.block.setDead();
                 it.remove();
             }
@@ -1166,9 +1425,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
         final double dragFactor = (1.0 - Math.pow(drag, flight)) / (1.0 - drag); // effective ticks with drag
         final double mStar = -drag * gAcc / (1.0 - drag); // vertical motion fixed point under gravity+drag
 
-        // A converging CLUSTER of boulders per shot for spectacle (each lands in a tight pattern on the
-        // breach). Count scales with war level. The big launch report sells the heave.
-        int boulders = Math.max(2, Math.min(5, 2 + warLevel / 3));
+        // The catapult is a small machine: ONE cobblestone per shot (the user's ask). It lobs a single
+        // round; the cadence (catapultCooldown) provides the rhythm, not a cluster.
+        int boulders = 1;
         world.playSound(null, from, SoundEvents.ENTITY_GENERIC_EXPLODE, SoundCategory.HOSTILE, 2.4F, 0.7F);
         for (int b = 0; b < boulders; b++) {
             // Every boulder scatters (even the first) -- the barrage felt machine-accurate before.
@@ -1211,6 +1470,31 @@ public class SiegeDirector implements IPhasedBattleDirector {
     }
 
     /**
+     * Fling a few cobblestone "debris" blocks onto the surface around a catapult impact, each LOGGED for
+     * /war repair (recorded as originally-air, so the repair command later clears it). Unlike scatterRubble
+     * -- which uses setCampBlock and only reverts when the whole siege ends -- this debris persists after
+     * the battle until the player runs /war repair, which is what the user asked for.
+     */
+    private void scatterDebris(World world, BlockPos center) {
+        try {
+            WarWorldData data = WarWorldData.get(world);
+            int pieces = 2 + world.rand.nextInt(3); // 2-4 chunks of rubble
+            for (int n = 0; n < pieces; n++) {
+                int rx = center.getX() + world.rand.nextInt(7) - 3;
+                int rz = center.getZ() + world.rand.nextInt(7) - 3;
+                BlockPos p = new BlockPos(rx, surfaceY(world, rx, rz), rz);
+                if (!world.isAirBlock(p)) continue;
+                // Record original (air) BEFORE placing, but never clobber an existing repair order (e.g.
+                // a block damageBlock already scaffolded here) -- that would lose the true original.
+                if (data != null && !data.getRepairMap().containsKey(p.toImmutable())) {
+                    data.addRepairOrder(p.toImmutable(), Blocks.AIR.getDefaultState());
+                }
+                world.setBlockState(p, Blocks.COBBLESTONE.getDefaultState(), 2);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /**
      * Carve the wall at the breach corridor from the surface DOWN to the defender's ground level,
      * across a 5-wide front (along the wall face). Repeated catapult hits here open a REAL walk-through
      * gap instead of pockmarking the wall. Antigrief-aware via damageBlock (claimed walls become
@@ -1221,10 +1505,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // raised terrain those differ, and using the core Y left a lip / hole short of the real opening.
         // Width AND depth scale with tech level: at L9-10 the barrage pulverises a wide, deep section of
         // the front into rubble (13 wide x 5 deep) so the engineers barely have to finish the breach.
-        // Carve from the breach FOOT (ground) UP to each column's top -- NEVER below ground. On a
-        // building this demolishes the whole structure column; on open sand it only shaves the top ~2
-        // blocks (a shallow divot), so it destroys STRUCTURES but never digs deep holes (the player's
-        // exact ask). Using min(at,core) before could dig down to a lower core Y = the deep-hole bug.
+        // Carve from the passed foot Y (callers set this to the field ground at the breach) UP to each
+        // column's top. Do NOT dive with terrainGroundY here -- that read ~6 blocks too low under the
+        // castle foundation. On a building the column is razed from the foot up; on open ground it's a
+        // shallow divot. The foot itself is now the correct field-ground from chooseBreachCorridor.
         int floorY = at.getY();
         int half = (warLevel >= 9) ? 6 : (warLevel >= 6) ? 4 : 2;   // front width (13 / 9 / 5)
         int depth = (warLevel >= 9) ? 4 : (warLevel >= 6) ? 2 : 1;  // blocks carved INTO the wall
@@ -1267,13 +1551,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
         for (int s = 0; s <= steps; s++) {
             int baseX = (int) Math.round(bp.getX() + ux * s);
             int baseZ = (int) Math.round(bp.getZ() + uz * s);
-            int surf = surfaceY(world, baseX, baseZ);
-            // Climb toward the interior floor at a walkable grade (±1/step) -> a ramp UP onto the platform,
-            // but CAP the rise to +5 so it ramps onto a low platform and never builds a cobblestone TOWER
-            // up the side of a tall building (the weird off-center spire the engineers made before).
-            if (surf > rampY + 1) rampY++;
-            else if (surf < rampY - 1) rampY--;
-            else rampY = surf;
+            // Follow the TRUE GROUND (terrainGroundY), not surfaceY -- surfaceY is the ROOF of any building
+            // along the corridor, so the ramp used to climb onto rooftops and "float in the air". The ground
+            // grade gives a walkable ramp that stays on the terrain. Rise still capped to +5 so it eases onto
+            // a low platform and never builds a cobblestone TOWER up the side of a tall building.
+            int grnd = terrainGroundY(world, baseX, baseZ);
+            if (grnd > rampY + 1) rampY++;
+            else if (grnd < rampY - 1) rampY--;
+            else rampY = grnd;
             rampY = Math.min(rampY, bp.getY() + 5);
             for (int w = -hw; w <= hw; w++) {
                 int x = (int) Math.round(baseX + px * w);
@@ -1372,13 +1657,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
         if (crew != null) crew.setBattleContext(activator, catapult);
     }
 
-    /** Spawn one real Flan tank (EntityAIPilot crew) at an absolute front position. */
-    private void spawnTankAtFront(World world, double lateral, double ring, String flansShortName) {
+    /** Spawn one real Flan tank (EntityAIPilot crew) at an absolute front position. Returns the pilot. */
+    private EntityAIPilot spawnTankAtFront(World world, double lateral, double ring, String flansShortName) {
         BlockPos at = frontPoint(world, ring, lateral);
-        spawnTankAt(world, at, flansShortName);
+        return spawnTankAt(world, at, flansShortName);
     }
 
-    private void spawnTankAt(World world, BlockPos at, String flansShortName) {
+    private EntityAIPilot spawnTankAt(World world, BlockPos at, String flansShortName) {
         try {
             EntityAIPilot pilot = new EntityAIPilot(world);
             pilot.setPosition(at.getX() + 0.5, at.getY() + 1.0, at.getZ() + 0.5);
@@ -1389,8 +1674,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
             }
             world.spawnEntity(pilot);
             vehicles.add(pilot);
+            return pilot;
         } catch (Throwable t) {
             EpochRunnerMod.logger.warn("[Siege] Failed to spawn tank '" + flansShortName + "': " + t.getMessage());
+            return null;
         }
     }
 
@@ -1437,7 +1724,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
         double mid = (count - 1) / 2.0;
         for (int i = 0; i < count; i++) {
             double lateral = (i - mid) * (TANK_LANE_SPACING * 0.75);
-            spawnTankAtFront(world, lateral, ring, pickTransport(world));
+            String vt = pickTransport(world);
+            EntityAIPilot p = spawnTankAtFront(world, lateral, ring, vt);
+            // CARRIERS (halftrack / SdkFz251 / M3) rally at the breach to drop their troops near the
+            // assault. SCOUTS (jeep/kubel/humvee/BMW/SASJeep/...) are NOT rallied so their SCOUT movement
+            // style takes over -- they circle the base perimeter at standoff instead of charging the gate.
+            if (p != null && breachCorridor != null) {
+                String low = vt.toLowerCase();
+                boolean carrier = low.contains("halftrack") || low.contains("sdkfz251") || low.contains("m3");
+                if (carrier) p.setRallyPoint(outsidePoint(world, breachCorridor, 8.0 + i * 2.0));
+            }
         }
     }
 
@@ -1835,6 +2131,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         catapultSites.clear();
         // Put the world back exactly as it was -- pad, tents, catapult frames all reverted.
         restoreCamp(world);
+        for (net.minecraft.entity.Entity e : new ArrayList<>(looseUnits)) {
+            if (e != null && !e.isDead) { try { e.setDead(); } catch (Throwable ignored) {} }
+        }
+        looseUnits.clear();
         vehicles.clear();
         carriers.clear();
         frontLine.clear();
@@ -1912,8 +2212,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
     /** A terrain obstacle the route can cross (drives the engineering action + mobility cost). */
     private enum Obstacle { PASSABLE, WATER, LAVA, GAP, CLIFF, WALL }
 
-    /** A unit of engineering work pulled off the shared queue. */
-    private enum EngWork { CLEAR, BRIDGE, RAMP, LADDER, BREACH }
+    /** A unit of engineering work pulled off the shared queue. TUNNEL is the phase-2 staircase dig from
+     *  the breach interior up into the base to a bound heat spot. */
+    private enum EngWork { CLEAR, BRIDGE, RAMP, LADDER, BREACH, TUNNEL }
 
     /** One node of the saved MilitaryRoute: a column + its terrain-following walkable grade + obstacle. */
     private static final class RouteNode {

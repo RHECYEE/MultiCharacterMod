@@ -4,6 +4,7 @@ import net.minecraft.client.model.ModelBiped;
 import net.minecraft.client.model.ModelPlayer;
 import net.minecraft.client.renderer.entity.RenderBiped;
 import net.minecraft.client.renderer.entity.RenderManager;
+import net.minecraft.client.renderer.entity.layers.LayerBipedArmor;
 import net.minecraft.entity.EntityLiving;
 import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.fml.relauncher.Side;
@@ -34,10 +35,16 @@ public class RenderSkinnable<T extends EntityLiving> extends RenderBiped<T> {
         // use separate left-arm/left-leg UVs. ModelBiped renders none of that, so those skins showed
         // see-through gaps and mirrored limbs. ModelPlayer renders the full overlay + per-limb UVs.
         super(manager, new ModelPlayer(0.0F, false), 0.5F);
+        // RenderBiped in 1.12.2 adds LayerCustomHead/Elytra/HeldItem but NOT an armor layer (that lives
+        // on RenderPlayer). Without this the troops' equipped armor -- including Flan KSK ItemTeamArmour,
+        // which is a standard ItemArmor whose getArmorModel/getArmorTexture LayerBipedArmor routes through
+        // ForgeHooksClient -- is never drawn. Adding it makes vanilla + Flan content-pack armor render.
+        this.addLayer(new LayerBipedArmor(this));
     }
 
     public RenderSkinnable(RenderManager manager, ModelBiped model, float shadowSize) {
         super(manager, model, shadowSize);
+        this.addLayer(new LayerBipedArmor(this));
     }
 
     @Override

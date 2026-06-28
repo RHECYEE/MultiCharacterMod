@@ -466,6 +466,9 @@ public class EntityFormationCarrier extends EntityCreature {
                 puppet.setTexturePathNoExt("");
             }
 
+            // Armour: the puppets are most of the visible formation and had NONE -- give them the kit too.
+            try { SoldierLoadout.applyKskArmor(puppet); } catch (Throwable ignored) {}
+
             Vec3d rotated = rotateOffset(off);
             puppet.setPosition(this.posX + rotated.x, this.posY, this.posZ + rotated.z);
 

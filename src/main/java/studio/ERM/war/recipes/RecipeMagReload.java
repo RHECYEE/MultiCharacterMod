@@ -11,4 +11,9 @@ public class RecipeMagReload extends IForgeRegistryEntry.Impl<IRecipe> implement
     @Override public ItemStack getCraftingResult(InventoryCrafting inv) { return ItemStack.EMPTY; }
     @Override public boolean canFit(int w, int h) { return false; }
     @Override public ItemStack getRecipeOutput() { return ItemStack.EMPTY; }
+    // CRITICAL: mark DYNAMIC so vanilla EXCLUDES this from the recipe book / recipe-unlock system.
+    // As a non-dynamic recipe with an EMPTY output it was being fed into the advancement recipe-unlock
+    // path (Container.detectAndSendChanges -> InventoryChangeTrigger -> unlockRecipes -> sendRecipeBook),
+    // which NPE-crashed "Ticking player" whenever the player's inventory changed.
+    @Override public boolean isDynamic() { return true; }
 }

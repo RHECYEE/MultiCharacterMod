@@ -270,23 +270,29 @@ public class ItemAirTargetDesignator extends Item {
                 return;
             }
 
-            // Client-side particle spawning
+            // Client-side particle spawning: a rising COLOURED smoke plume (green / yellow / red, chosen
+            // per marker) so the impact/target reads clearly. Uses the same redstone-dust colour trick as
+            // the /war heat overlay (the dx,dy,dz args are read as R,G,B for the REDSTONE particle).
             if (world.isRemote && ticksAlive % 2 == 0 && markerPos != null) {
-                for (int i = 0; i < 3; i++) {
-                    world.spawnParticle(net.minecraft.util.EnumParticleTypes.SMOKE_LARGE,
-                            posX + (rand.nextDouble() - 0.5) * 1.5,
-                            posY + rand.nextDouble() * 3,
-                            posZ + (rand.nextDouble() - 0.5) * 1.5,
-                            (rand.nextDouble() - 0.5) * 0.02, 0.08, (rand.nextDouble() - 0.5) * 0.02);
+                float r, g, b;
+                switch (Math.floorMod(getEntityId(), 3)) {
+                    case 0:  r = 0.15F; g = 1.00F; b = 0.15F; break; // green
+                    case 1:  r = 1.00F; g = 0.95F; b = 0.10F; break; // yellow
+                    default: r = 1.00F; g = 0.15F; b = 0.10F; break; // red
                 }
-
-                if (ticksAlive % 4 == 0) {
+                for (int i = 0; i < 6; i++) {
                     world.spawnParticle(net.minecraft.util.EnumParticleTypes.REDSTONE,
-                            posX + (rand.nextDouble() - 0.5),
-                            posY + 1.5 + rand.nextDouble() * 2,
-                            posZ + (rand.nextDouble() - 0.5),
-                            1.0, 0.0, 0.0);
+                            posX + (rand.nextDouble() - 0.5) * 1.6,
+                            posY + rand.nextDouble() * 3.0,
+                            posZ + (rand.nextDouble() - 0.5) * 1.6,
+                            Math.max(0.001F, r), g, b); // R clamped > 0 (0 red renders as full red)
                 }
+                // A little grey smoke body beneath the coloured dust for a proper plume.
+                world.spawnParticle(net.minecraft.util.EnumParticleTypes.SMOKE_LARGE,
+                        posX + (rand.nextDouble() - 0.5) * 1.2,
+                        posY + rand.nextDouble() * 2.0,
+                        posZ + (rand.nextDouble() - 0.5) * 1.2,
+                        (rand.nextDouble() - 0.5) * 0.02, 0.06, (rand.nextDouble() - 0.5) * 0.02);
             }
         }
 

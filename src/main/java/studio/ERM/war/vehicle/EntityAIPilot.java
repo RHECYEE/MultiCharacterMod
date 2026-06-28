@@ -60,6 +60,11 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
     private boolean hasSpawnedVehicle = false;
     private boolean crewSpawned = false;
     public boolean isPassenger = false;
+
+    // Director-set staging point: a rallied vehicle drives HERE and holds, instead of charging the player.
+    // Only scouts/transports/boats the SiegeDirector rallies get one; tanks leave it null (unchanged).
+    private net.minecraft.util.math.BlockPos rallyPoint = null;
+    public void setRallyPoint(net.minecraft.util.math.BlockPos p) { this.rallyPoint = p; }
     private static Field seatsField;
     private int initialCrewSize = 0;
 
@@ -200,6 +205,37 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
 
 
     private enum VehicleCategory { TANK, BOAT, TRANSPORT, STATIC }
+
+    // === PHASE 2: per-vehicle MOVEMENT STYLE (ShortName-derived) =========================
+    // Finer than VehicleCategory: distinguishes scouts / light / mid / heavy so each class
+    // moves to its own doctrine. DEFAULT falls back to the legacy controlGround behaviour so
+    // any unmatched vehicle keeps working exactly as before.
+    private enum MovementStyle { SCOUT, LIGHT_TANK, MID_TANK, HEAVY_TANK, DEFAULT }
+
+    // Light scout / utility: fast loose wide-radius scouting, circle the perimeter, drive-by + relocate.
+    private static final List<String> STYLE_SCOUT = Arrays.asList(
+            "bmwr75", "bmw", "jeep", "kubel", "sasjeep", "sdkfz2", "humvee", "motorcycle", "bike");
+    // Early / light tanks + armoured cars: probe, support infantry, flank, fire at medium range.
+    private static final List<String> STYLE_LIGHT = Arrays.asList(
+            "b1", "chiha", "chi-ha", "crusader", "greyhound", "panzeriil", "uc2pdr", "2pdr",
+            "chaffee", "puma", "ba-64", "sdkfz222");
+    // Mid tanks / carriers: main assault support, advance-by-bounds, stop at assault range.
+    private static final List<String> STYLE_MID = Arrays.asList(
+            "churchill", "cromwell", "m3halftrack", "panzer", "sdkfz251", "sherman");
+    // Late heavy / TD: slow deliberate, hold standoff, never chase into interiors.
+    private static final List<String> STYLE_HEAVY = Arrays.asList(
+            "tiger", "tigerii", "tiger131", "is2", "kv1", "kv2", "stug", "m10", "hellcat",
+            "fury", "t34", "pershing", "jumbo");
+
+    // Standoff / engagement radii in BLOCKS, squared inline where compared to getDistanceSq().
+    private static final double SCOUT_ORBIT_RADIUS = 45.0;  // circle the base this far out
+    private static final double LIGHT_STANDOFF     = 35.0;  // medium range fire
+    private static final double MID_ASSAULT_RANGE  = 22.0;  // close support stop line
+    private static final double HEAVY_STANDOFF     = 50.0;  // long deliberate standoff
+    private static final float  SCOUT_RETREAT_HP   = 0.4F;  // retreat below 40% hull HP
+
+    // Advance-by-bounds phase counter for MID_TANK (move ~2s, halt ~1s so the gun fires from a stop).
+    private int boundPhaseTicks = 0;
 
     private static final List<String> SOFT_VEHICLES = Arrays.asList("bike", "motorcycle", "quad", "atv");
     private static final List<String> LIGHT_TRANSPORTS = Arrays.asList("jeep", "kubel", "truck", "halftrack", "m3", "humvee", "transport", "bmw", "sasjeep", "sdkfz");
@@ -734,8 +770,22 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         updateVehicleControl(driving);
         VehicleCategory cat = getVehicleCategory(driving);
 
-        if (cat == VehicleCategory.BOAT) {
+        if (rallyPoint != null && driving instanceof EntityVehicle) {
+            // RALLIED (director-set staging): drive the hull to the staging point and HOLD there instead of
+            // charging the player. Unchanged from phase 1 -- the director owns this path for the units it rallies.
+            driveHullToward((EntityVehicle) driving, rallyPoint.getX() + 0.5, rallyPoint.getZ() + 0.5);
+        } else if (cat == VehicleCategory.BOAT) {
             controlBoat(driving, target);
+        } else if ((cat == VehicleCategory.TANK || cat == VehicleCategory.TRANSPORT)
+                && driving instanceof EntityVehicle) {
+            // PHASE 2: per-vehicle movement style. DEFAULT falls back to the legacy controlGround so
+            // any unmatched vehicle behaves exactly as before (tanks stay functional).
+            MovementStyle style = getMovementStyle(driving);
+            if (style == MovementStyle.DEFAULT) {
+                controlGround(driving, target, cat == VehicleCategory.TRANSPORT);
+            } else {
+                applyMovementStyle((EntityVehicle) driving, target, style, cat == VehicleCategory.TRANSPORT);
+            }
         } else if (cat == VehicleCategory.TRANSPORT) {
             controlGround(driving, target, true);
         } else if (cat == VehicleCategory.TANK || cat == VehicleCategory.STATIC) {
@@ -1385,6 +1435,158 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                     driving.angularVelocity.x, driving.angularVelocity.y, driving.angularVelocity.z,
                     driving.throttle, v.wheelsYaw);
         }
+    }
+
+    /**
+     * Drive the hull toward a world (x,z) and HOLD within ~5 blocks. Same steering/throttle math as
+     * controlGround's approach, but aimed at a fixed point instead of an entity -- used for the staging
+     * rally so scouts/transports push up to the breach and stop, rather than charging the player.
+     */
+    private void driveHullToward(EntityVehicle tank, double tx, double tz) {
+        if (tank.axes == null) return;
+        double dx = tx - tank.posX;
+        double dz = tz - tank.posZ;
+        if (dx * dx + dz * dz <= 25.0D) { tank.throttle = 0.0F; tank.wheelsYaw = 0.0F; return; } // arrived -> hold
+
+        Vector3f forward = tank.axes.getXAxis();
+        double cross = (forward.x * dz) - (forward.z * dx);
+        double dot = (forward.x * dx) + (forward.z * dz);
+
+        float turnPower = 0.0F;
+        if (cross > 0.5) turnPower = 1.0F;
+        else if (cross < -0.5) turnPower = -1.0F;
+        if (dot < 0) turnPower = (cross > 0) ? 1.0F : -1.0F;
+
+        tank.wheelsYaw = turnPower * 25.0F;
+        tank.throttle = 0.7F;
+        float power = 0.4F * Math.signum(tank.throttle);
+        tank.motionX += forward.x * power;
+        tank.motionZ += forward.z * power;
+    }
+
+    /**
+     * Classify the per-vehicle MOVEMENT style from the Flan ShortName. Order matters: LIGHT (armoured
+     * cars) is checked before SCOUT so "sdkfz222" does not get swallowed by the "sdkfz2" scout
+     * substring; HEAVY before MID so heavies win shared tokens. Returns DEFAULT when nothing matches
+     * so the caller uses the legacy controlGround path.
+     */
+    private MovementStyle getMovementStyle(EntityDriveable vehicle) {
+        if (vehicle == null || vehicle.getDriveableType() == null
+                || vehicle.getDriveableType().shortName == null) return MovementStyle.DEFAULT;
+        String name = vehicle.getDriveableType().shortName.toLowerCase();
+
+        if (matches(name, STYLE_LIGHT))  return MovementStyle.LIGHT_TANK; // armoured cars first (sdkfz222 vs sdkfz2)
+        if (matches(name, STYLE_SCOUT))  return MovementStyle.SCOUT;
+        if (matches(name, STYLE_HEAVY) || matches(name, MODERN_MBT)) return MovementStyle.HEAVY_TANK;
+        if (matches(name, STYLE_MID))    return MovementStyle.MID_TANK;
+        if (matches(name, MEDIUM_TANKS)) return MovementStyle.MID_TANK;  // catch any other mediums
+        if (matches(name, HEAVY_TANKS))  return MovementStyle.HEAVY_TANK; // catch any other heavies
+        return MovementStyle.DEFAULT;
+    }
+
+    /**
+     * Hull-movement dispatcher for the phase-2 styles. Turret aiming/firing is NOT touched here --
+     * handleAllTurrets() still runs every tick in runControlLogic, so a vehicle that holds at
+     * standoff still tracks and fires. Distances use getDistanceSq() (pilot<->target) like controlGround.
+     */
+    private void applyMovementStyle(EntityVehicle tank, Entity target, MovementStyle style, boolean isTransport) {
+        if (tank.axes == null || target == null) return;
+
+        switch (style) {
+            case SCOUT:      moveScout(tank, target); break;
+            case LIGHT_TANK: moveStandoff(tank, target, LIGHT_STANDOFF); break;
+            case HEAVY_TANK: moveStandoff(tank, target, HEAVY_STANDOFF); break;
+            case MID_TANK:   moveAdvanceByBounds(tank, target, MID_ASSAULT_RANGE); break;
+            default:
+                // Safety net: behave like a transport/tank legacy hull if we somehow get here.
+                controlGround(tank, target, isTransport);
+        }
+    }
+
+    /**
+     * SCOUT: circle the target at SCOUT_ORBIT_RADIUS (never closes to gate range), strafing past and
+     * relocating. Retreats outward when hull HP drops below SCOUT_RETREAT_HP. Reuses driveHullToward.
+     */
+    private void moveScout(EntityVehicle tank, Entity target) {
+        float hpRatio = this.getMaxHealth() > 0 ? this.getHealth() / this.getMaxHealth() : 1.0F;
+        double dx = target.posX - tank.posX;
+        double dz = target.posZ - tank.posZ;
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < 0.001) dist = 0.001;
+        double nx = dx / dist, nz = dz / dist;
+
+        if (hpRatio < SCOUT_RETREAT_HP) {
+            // RETREAT: drive directly away from the target.
+            driveHullToward(tank, tank.posX - nx * 30.0, tank.posZ - nz * 30.0);
+            return;
+        }
+
+        // Nearest point on the orbit ring toward us, then lead 16 blocks tangentially -> drive-by + relocate.
+        // tangent of (nx,nz) is (-nz,nx).
+        double cx = target.posX - nx * SCOUT_ORBIT_RADIUS;
+        double cz = target.posZ - nz * SCOUT_ORBIT_RADIUS;
+        double tx = cx + (-nz) * 16.0;
+        double tz = cz + (nx) * 16.0;
+        driveHullTowardHolding(tank, tx, tz, 3.0);
+    }
+
+    /**
+     * STANDOFF (LIGHT/HEAVY): advance until within `standoff` blocks of the target, then HOLD and let
+     * the turret fire. Never reverses to chase and never closes past standoff -> heavies don't get
+     * dragged into courtyards.
+     */
+    private void moveStandoff(EntityVehicle tank, Entity target, double standoff) {
+        double d0 = this.getDistanceSq(target);
+        if (d0 > standoff * standoff) {
+            driveHullToward(tank, target.posX, target.posZ); // close to the standoff line
+        } else {
+            tank.throttle = 0.0F; // hold; turret does the work
+            tank.wheelsYaw = 0.0F;
+        }
+    }
+
+    /**
+     * MID advance-by-bounds: alternate a ~40-tick MOVE phase and a ~20-tick HALT phase so the gun
+     * fires from a stop, until within `assaultRange` blocks; then hold at the assault line.
+     */
+    private void moveAdvanceByBounds(EntityVehicle tank, Entity target, double assaultRange) {
+        double d0 = this.getDistanceSq(target);
+        if (d0 <= assaultRange * assaultRange) {
+            tank.throttle = 0.0F; tank.wheelsYaw = 0.0F; // reached the assault line -> hold + fire
+            return;
+        }
+        boundPhaseTicks = (boundPhaseTicks + 1) % 60;
+        if (boundPhaseTicks < 40) {
+            driveHullToward(tank, target.posX, target.posZ); // MOVE bound
+        } else {
+            tank.throttle = 0.0F; tank.wheelsYaw = 0.0F;     // HALT bound: fire from a stop
+        }
+    }
+
+    /**
+     * Like driveHullToward but with a configurable HOLD radius (in blocks). driveHullToward hardcodes
+     * a 5-block hold; scouts want a tighter hold so they keep relocating around the ring.
+     */
+    private void driveHullTowardHolding(EntityVehicle tank, double tx, double tz, double holdBlocks) {
+        if (tank.axes == null) return;
+        double dx = tx - tank.posX;
+        double dz = tz - tank.posZ;
+        if (dx * dx + dz * dz <= holdBlocks * holdBlocks) { tank.throttle = 0.0F; tank.wheelsYaw = 0.0F; return; }
+
+        Vector3f forward = tank.axes.getXAxis();
+        double cross = (forward.x * dz) - (forward.z * dx);
+        double dot = (forward.x * dx) + (forward.z * dz);
+
+        float turnPower = 0.0F;
+        if (cross > 0.5) turnPower = 1.0F;
+        else if (cross < -0.5) turnPower = -1.0F;
+        if (dot < 0) turnPower = (cross > 0) ? 1.0F : -1.0F;
+
+        tank.wheelsYaw = turnPower * 25.0F;
+        tank.throttle = 0.7F;
+        float power = 0.4F * Math.signum(tank.throttle);
+        tank.motionX += forward.x * power;
+        tank.motionZ += forward.z * power;
     }
 
     private void controlGround(EntityDriveable driveable, Entity target, boolean isTransport) {

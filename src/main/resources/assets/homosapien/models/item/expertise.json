@@ -1,0 +1,12 @@
+{
+    "parent": "item/generated",
+    "textures": {
+        "layer0": "minecraft:items/book_written"
+    },
+    "overrides": [
+        {"predicate": {"damage": 0.0}, "model": "homosapien:item/expertise_power"},
+        {"predicate": {"damage": 0.25}, "model": "homosapien:item/expertise_ag"},
+        {"predicate": {"damage": 0.5}, "model": "homosapien:item/expertise_defense"},
+        {"predicate": {"damage": 0.75}, "model": "homosapien:item/expertise_resources"}
+    ]
+}

@@ -241,6 +241,82 @@ public class AirStrikeController {
         return requestCAS(world, target, "RIVAL", level);
     }
 
+    /**
+     * Dispatch a single transport helicopter to fast-rope a KSK troop payload onto a drop point.
+     * Always HOSTILE (RIVAL). The per-type WarAirstrikeHelper profile resolves to INSERTION, so the
+     * launchAirStrike switch routes it to setInsertion(...). focusPlayer is auto-resolved to the
+     * nearest player to target inside launchAirStrike.
+     *
+     * @param type Flan transport short id: "LittleBird" (6) / "BlackHawk" (10) / "chinook" (20)
+     */
+    public static boolean launchInsertion(World world, BlockPos target, int level, String type) {
+        if (world == null || world.isRemote) return false;
+        level = Math.max(1, Math.min(10, level));
+        String forced = normalizeFlansVehicleId((type == null || type.trim().isEmpty()) ? "LittleBird" : type);
+        boolean r = launchAirStrike(world, "RIVAL", target, level, null, forced);
+        if (r) EpochRunnerMod.logger.info("[AIR] INSERTION dispatched " + forced + " -> " + target + " level=" + level);
+        return r;
+    }
+
+    // ============================================================
+    // SIEGE BOMBARDMENT: JET + BOMBER DISPATCH (cooldown-free)
+    // ============================================================
+    //
+    // These spawn HOSTILE jets/bombers that run REAL bombing/strafing missions over a target.
+    // They intentionally do NOT use the casCooldowns/surgeCooldowns maps: the SiegeDirector owns
+    // the cadence (its own per-instance cooldown), so these are single-aircraft, fire-and-forget.
+    // Each forced ShortName routes through WarAirstrikeHelper.getProfile -> BOMBING_RUN (bombers,
+    // 10 bombs) or STRAFING (jets), so the aircraft actually attack the ground and are visible.
+
+    private static final String[] JETS_L8  = { "A10", "SU25" };
+    private static final String[] JETS_L9  = { "A10", "SU25", "tornado" };
+    private static final String[] JETS_L10 = { "A10", "SU25", "tornado", "f22" };
+
+    /** One hostile JET strike (strafing/gun-rocket pass) on target. Level-scaled jet pool, no cooldown. */
+    public static boolean launchHostileJetStrike(World world, BlockPos target, int level) {
+        if (world == null || world.isRemote || target == null) return false;
+        level = Math.max(1, Math.min(10, level));
+        String[] pool = (level >= 10) ? JETS_L10 : (level >= 9) ? JETS_L9 : JETS_L8;
+        String type = normalizeFlansVehicleId(pool[rand.nextInt(pool.length)]);
+        boolean ok = launchAirStrike(world, "RIVAL", target, level, null, type);
+        if (ok) EpochRunnerMod.logger.info("[AIR] Siege JET strike " + type + " -> " + target + " L" + level);
+        return ok;
+    }
+
+    /** One hostile BOMBER carpet run (BOMBING_RUN, ~10 bombs) on target. L9=Lancaster, L10=B52. No cooldown. */
+    public static boolean launchHostileBombingRun(World world, BlockPos target, int level) {
+        if (world == null || world.isRemote || target == null) return false;
+        level = Math.max(1, Math.min(10, level));
+        String type = normalizeFlansVehicleId(level >= 10 ? "B52" : "Lancaster");
+        boolean ok = launchAirStrike(world, "RIVAL", target, level, null, type);
+        if (ok) EpochRunnerMod.logger.info("[AIR] Siege BOMBER run " + type + " -> " + target + " L" + level);
+        return ok;
+    }
+
+    /**
+     * Dispatch a level-scaled bombardment air event on the given target.
+     *  - L8     : one jet strike
+     *  - L9     : jet strike + a chance of a Lancaster carpet run
+     *  - L10    : jet strike + a B52 carpet run
+     * Below L8 this does nothing (the SiegeDirector keeps its existing CAS heli pass for low levels).
+     * Cooldown-free: the caller (SiegeDirector) gates the cadence.
+     *
+     * @return true if at least one aircraft was launched.
+     */
+    public static boolean dispatchBombers(World world, BlockPos target, int level) {
+        if (world == null || world.isRemote || target == null) return false;
+        level = Math.max(1, Math.min(10, level));
+        if (level < 8) return false;
+        boolean any = false;
+        // Always a jet pass at L8+.
+        any |= launchHostileJetStrike(world, target, level);
+        // Bombers at L9-10: guaranteed at L10, ~50% at L9 (so it stays mixed, not every cadence).
+        if (level >= 10 || (level == 9 && rand.nextBoolean())) {
+            any |= launchHostileBombingRun(world, target, level);
+        }
+        return any;
+    }
+
     // ============================================================
     // PHASE 4: SURGE AIRSTRIKES
     // ============================================================
@@ -350,7 +426,9 @@ public class AirStrikeController {
         op.startTick = world.getTotalWorldTime();
 
         double angle = rand.nextDouble() * Math.PI * 2;
-        double approachDist = 150 + level * 20;
+        // Spawn CLOSE so the aircraft actually appear over the battle instead of doing one brief pass from
+        // 350 blocks out (which is why "I never saw a single plane"). They run in, strike, and leave.
+        double approachDist = 55 + level * 5;
 
         // Focus player:
         // - Friendly (designator): orbit/deploy anchors to caller when present
@@ -418,17 +496,27 @@ public class AirStrikeController {
             // (~80), so over a tall desert base (towers near y100) the run flew INTO the buildings: the
             // aircraft collided, was destroyed, and was NEVER visible. Scan the whole run for the tallest
             // column and clear it by ~16 -- low enough to read as a dramatic pass, high enough to survive.
+            // Sample the WHOLE flight line DENSELY (every ~4 blocks, +/- a little width) for the tallest
+            // column -- a sparse scan missed thin towers/peaks between samples, so planes clipped them.
+            // Clear the tallest by 28 so they fly safely OVER buildings and mountains, not into them.
             int maxSurf = target.getY();
-            for (int s = 0; s <= 12; s++) {
-                double tt = s / 12.0;
-                int sx = (int) Math.round(baseStartPos.getX() + (baseEndPos.getX() - baseStartPos.getX()) * tt);
-                int sz = (int) Math.round(baseStartPos.getZ() + (baseEndPos.getZ() - baseStartPos.getZ()) * tt);
-                try {
-                    int top = world.getTopSolidOrLiquidBlock(new BlockPos(sx, 64, sz)).getY();
-                    if (top > maxSurf) maxSurf = top;
-                } catch (Throwable ignored) {}
+            double fdx = baseEndPos.getX() - baseStartPos.getX(), fdz = baseEndPos.getZ() - baseStartPos.getZ();
+            int fsteps = (int) Math.max(8, Math.hypot(fdx, fdz) / 4.0);
+            double perpx = -fdz, perpz = fdx;
+            double plen = Math.max(0.001, Math.hypot(perpx, perpz));
+            perpx /= plen; perpz /= plen;
+            for (int s = 0; s <= fsteps; s++) {
+                double tt = (double) s / fsteps;
+                for (int w = -4; w <= 4; w += 4) {
+                    int sx = (int) Math.round(baseStartPos.getX() + fdx * tt + perpx * w);
+                    int sz = (int) Math.round(baseStartPos.getZ() + fdz * tt + perpz * w);
+                    try {
+                        int top = world.getTopSolidOrLiquidBlock(new BlockPos(sx, 64, sz)).getY();
+                        if (top > maxSurf) maxSurf = top;
+                    } catch (Throwable ignored) {}
+                }
             }
-            int runY = Math.min(230, Math.max((int) prof.altitude, maxSurf + 16));
+            int runY = Math.min(240, Math.max((int) prof.altitude, maxSurf + 28));
             BlockPos startPos = new BlockPos(baseStartPos.getX(), runY, baseStartPos.getZ());
             BlockPos endPos = new BlockPos(baseEndPos.getX(), runY, baseEndPos.getZ());
 
@@ -441,6 +529,22 @@ public class AirStrikeController {
                     startPos.getZ() + offsetZ
             );
 
+            // HELICOPTERS SPLIT UP: each heli takes its OWN sector around the objective and runs an
+            // independent gunship pattern, instead of all stacking on one hover point. Planes
+            // (bombing/strafing) still converge on the breach. Sector = an even slice of the circle by
+            // aircraft index, so two helis end up on opposite sides providing support separately.
+            BlockPos missionTarget = target;
+            if (prof.mission == EntityGhostAircraft.MissionType.HOVER_STRIKE
+                    || prof.mission == EntityGhostAircraft.MissionType.ORBIT_ATTACK
+                    || prof.mission == EntityGhostAircraft.MissionType.CAS_LOITER
+                    || prof.mission == EntityGhostAircraft.MissionType.INSERTION) {
+                double secAng = angle + (Math.PI * 2.0 * i) / Math.max(1, aircraftCount) + rand.nextDouble() * 0.4;
+                double secR = 22 + rand.nextInt(20);
+                missionTarget = target.add(
+                        (int) Math.round(Math.cos(secAng) * secR), 0,
+                        (int) Math.round(Math.sin(secAng) * secR));
+            }
+
             switch (prof.mission) {
                 case BOMBING_RUN:
                     aircraft.setBombingRun(target, startPos, endPos);
@@ -451,16 +555,23 @@ public class AirStrikeController {
                     break;
 
                 case HOVER_STRIKE:
-                    aircraft.setHoverStrike(target, startPos);
+                    aircraft.setHoverStrike(missionTarget, startPos);
                     break;
 
                 case ORBIT_ATTACK:
-                    aircraft.setOrbitAttack(target, startPos, 40 + rand.nextInt(20));
+                    aircraft.setOrbitAttack(missionTarget, startPos, 40 + rand.nextInt(20));
                     break;
 
                 case CAS_LOITER:
-                    aircraft.setCASLoiter(target, startPos);
+                    aircraft.setCASLoiter(missionTarget, startPos);
                     break;
+
+                case INSERTION: {
+                    int troops = EntityGhostAircraft.insertionPayloadFor(aircraftType);
+                    java.util.UUID tgt = (focusPlayer != null) ? focusPlayer.getUniqueID() : null;
+                    aircraft.setInsertion(missionTarget, startPos, troops, tgt, level);
+                    break;
+                }
 
                 case INTERCEPTION:
                 case FLYOVER:

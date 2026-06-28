@@ -1,0 +1,5 @@
+{
+  "variants": {
+    "normal": { "model": "homosapien:block/district_marker" }
+  }
+}

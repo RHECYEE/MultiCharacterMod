@@ -1,6 +1,10 @@
 package studio.ERM.war.BattleManagers.client;
 
+import net.minecraft.block.Block;
+import net.minecraft.client.renderer.block.model.ModelResourceLocation;
+import net.minecraft.item.Item;
 import net.minecraftforge.client.event.ModelRegistryEvent;
+import net.minecraftforge.client.model.ModelLoader;
 import net.minecraftforge.fml.client.registry.RenderingRegistry;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -41,6 +45,41 @@ public final class BattleManagersClientRenderRegistrar {
         if (registered) return;
         registered = true;
 
+        // ITEM MODELS. In 1.12.2 every item MUST get setCustomModelResourceLocation or it renders as the
+        // purple/black missing-model cube -- assets in the jar are NOT enough on their own. NONE of the
+        // homosapien items were ever bound (ClientProxy.registerModels was left empty), which is why EVERY
+        // custom item showed missing-texture in-game (only the spawn egg survived -- Forge auto-handles it).
+        // Bind each to its <modid>:<registryName>#inventory model; most parent vanilla textures so they
+        // render immediately once bound.
+        bindItemModel(EpochRunnerMod.entity_protector);
+        bindItemModel(EpochRunnerMod.sabotage_fixer);
+        bindItemModel(EpochRunnerMod.camp_setter);
+        bindItemModel(EpochRunnerMod.modern_citizen_item);
+        bindItemModel(EpochRunnerMod.air_target_designator);
+        bindItemModel(EpochRunnerMod.hammer);
+        bindItemModel(EpochRunnerMod.multimeter);
+        bindItemModel(EpochRunnerMod.blueprint);
+        bindItemModel(EpochRunnerMod.command_buck);
+        bindItemModel(EpochRunnerMod.gold_wrench);
+        bindItemModel(EpochRunnerMod.expertise_industry);
+        bindItemModel(EpochRunnerMod.expertise_agriculture);
+        bindItemModel(EpochRunnerMod.expertise_defense);
+        bindItemModel(EpochRunnerMod.expertise_resource);
+        bindBlockItemModel(EpochRunnerMod.citizen_bed);
+        bindBlockItemModel(EpochRunnerMod.district_marker);
+        // Scaffold is an invisible passable marker block, so it has no real model -> its ITEM showed the
+        // purple missing-model cube in JEI/creative. Hijack the vanilla GLASS model so it reads as a clean
+        // glass block icon instead. (It was never in the bind list at all.)
+        try {
+            net.minecraft.item.Item scaffoldItem = net.minecraft.item.Item.getItemFromBlock(EpochRunnerMod.scaffold);
+            if (scaffoldItem != null) {
+                ModelLoader.setCustomModelResourceLocation(scaffoldItem, 0,
+                        new ModelResourceLocation("minecraft:glass", "inventory"));
+            }
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[BattleManagers] scaffold->glass model bind failed: " + t);
+        }
+
         // Each registration is guarded independently: RenderGhostAircraft references several
         // Flan-mod classes directly, and in some packs one of those is not resolvable at load time
         // (NoClassDefFoundError). Previously this method never actually ran (its @EventBusSubscriber
@@ -80,6 +119,25 @@ public final class BattleManagersClientRenderRegistrar {
                 RenderingRegistry.registerEntityRenderingHandler(
                         studio.ERM.war.air.EntityGhostAircraft.class,
                         new studio.ERM.war.air.RenderGhostAircraftSafe.Factory()));
+    }
+
+    /** Bind one item to its {@code <modid>:<registryName>#inventory} model. Guarded so a missing/empty
+     *  model JSON only leaves THAT item as the missing-model cube instead of aborting the whole pass. */
+    private static void bindItemModel(Item item) {
+        if (item == null || item.getRegistryName() == null) return;
+        try {
+            ModelLoader.setCustomModelResourceLocation(item, 0,
+                    new ModelResourceLocation(item.getRegistryName(), "inventory"));
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[BattleManagers] item model bind failed for "
+                    + item.getRegistryName() + ": " + t);
+        }
+    }
+
+    /** Bind the ItemBlock form of a block to its inventory model. */
+    private static void bindBlockItemModel(Block block) {
+        if (block == null) return;
+        bindItemModel(Item.getItemFromBlock(block));
     }
 
     /** Run one renderer registration, swallowing any Throwable (incl. NoClassDefFoundError). */

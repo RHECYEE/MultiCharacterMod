@@ -76,6 +76,15 @@ public class EntityGhostAircraft extends EntityLiving {
     private int casLoiterTicks = 0;
     private static final int CAS_LOITER_DURATION = 1200; // 60 seconds
 
+    // Troop insertion state
+    private int insertTroops = 0;            // total payload to drop
+    private int insertTroopsRemaining = 0;   // left to drop
+    private int insertWarLevel = 1;          // KSK loadout scaling
+    private int insertHoverTicks = 0;        // ticks spent over the drop point
+    private java.util.UUID insertTargetUuid = null; // defender to aggro the troops onto
+    private static final int INSERT_DROP_INTERVAL = 12;   // 0.6s between fast-ropes
+    private static final int INSERT_HOVER_TIMEOUT = 1200; // safety: bail after 60s on station
+
     // Flans puppet
     private Entity flansVehiclePuppet = null;
     private boolean puppetSpawned = false;
@@ -90,7 +99,8 @@ public class EntityGhostAircraft extends EntityLiving {
         INTERCEPTION,
         HOVER_STRIKE,
         ORBIT_ATTACK,
-        CAS_LOITER
+        CAS_LOITER,
+        INSERTION
     }
 
     public EntityGhostAircraft(World worldIn) {
@@ -353,6 +363,45 @@ public class EntityGhostAircraft extends EntityLiving {
         EpochRunnerMod.logger.info("[AIR] CAS loiter set: " + target);
     }
 
+    /**
+     * Setup a troop INSERTION mission.
+     * The helicopter approaches the drop point, hovers over it, and fast-ropes its troop payload
+     * (real EntitySoldiers) one at a time onto the ground below, then departs. Aircraft are
+     * client-rendered ghosts and cannot carry live Flan passengers, so the troops are independently
+     * spawned via SpawnHelper.
+     *
+     * @param drop         the landing-zone / drop point
+     * @param startPos     approach origin
+     * @param troopCount   number of EntitySoldiers to drop (LittleBird 6 / BlackHawk 10 / Chinook 20)
+     * @param targetPlayer defender UUID the dropped troops aggro onto (nullable)
+     * @param warLevel     rival level 1-10 for KSK loadout scaling
+     */
+    public void setInsertion(BlockPos drop, BlockPos startPos, int troopCount,
+                             java.util.UUID targetPlayer, int warLevel) {
+        setMission(MissionType.INSERTION);
+        this.attackTarget = drop;
+        this.insertTroops = Math.max(1, troopCount);
+        this.insertTroopsRemaining = this.insertTroops;
+        this.insertTargetUuid = targetPlayer;
+        this.insertWarLevel = Math.max(1, Math.min(10, warLevel));
+        this.insertHoverTicks = 0;
+
+        waypoints.clear();
+        waypoints.add(new Vec3d(startPos.getX(), altitude, startPos.getZ()));
+        waypoints.add(new Vec3d(drop.getX(), altitude, drop.getZ()));
+
+        currentWaypointIndex = 0;
+        targetPosition = waypoints.get(0);
+        isOnMission = true;
+
+        lastMoveDirection = new Vec3d(
+                drop.getX() - startPos.getX(), 0, drop.getZ() - startPos.getZ()
+        ).normalize();
+
+        EpochRunnerMod.logger.info("[AIR] INSERTION set: " + drop + " troops=" + this.insertTroops
+                + " level=" + this.insertWarLevel);
+    }
+
     // ===== UPDATE =====
     @Override
     public void onUpdate() {
@@ -408,6 +457,9 @@ public class EntityGhostAircraft extends EntityLiving {
                 break;
             case CAS_LOITER:
                 executeCASLoiter();
+                break;
+            case INSERTION:
+                executeInsertion();
                 break;
             default:
                 break;
@@ -627,6 +679,79 @@ public class EntityGhostAircraft extends EntityLiving {
     }
 
     /**
+     * INSERTION: helicopter approaches the drop point, hovers, and fast-ropes its troop payload
+     * (real EntitySoldiers) one at a time onto the ground below, then departs. Used by transport
+     * helis (LittleBird/BlackHawk/Chinook).
+     */
+    private void executeInsertion() {
+        if (attackTarget == null) { startReturning(); return; }
+        if (world.isRemote) return;
+
+        double horizDist = getHorizontalDistanceTo(attackTarget);
+
+        // Approach phase: fly to the drop point until within rope range.
+        if (horizDist > 14) {
+            targetPosition = new Vec3d(attackTarget.getX(), altitude, attackTarget.getZ());
+            return;
+        }
+
+        // Hover phase: hold station over the drop point with minimal drift.
+        insertHoverTicks++;
+        double hoverX = attackTarget.getX() + Math.sin(insertHoverTicks * 0.01) * 2.0;
+        double hoverZ = attackTarget.getZ() + Math.cos(insertHoverTicks * 0.01) * 2.0;
+        targetPosition = new Vec3d(hoverX, Math.max(altitude, attackTarget.getY() + 22), hoverZ);
+        this.speed = Math.max(0.25f, speed * 0.9f);
+
+        // Fast-rope one trooper at a time onto the ground column directly below the heli.
+        if (insertTroopsRemaining > 0 && insertHoverTicks % INSERT_DROP_INTERVAL == 0) {
+            dropOneTrooper();
+            insertTroopsRemaining--;
+        }
+
+        // Depart once the payload is delivered, or after a hard safety timeout.
+        if (insertTroopsRemaining <= 0 || insertHoverTicks > INSERT_HOVER_TIMEOUT) {
+            setMission(MissionType.FLYOVER);
+            startReturning();
+        }
+    }
+
+    /** Spawn one real EntitySoldier (KSK / SPECIAL loadout) on the ground beneath the heli, aggroed on the defender. */
+    private void dropOneTrooper() {
+        try {
+            BlockPos ground = world.getTopSolidOrLiquidBlock(
+                    new BlockPos((int) Math.floor(posX), 0, (int) Math.floor(posZ)));
+            // small lateral scatter so 20 troopers don't stack on one block
+            int sx = ground.getX() + rand.nextInt(5) - 2;
+            int sz = ground.getZ() + rand.nextInt(5) - 2;
+            BlockPos drop = world.getTopSolidOrLiquidBlock(new BlockPos(sx, 0, sz));
+
+            net.minecraft.entity.Entity e = studio.ERM.war.BattleManagers.core.SpawnHelper.spawnPayload(
+                    world, drop, "soldier:special", insertTargetUuid,
+                    attackTarget /* battle site / home */, insertWarLevel, "SPECIAL", "");
+            if (e != null) {
+                EpochRunnerMod.logger.debug("[AIR] inserted trooper at " + drop
+                        + " (" + insertTroopsRemaining + " left)");
+            }
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[AIR] insertion drop failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Per-type troop payload: LittleBird 6 / BlackHawk 10 / Chinook 20.
+     * Accepts short ids or full "flansmod:" ids, case-insensitive.
+     */
+    public static int insertionPayloadFor(String type) {
+        if (type == null) return 8;
+        String t = type.toLowerCase();
+        if (t.contains("chinook")) return 20;
+        if (t.contains("blackhawk")) return 10;
+        if (t.contains("littlebird")) return 6;
+        if (t.contains("huey")) return 8;
+        return 8;
+    }
+
+    /**
      * Fire a rocket/missile at a ground position. Smaller explosion than bombs.
      */
     private void fireRocketAtGround(BlockPos target) {
@@ -805,15 +930,33 @@ public class EntityGhostAircraft extends EntityLiving {
         boolean result = super.attackEntityFrom(source, amount);
 
         if (getHealth() <= 0) {
-            onAircraftDestroyed();
+            onAircraftDestroyed(trueSrc != null ? trueSrc : src);
         }
 
         return result;
     }
 
-    private void onAircraftDestroyed() {
+    private void onAircraftDestroyed(Entity killer) {
         world.newExplosion(this, posX, posY, posZ, 3.0f, true, true);
         EpochRunnerMod.logger.info("[AIR] Aircraft destroyed: " + getAircraftType());
+
+        // Death message to the player who shot it down -- planes and helicopters get their own, just like
+        // the tank "You destroyed the enemy <vehicle>" notification (EntityAIPilot.attackEntityFrom).
+        if (!world.isRemote && killer instanceof net.minecraft.entity.player.EntityPlayer) {
+            String name = getAircraftType();
+            if (name != null && name.contains(":")) name = name.substring(name.indexOf(':') + 1);
+            boolean heli = false;
+            try {
+                AirDoctrine.AircraftRole role = AirDoctrine.getProfile(getAircraftType()).role;
+                heli = role == AirDoctrine.AircraftRole.ATTACK_HELI || role == AirDoctrine.AircraftRole.GUNSHIP
+                        || role == AirDoctrine.AircraftRole.TRANSPORT || role == AirDoctrine.AircraftRole.SPECIAL_OPS;
+            } catch (Throwable ignored) {}
+            String kind = heli ? "helicopter" : "aircraft";
+            ((net.minecraft.entity.player.EntityPlayer) killer).sendMessage(
+                    new net.minecraft.util.text.TextComponentString(
+                            net.minecraft.util.text.TextFormatting.AQUA + "✈ You shot down the enemy "
+                                    + kind + " (" + name + ")"));
+        }
     }
 
     // ===== NBT =====

@@ -42,7 +42,10 @@ public class WarAirstrikeHelper {
         if (lower.contains("hind")) {
             return new StrikeProfile(50.0, 0.7, EntityGhostAircraft.MissionType.ORBIT_ATTACK);
         }
-        if (lower.contains("huey") || lower.contains("blackhawk") || lower.contains("chinook") || lower.contains("littlebird")) {
+        if (lower.contains("blackhawk") || lower.contains("chinook") || lower.contains("littlebird")) {
+            return new StrikeProfile(45.0, 0.8, EntityGhostAircraft.MissionType.INSERTION);
+        }
+        if (lower.contains("huey")) {
             return new StrikeProfile(55.0, 0.8, EntityGhostAircraft.MissionType.CAS_LOITER);
         }
         // CAS jets (A10/SU25) -> low fast gun runs. STRAFING (not BOMBING_RUN) so they actually
