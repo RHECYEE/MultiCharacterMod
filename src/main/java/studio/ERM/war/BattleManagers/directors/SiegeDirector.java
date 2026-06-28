@@ -1103,6 +1103,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
             EpochRunnerMod.logger.info("[Siege] surge pushing through tunnels to heat spot "
                     + xyz(interiorObjective));
         }
+
+        // Set up the interior objectives NOW (at the surge), so the troops start streaming inside toward the
+        // SPREAD of green markers during the surge -- by the time the interior-assault phase starts they are
+        // already well inside, not milling at the breach.
+        setupInteriorObjectives(world);
+
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
             // Release at the breach (reachable); interiorObjective is the movement goal that flows them up
@@ -1189,15 +1195,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
         lastPhaseChangeTick = tickAge;
         EpochRunnerMod.logger.info("[Siege] -> INTERIOR ASSAULT / LOOTING (warLevel=" + warLevel + ")");
 
-        // PHASE 2: getting inside was only HALF the objective. Now find the actual valuables, build a loot
-        // depot, cut stairs/ramps to any blocked spot, and the squads go room-to-room emptying them.
-        scanHeatspots(world);
-        buildLootDepot(world);
-        for (BlockPos spot : heatspots) buildAccessRamp(world, spot); // always CONNECTED stairs/ramps to each
+        // Objectives were set up at the SURGE (so the troops have already been streaming inside). Make sure
+        // they exist (in case the surge was cut short), but DON'T re-scan -- that would reset capture progress.
+        setupInteriorObjectives(world);
 
-        // Put real bodies on the ground to STORM the interior. The surge only trickles a thin contact
-        // slice (which is why everyone just stood at the breach), so commit a controlled slice of every
-        // surviving formation to soldiers now, then drive them room-to-room to the objectives.
+        // Top up the storming force and make sure everyone is seeking an objective.
         int forced = 0;
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
@@ -1205,17 +1207,56 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
         driveSoldiersToObjectives(world, true);
         publishAssaultDebug(world);
-        EpochRunnerMod.logger.info("[Siege] LOOT: " + heatspots.size() + " heatspots, depot @ "
-                + (lootDepot != null ? xyz(lootDepot) : "?") + " with " + lootChests.size() + " chests; "
-                + "committed " + forced + " assault troops to SEEK objectives");
+        EpochRunnerMod.logger.info("[Siege] INTERIOR ASSAULT: " + heatspots.size() + " objectives, depot @ "
+                + (lootDepot != null ? xyz(lootDepot) : "?") + "; committed " + forced + " more troops");
     }
 
-    /** Scan the base interior for valuable tile entities (anything with an inventory + beds) = heatspots. */
+    /**
+     * Set up the interior objectives ONCE: scan the heat map for the spread of rooms to take, build the
+     * loot depot down at the camp, cut a connected access stair to each objective, and publish the debug
+     * overlay. Guarded (returns if objectives already exist) so calling it surge->assault never resets
+     * capture progress.
+     */
+    private void setupInteriorObjectives(World world) {
+        if (!heatspots.isEmpty()) return;
+        scanHeatspots(world);
+        buildLootDepot(world);
+        for (BlockPos spot : heatspots) buildAccessRamp(world, spot); // always CONNECTED stairs/ramps to each
+        publishAssaultDebug(world);
+        EpochRunnerMod.logger.info("[Siege] interior objectives set: " + heatspots.size() + " heatspots, depot @ "
+                + (lootDepot != null ? xyz(lootDepot) : "?") + " with " + lootChests.size() + " chests");
+    }
+
+    /**
+     * Build the interior OBJECTIVE list -- the heat map is the common language. Objectives come from:
+     *   1) the base-cluster CHUNKS ranked by interior value (storage/machine/living/power) -- guaranteed
+     *      spread across the whole base, one per chunk (this is what gives several distinct green markers
+     *      instead of the single one everyone was standing around);
+     *   2) the actual valuable TILE ENTITIES + beds in the loaded chunks around the core.
+     * Candidates are then CLUSTERED (deduped within ~8 blocks) so we get a handful of distinct objectives
+     * spread through the base -- not one, not fifty. Nearest-core first.
+     */
     private void scanHeatspots(World world) {
         heatspots.clear();
         capturedSpots.clear();
-        int ccx = site.getX() >> 4, ccz = site.getZ() >> 4, r = 4;
-        java.util.List<BlockPos> found = new ArrayList<>();
+        java.util.List<BlockPos> cand = new ArrayList<>();
+
+        // 1) HEAT MAP rooms (spread, one objective per high-value chunk).
+        if (baseCluster != null && !baseCluster.isEmpty()) {
+            java.util.List<StrategicChunk> ranked = new ArrayList<>(baseCluster);
+            ranked.sort((a, b) -> Double.compare(
+                    (b.storageHeat + b.machineHeat + b.livingHeat + b.powerHeat),
+                    (a.storageHeat + a.machineHeat + a.livingHeat + a.powerHeat)));
+            int max = (warLevel >= 6) ? 10 : 7;
+            for (StrategicChunk c : ranked) {
+                if (cand.size() >= max) break;
+                int wx = (c.chunkX << 4) + 8, wz = (c.chunkZ << 4) + 8;
+                cand.add(new BlockPos(wx, terrainGroundY(world, wx, wz), wz));
+            }
+        }
+
+        // 2) Fine-grained valuables (chests/machines/beds) in the loaded chunks around the core.
+        int ccx = site.getX() >> 4, ccz = site.getZ() >> 4, r = 5;
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
                 net.minecraft.world.chunk.Chunk chunk = world.getChunkProvider().getLoadedChunk(ccx + dx, ccz + dz);
@@ -1230,20 +1271,40 @@ public class SiegeDirector implements IPhasedBattleDirector {
                     try {
                         if (!valuable && world.getBlockState(p).getBlock() instanceof net.minecraft.block.BlockBed) valuable = true;
                     } catch (Throwable ignored) {}
-                    if (valuable) found.add(p);
+                    if (valuable) cand.add(p);
                 }
             }
         }
-        // Nearest-to-core first; cap so we don't queue hundreds.
-        found.sort((a, b) -> Double.compare(a.distanceSq(site), b.distanceSq(site)));
-        int cap = (warLevel >= 6) ? 24 : 14;
-        heatspots = new ArrayList<>(found.subList(0, Math.min(cap, found.size())));
+
+        // 3) Cluster: nearest-core first, drop any candidate within ~8 blocks of one already taken, so the
+        //    objectives are DISTINCT and spread (the "only one green beam everyone stands around" fix).
+        cand.sort((a, b) -> Double.compare(a.distanceSq(site), b.distanceSq(site)));
+        int capN = (warLevel >= 6) ? 14 : 10;
+        for (BlockPos p : cand) {
+            if (heatspots.size() >= capN) break;
+            boolean near = false;
+            for (BlockPos h : heatspots) if (h.distanceSq(p) < 64) { near = true; break; } // within 8 blocks
+            if (!near) heatspots.add(p);
+        }
+
+        // Always leave at least one objective.
+        if (heatspots.isEmpty()) {
+            if (baseCore != null) {
+                int wx = (baseCore.chunkX << 4) + 8, wz = (baseCore.chunkZ << 4) + 8;
+                heatspots.add(new BlockPos(wx, terrainGroundY(world, wx, wz), wz));
+            } else if (site != null) {
+                heatspots.add(new BlockPos(site.getX(), terrainGroundY(world, site.getX(), site.getZ()), site.getZ()));
+            }
+        }
     }
 
     /** Build the loot DEPOT just inside the breach: a 6x6 stone pad with 4-8 chests on it (persists). */
     private void buildLootDepot(World world) {
         lootChests.clear();
-        BlockPos c = (interiorObjective != null) ? interiorObjective : breachCorridor;
+        // Put the depot DOWN ON THE GROUND at the deployment camp (where the army staged), not floating in
+        // the middle of the rubble -- the loot is hauled back to camp. The teleport distance is irrelevant.
+        BlockPos c = (stagingCenter != null) ? stagingCenter
+                : (interiorObjective != null) ? interiorObjective : breachCorridor;
         int y = surfaceY(world, c.getX(), c.getZ());
         lootDepot = new BlockPos(c.getX(), y, c.getZ());
         for (int dx = -3; dx <= 2; dx++) {
@@ -1272,7 +1333,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * the antigrief-aware damageBlock.
      */
     private void buildAccessRamp(World world, BlockPos spot) {
-        BlockPos from = (lootDepot != null) ? lootDepot : breachCorridor;
+        // Build UP from the breach interior (where the troops enter), NOT from the far camp depot -- the
+        // stair is the troops' PATH to the elevated objective, not the loot-haul route.
+        BlockPos from = (interiorObjective != null) ? interiorObjective : breachCorridor;
         if (from == null) return;
         double dx = spot.getX() - from.getX(), dz = spot.getZ() - from.getZ();
         double dist = Math.sqrt(dx * dx + dz * dz);
@@ -1538,9 +1601,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // INVASION: funnel the army THROUGH the breach the engineers opened and up the ramp
                 // into the base, instead of milling at the wall. This is the assault going in.
                 advanceThroughBreach(world, 0.06 + warLevel * 0.004);
-                // Also flow the already-released soldiers INTO the base (homed on the interior objective)
-                // so they don't pile up at the breach mouth waiting for the assault phase.
-                if (tickAge % 5 == 0) driveSoldiersToObjectives(world, false);
+                // Flow the already-released soldiers INTO the base toward the SPREAD of objectives, so they
+                // start getting inside DURING the surge instead of piling up at the breach mouth.
+                if (tickAge % 5 == 0) driveSoldiersToObjectives(world, true);
                 if (tsp >= PHASE_SURGE_TICKS || waveDefeated(tsp)) beginInteriorAssault(world);
                 break;
 

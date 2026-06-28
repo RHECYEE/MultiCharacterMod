@@ -101,10 +101,6 @@ public class EntityFormationCarrier extends EntityCreature {
         this.enablePersistence();
         this.setPathPriority(PathNodeType.WATER, -1.0F);
         this.experienceValue = 0;
-        // The carrier is only the FORMATION ANCHOR -- the visible bodies are its armoured puppets, which
-        // surround it. Rendering the anchor too drew a default-skin, un-armoured "Steve" standing in the
-        // centre of every formation (the player's report). Hide it; the puppets are the squad.
-        this.setInvisible(true);
     }
 
     @Override
@@ -135,6 +131,10 @@ public class EntityFormationCarrier extends EntityCreature {
 
         if (!world.isRemote) {
             spawnPuppets();
+            // Arm the carrier itself -- it is the formation's visible CENTRE figure, and was rendering as a
+            // bare default-skin "Steve" with no armour while its puppets had the full kit. Give it the same
+            // KSK armour so the centre reads as an armoured commander, not a naked civilian.
+            try { SoldierLoadout.applyKskArmor(this); } catch (Throwable ignored) {}
         }
     }
 

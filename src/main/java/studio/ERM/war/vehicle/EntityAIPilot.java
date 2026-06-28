@@ -612,6 +612,17 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                 } else {
                     player.sendMessage(new TextComponentString(TextFormatting.RED + "You killed an enemy soldier"));
                 }
+            } else if (!this.world.isRemote
+                    && source.getTrueSource() instanceof studio.ERM.war.air.EntityGhostAircraft
+                    && "PLAYER".equalsIgnoreCase(((studio.ERM.war.air.EntityGhostAircraft) source.getTrueSource()).getMcmTeam())) {
+                // The player's AIRSTRIKE (designator-called friendly aircraft) destroyed this vehicle --
+                // give them the kill feedback too, not just direct hits ("the message should still play").
+                EntityPlayer p = this.world.getClosestPlayerToEntity(this, 160.0D);
+                if (p != null) {
+                    String veh = (this.vehicleToSummon != null) ? this.vehicleToSummon.trim() : "";
+                    p.sendMessage(new TextComponentString(TextFormatting.GOLD + "💥 Good impact — "
+                            + (veh.isEmpty() ? "enemy vehicle" : veh) + " destroyed!"));
+                }
             }
 
             this.onDeath(source);
@@ -640,11 +651,20 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
             catch (Throwable ignored) {}
         }
 
-        if (!this.world.isRemote && this.ticksExisted % 40 == 0 && !this.isPassenger) {
-            EntityPlayer nearest = this.world.getClosestPlayerToEntity(this, 100.0D);
-            if (nearest != null && this.getAttackTarget() == null) {
-                this.setAttackTarget(nearest);
-                this.lockedTarget = nearest;
+        if (!this.world.isRemote && !this.isPassenger) {
+            // NERF "the tank wrecks the player the instant any pixel is visible": acquire targets SLOWER
+            // and at shorter range, and periodically DROP the lock so it re-acquires (gives the player a
+            // window to break contact / makes it switch targets) instead of being relentlessly glued on.
+            if (this.ticksExisted % 140 == 0 && this.rand.nextBoolean()) {
+                this.setAttackTarget(null);
+                this.lockedTarget = null;
+            }
+            if (this.ticksExisted % 90 == 0 && this.getAttackTarget() == null) {
+                EntityPlayer nearest = this.world.getClosestPlayerToEntity(this, 55.0D);
+                if (nearest != null) {
+                    this.setAttackTarget(nearest);
+                    this.lockedTarget = nearest;
+                }
             }
         }
 
@@ -849,6 +869,10 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
             return;
         }
 
+        // AIM/LOCK-ON TIME: hold fire for the first ~1.5s after acquiring a target, so the player gets a
+        // beat to react / take cover instead of being hit the instant the turret swings on.
+        if (lockedTargetTicks < 30) return;
+
         double dist = Math.sqrt(distToTarget);
         double targetHeight = target instanceof EntityLivingBase ? ((EntityLivingBase)target).getEyeHeight() * 0.7 : target.height * 0.5;
         double dx = target.posX - seat.posX;
@@ -881,9 +905,10 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         float deltaYaw = MathHelper.wrapDegrees(targetYaw - currentYaw);
         float deltaPitch = MathHelper.wrapDegrees(targetPitch - currentPitch);
 
-        float smoothing = 0.08f;
-        if (dist < 10) smoothing = 0.12f;
-        if (dist < 5) smoothing = 0.15f;
+        // Slower turret traverse -> the gun takes longer to line up on a moving player (reaction time).
+        float smoothing = 0.05f;
+        if (dist < 10) smoothing = 0.08f;
+        if (dist < 5) smoothing = 0.11f;
 
         float newYaw = currentYaw + deltaYaw * smoothing;
         float newPitch = currentPitch + deltaPitch * smoothing;
@@ -1228,7 +1253,7 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         double dy = (target.posY + targetHeight) - (seat.posY + seat.getEyeHeight());
         double dz = target.posZ - seat.posZ;
 
-        double scatter = Math.min(4.0, dist / 10.0);
+        double scatter = Math.min(6.0, dist / 8.0); // wider miss radius so shots visibly land off-target
         double explosionX = target.posX + (this.rand.nextDouble() - 0.5) * scatter;
         double explosionY = target.posY + (this.rand.nextDouble() - 0.5) * (scatter / 2.0);
         double explosionZ = target.posZ + (this.rand.nextDouble() - 0.5) * scatter;
@@ -1252,10 +1277,17 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                 net.minecraft.util.SoundCategory.HOSTILE, 4.0F, 0.8F + rand.nextFloat() * 0.4F);
 
         if (dist < 70.0D) {
-            float baseDamage = ModConfig.vehicleCombat.mainGunDamage;
-            float damage = baseDamage - (float)(dist / 2.5);
-            if (damage > 0) {
-                target.attackEntityFrom(DamageSource.causeExplosionDamage(this), damage);
+            // ACCURACY NERF: the main gun is NOT a guaranteed hit. Before this it ALWAYS applied full
+            // damage to any target within 70 blocks regardless of aim -- that is why it deleted the player
+            // the instant any pixel was visible. Now the direct hit chance falls off hard with range (the
+            // scatter explosion above can still clip the player on a "miss"), and each hit is softer.
+            double hitChance = (dist < 12) ? 0.65 : (dist < 25) ? 0.42 : (dist < 45) ? 0.26 : 0.14;
+            if (this.rand.nextDouble() < hitChance) {
+                float baseDamage = ModConfig.vehicleCombat.mainGunDamage;
+                float damage = (baseDamage - (float)(dist / 2.5)) * 0.6f;
+                if (damage > 0) {
+                    target.attackEntityFrom(DamageSource.causeExplosionDamage(this), damage);
+                }
             }
         }
     }

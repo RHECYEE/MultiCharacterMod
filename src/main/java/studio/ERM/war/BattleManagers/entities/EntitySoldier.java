@@ -132,6 +132,10 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         // Don't attack EntitySoldierPuppet or EntityFormationCarrier (friendly formation units)
         if (target instanceof EntitySoldierPuppet || target instanceof EntityFormationCarrier) return false;
 
+        // Never shoot a ghost aircraft -- including the very transport heli that just fast-roped us in
+        // (the "they shot their own LittleBird down" bug). Air support is not a ground-troop target.
+        if (target instanceof studio.ERM.war.air.EntityGhostAircraft) return false;
+
         // Don't attack AW2 empire faction NPCs
         if (isAW2EmpireNPC(target)) return false;
 

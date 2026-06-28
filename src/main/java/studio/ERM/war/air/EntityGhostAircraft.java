@@ -192,7 +192,9 @@ public class EntityGhostAircraft extends EntityLiving {
             case CARPET_BOMB:
                 defaultBombs = 10;
                 defaultMaxMissiles = 0;
-                this.setSize(8.0F, 3.0F);
+                // Big bombers (B52/Lancaster) get a MASSIVE hitbox so they're actually shootable from the
+                // ground (MC AABBs are square-footprint, so this is "huge" rather than truly long+skinny).
+                this.setSize(12.0F, 3.0F);
                 break;
             case GUN_RUN:
             case ROCKET_STRAFE:
