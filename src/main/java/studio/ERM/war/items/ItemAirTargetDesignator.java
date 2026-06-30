@@ -146,6 +146,18 @@ public class ItemAirTargetDesignator extends Item {
         return new ActionResult<>(EnumActionResult.SUCCESS, stack);
     }
 
+    /**
+     * Right-clicking a BLOCK only fires onItemUse (NOT onItemRightClick), so without this the designator
+     * "sometimes doesn't throw" -- exactly when you aim at the ground to mark a target, which is the normal
+     * way it's used. Route block-clicks to the same throw. This also fixes "it never does the coloured smoke
+     * explosion": no throw meant no impact, so the EntitySmokeMarker was never spawned.
+     */
+    @Override
+    public EnumActionResult onItemUse(EntityPlayer player, World world, BlockPos pos, EnumHand hand,
+                                      EnumFacing facing, float hitX, float hitY, float hitZ) {
+        return onItemRightClick(world, player, hand).getType();
+    }
+
     @Override
     @SideOnly(Side.CLIENT)
     public void addInformation(ItemStack stack, @Nullable World world, List<String> tooltip, ITooltipFlag flag) {
@@ -293,6 +305,25 @@ public class ItemAirTargetDesignator extends Item {
                         posY + rand.nextDouble() * 2.0,
                         posZ + (rand.nextDouble() - 0.5) * 1.2,
                         (rand.nextDouble() - 0.5) * 0.02, 0.06, (rand.nextDouble() - 0.5) * 0.02);
+
+                // COLOURED IMPACT EXPLOSION: for the first 5 seconds (100 ticks) a dense coloured burst +
+                // explosion puffs spread across the impact site, so it reads as a coloured BLAST, not just
+                // a thin smoke wisp. Fades to the plain plume after.
+                if (ticksAlive <= 100) {
+                    for (int i = 0; i < 10; i++) {
+                        world.spawnParticle(net.minecraft.util.EnumParticleTypes.REDSTONE,
+                                posX + (rand.nextDouble() - 0.5) * 3.0,
+                                posY + rand.nextDouble() * 1.2,
+                                posZ + (rand.nextDouble() - 0.5) * 3.0,
+                                Math.max(0.001F, r), g, b);
+                    }
+                    if (ticksAlive % 6 == 0) {
+                        world.spawnParticle(net.minecraft.util.EnumParticleTypes.EXPLOSION_LARGE,
+                                posX + (rand.nextDouble() - 0.5) * 2.0,
+                                posY + rand.nextDouble() * 1.5,
+                                posZ + (rand.nextDouble() - 0.5) * 2.0, 0.0, 0.0, 0.0);
+                    }
+                }
             }
         }
 

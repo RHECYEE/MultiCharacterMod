@@ -51,6 +51,18 @@ public class EntityGhostAircraft extends EntityLiving {
     private float bankAngle = 0;
     private float pitchAngle = 0;
 
+    // ── PILOT AI (LAYER 2 + 3): smoothed flight, terrain-following, forward-raycast avoidance ──
+    // The aircraft turns toward its desired heading at a capped rate each tick instead of instantly pointing
+    // at the target -- this is what produces banking + wide sweeping turns rather than "point and drift". It
+    // also holds an altitude BAND above the terrain directly below it (rising over hills/towers, descending
+    // over valleys) and raycasts forward to climb/steer away from anything it would otherwise smash into.
+    private float headingYaw = Float.NaN;    // current smoothed heading; NaN until the first move
+    private int avoidanceActive = 0;         // >0 while a forward-collision avoidance maneuver is in progress
+    // Per-aircraft variation generated ONCE so each flight looks different but stays stable (no per-tick
+    // randomness). Seeds the altitude lane (deconfliction) and a small approach offset.
+    private int flightLane = -1;
+    public static boolean DEBUG_FLIGHT = true; // emit flight-state particles + logs (toggle off to silence)
+
     // Movement tracking
     private Vec3d lastMoveDirection = new Vec3d(1, 0, 0);
     private double lastMoveY = 0;
@@ -84,6 +96,10 @@ public class EntityGhostAircraft extends EntityLiving {
     private java.util.UUID insertTargetUuid = null; // defender to aggro the troops onto
     private static final int INSERT_DROP_INTERVAL = 12;   // 0.6s between fast-ropes
     private static final int INSERT_HOVER_TIMEOUT = 1200; // safety: bail after 60s on station
+    private int insertPhase = 0;                 // 0 = approach/drop, 1 = post-drop orbit-fire (light helis)
+    private boolean insertJeepDropped = false;   // chinook unloads one jeep
+    private static final int INSERT_ORBIT_TICKS = 600;  // light heli orbits firing ~30s after dropping
+    private static final int CHINOOK_LAND_TICKS = 600;  // chinook sits on the ground ~30s
 
     // Flans puppet
     private Entity flansVehiclePuppet = null;
@@ -387,6 +403,8 @@ public class EntityGhostAircraft extends EntityLiving {
         this.insertTargetUuid = targetPlayer;
         this.insertWarLevel = Math.max(1, Math.min(10, warLevel));
         this.insertHoverTicks = 0;
+        this.insertPhase = 0;
+        this.insertJeepDropped = false;
 
         waypoints.clear();
         waypoints.add(new Vec3d(startPos.getX(), altitude, startPos.getZ()));
@@ -411,6 +429,12 @@ public class EntityGhostAircraft extends EntityLiving {
 
         // SERVER: mission + movement only
         if (!this.world.isRemote) {
+            if (crashing) { tickCrash(); return; } // shot down -> spin down to the ground and detonate
+            // Ghost aircraft are POSITION-driven (setPosition each tick), never motion-driven. Pin motion
+            // to zero and keep gravity off EVERY tick so they never "fall and tumble" on spawn before the
+            // first mission move kicks in (the spawn-fall the player saw).
+            this.motionX = 0; this.motionY = 0; this.motionZ = 0;
+            this.setNoGravity(true);
             if (isOnMission) {
                 ticksOnMission++;
 
@@ -473,7 +497,10 @@ public class EntityGhostAircraft extends EntityLiving {
         if (bombsRemaining <= 0) return;
 
         double horizDist = getHorizontalDistanceTo(attackTarget);
-        if (horizDist < 20 && posY > attackTarget.getY() + 10) {
+        // Release the STICK across the whole pass -- one bomb every few ticks within a WIDER window -- so the
+        // bombs walk across the target with spread instead of the entire load dumping on one block the first
+        // tick we enter range.
+        if (horizDist < 34 && posY > attackTarget.getY() + 8 && ticksOnMission % 4 == 0) {
             dropBomb();
 
             bombsRemaining--;
@@ -689,53 +716,115 @@ public class EntityGhostAircraft extends EntityLiving {
         if (attackTarget == null) { startReturning(); return; }
         if (world.isRemote) return;
 
+        String t = (getAircraftType() == null) ? "" : getAircraftType().toLowerCase();
+        boolean chinook = t.contains("chinook");
+        // getTopSolidOrLiquidBlock returns the TOP block (roof/tree included), so fast-roping here drops
+        // troops onto HIGH GROUND when the objective sits under a roof/canopy.
+        int groundY = world.getTopSolidOrLiquidBlock(attackTarget).getY();
         double horizDist = getHorizontalDistanceTo(attackTarget);
 
-        // Approach phase: fly to the drop point until within rope range.
-        if (horizDist > 14) {
-            targetPosition = new Vec3d(attackTarget.getX(), altitude, attackTarget.getZ());
+        // PHASE 0: approach until directly over the drop point.
+        if (insertPhase == 0 && horizDist > 6.0) {
+            targetPosition = new Vec3d(attackTarget.getX() + 0.5,
+                    Math.max(altitude, groundY + (chinook ? 30 : 16)), attackTarget.getZ() + 0.5);
             return;
         }
 
-        // Hover phase: hold station over the drop point with minimal drift.
         insertHoverTicks++;
-        double hoverX = attackTarget.getX() + Math.sin(insertHoverTicks * 0.01) * 2.0;
-        double hoverZ = attackTarget.getZ() + Math.cos(insertHoverTicks * 0.01) * 2.0;
-        targetPosition = new Vec3d(hoverX, Math.max(altitude, attackTarget.getY() + 22), hoverZ);
-        this.speed = Math.max(0.25f, speed * 0.9f);
 
-        // Fast-rope one trooper at a time onto the ground column directly below the heli.
-        if (insertTroopsRemaining > 0 && insertHoverTicks % INSERT_DROP_INTERVAL == 0) {
-            dropOneTrooper();
-            insertTroopsRemaining--;
+        if (chinook) {
+            // CHINOOK: descend and LAND on the drop point, sit ~30s unloading troops + a jeep, then lift off.
+            // Y is pinned directly (noGravity) so it sets down cleanly with NO ground-bounce.
+            double landY = groundY + 1.2;
+            targetPosition = new Vec3d(attackTarget.getX() + 0.5, landY, attackTarget.getZ() + 0.5);
+            this.speed = Math.max(0.2f, speed * 0.85f);
+            // Only unload once actually LANDED -- never dump troops mid-descent.
+            boolean landed = Math.abs(posY - landY) < 2.5 && getHorizontalDistanceTo(attackTarget) < 4.0;
+            if (landed && insertTroopsRemaining > 0 && insertHoverTicks % INSERT_DROP_INTERVAL == 0) {
+                dropOneTrooper(); insertTroopsRemaining--;
+            }
+            if (landed && !insertJeepDropped && insertHoverTicks >= 40) { dropJeep(groundY); insertJeepDropped = true; }
+            if (insertHoverTicks > CHINOOK_LAND_TICKS && insertTroopsRemaining <= 0) {
+                setMission(MissionType.FLYOVER); startReturning();
+            }
+            return;
         }
 
-        // Depart once the payload is delivered, or after a hard safety timeout.
-        if (insertTroopsRemaining <= 0 || insertHoverTicks > INSERT_HOVER_TIMEOUT) {
-            setMission(MissionType.FLYOVER);
-            startReturning();
+        // LITTLEBIRD / BLACKHAWK -- PHASE 0: hover ~12 above the drop point at ONE spot and fast-rope the
+        // WHOLE payload (troops spawn on the ground below = no fall damage), then switch to orbit-fire.
+        if (insertPhase == 0) {
+            double hoverY = groundY + 12;
+            targetPosition = new Vec3d(attackTarget.getX() + 0.5, hoverY, attackTarget.getZ() + 0.5);
+            this.speed = Math.max(0.25f, speed * 0.9f);
+            // Only fast-rope once actually ON STATION at the hover point -- never while still arriving.
+            boolean onStation = Math.abs(posY - hoverY) < 3.0 && getHorizontalDistanceTo(attackTarget) < 6.0;
+            if (onStation && insertTroopsRemaining > 0 && insertHoverTicks % INSERT_DROP_INTERVAL == 0) {
+                dropOneTrooper(); insertTroopsRemaining--;
+            }
+            // Switch to orbit-fire once the payload is delivered, or after a generous safety window.
+            if (insertTroopsRemaining <= 0 || insertHoverTicks > 600) {
+                insertPhase = 1; insertHoverTicks = 0; rocketsFired = 0; orbitAngle = 0;
+            }
+            return;
+        }
+
+        // PHASE 1: orbit the drop point firing MG + rockets for a fixed window, then depart.
+        orbitAngle += 0.05;
+        double ox = attackTarget.getX() + 0.5 + Math.cos(orbitAngle) * 30.0;
+        double oz = attackTarget.getZ() + 0.5 + Math.sin(orbitAngle) * 30.0;
+        targetPosition = new Vec3d(ox, groundY + 18, oz);
+        this.speed = Math.max(0.6f, speed);
+        if (strafeCooldown <= 0) { fireStrafe(); strafeCooldown = 12; }
+        int maxMissiles = this.dataManager.get(MAX_MISSILES);
+        if (insertHoverTicks % 40 == 0 && rocketsFired < maxMissiles) { fireRocketAtGround(attackTarget); rocketsFired++; }
+        if (insertHoverTicks > INSERT_ORBIT_TICKS) { setMission(MissionType.FLYOVER); startReturning(); }
+    }
+
+    /** Chinook extra payload: unload a crewed Flan jeep beside the heli (rival team, engages like other armour). */
+    private void dropJeep(int groundY) {
+        try {
+            int jx = (int) Math.floor(posX) + 2;
+            int jz = (int) Math.floor(posZ);
+            BlockPos at = world.getTopSolidOrLiquidBlock(new BlockPos(jx, 0, jz));
+            studio.ERM.war.vehicle.EntityAIPilot pilot = new studio.ERM.war.vehicle.EntityAIPilot(world);
+            pilot.setPosition(at.getX() + 0.5, at.getY() + 1.0, at.getZ() + 0.5);
+            pilot.setVehicleType("Jeep");
+            pilot.setMcmTeam("empire");
+            world.spawnEntity(pilot);
+            EpochRunnerMod.logger.info("[AIR] Chinook unloaded a jeep at " + at);
+        } catch (Throwable th) {
+            EpochRunnerMod.logger.warn("[AIR] jeep unload failed: " + th.getMessage());
         }
     }
 
-    /** Spawn one real EntitySoldier (KSK / SPECIAL loadout) on the ground beneath the heli, aggroed on the defender. */
+    /** Spawn one real EntitySoldier (KSK / SPECIAL loadout), aggroed on the defender. Chinook troops run
+     *  out the REAR onto the ground; LittleBird/BlackHawk troops fast-rope BESIDE the heli at heli height
+     *  and fall out the side (war soldiers are FALL-immune, see WarFriendlyFireHandler). */
     private void dropOneTrooper() {
         try {
-            BlockPos ground = world.getTopSolidOrLiquidBlock(
-                    new BlockPos((int) Math.floor(posX), 0, (int) Math.floor(posZ)));
-            // small lateral scatter so 20 troopers don't stack on one block
-            int sx = ground.getX() + rand.nextInt(5) - 2;
-            int sz = ground.getZ() + rand.nextInt(5) - 2;
-            BlockPos drop = world.getTopSolidOrLiquidBlock(new BlockPos(sx, 0, sz));
-
+            String t = (getAircraftType() == null) ? "" : getAircraftType().toLowerCase();
+            double yawRad = Math.toRadians(rotationYaw + 90);
+            double fx = Math.cos(yawRad), fz = Math.sin(yawRad);          // heli forward vector
+            BlockPos drop;
+            if (t.contains("chinook")) {
+                double bx = posX - fx * 3.0, bz = posZ - fz * 3.0;        // behind the rear ramp, on the ground
+                BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos((int) Math.floor(bx), 0, (int) Math.floor(bz)));
+                drop = new BlockPos(g.getX(), g.getY(), g.getZ());
+            } else {
+                double side = (rand.nextBoolean() ? 1.6 : -1.6);          // out the side, AT heli height
+                double sx = posX + (-fz) * side, sz = posZ + (fx) * side;
+                drop = new BlockPos((int) Math.floor(sx), (int) Math.floor(posY), (int) Math.floor(sz));
+            }
             net.minecraft.entity.Entity e = studio.ERM.war.BattleManagers.core.SpawnHelper.spawnPayload(
                     world, drop, "soldier:special", insertTargetUuid,
                     attackTarget /* battle site / home */, insertWarLevel, "SPECIAL", "");
             if (e != null) {
+                e.fallDistance = 0.0F;
                 EpochRunnerMod.logger.debug("[AIR] inserted trooper at " + drop
                         + " (" + insertTroopsRemaining + " left)");
             }
-        } catch (Throwable t) {
-            EpochRunnerMod.logger.warn("[AIR] insertion drop failed: " + t.getMessage());
+        } catch (Throwable th) {
+            EpochRunnerMod.logger.warn("[AIR] insertion drop failed: " + th.getMessage());
         }
     }
 
@@ -769,21 +858,43 @@ public class EntityGhostAircraft extends EntityLiving {
                 groundPos.getY(),
                 groundPos.getZ() + 0.5 + offsetZ,
                 2.5f, true, true);
+        // Visible rocket streak from the aircraft to the impact (orange).
+        emitTracer(groundPos.getX() + 0.5 + offsetX, groundPos.getY() + 0.5, groundPos.getZ() + 0.5 + offsetZ,
+                1.0f, 0.4f, 0.1f);
     }
 
     // ===== WEAPONS =====
 
     private void dropBomb() {
         if (world.isRemote) return;
-
-        BlockPos groundPos = world.getTopSolidOrLiquidBlock(getPosition());
         float bombDmg = this.dataManager.get(BOMB_DMG);
-
-        world.newExplosion(this,
-                groundPos.getX(), groundPos.getY(), groundPos.getZ(),
-                bombDmg, true, true);
-
-        EpochRunnerMod.logger.info("[AIR] Bomb dropped at " + groundPos);
+        // VISIBLE bomb: drop a primed TNT from the aircraft so the player SEES the bomb fall and detonate,
+        // instead of an instant ground explosion appearing from nowhere. The igniter is THIS ghost (RIVAL),
+        // so the friendly-fire guard spares the siege's own troops/tanks/aircraft from the blast while the
+        // player + the base still take it. Falls back to the old instant blast if TNT can't spawn.
+        // SPREAD: scatter each bomb around the aircraft's track (forward along the run + lateral) so a stick
+        // of bombs WALKS ACROSS the target instead of every one detonating on the same block ("bombers
+        // hitting the same place over and over"). Variation is per-bomb, not per-tick-fixed.
+        double sideX = -lastMoveDirection.z, sideZ = lastMoveDirection.x; // perpendicular to the run
+        double along = (rand.nextDouble() - 0.2) * 9.0;                   // forward bias along the track
+        double lat = (rand.nextDouble() - 0.5) * 11.0;                    // lateral scatter
+        double bx = posX + lastMoveDirection.x * along + sideX * lat;
+        double bz = posZ + lastMoveDirection.z * along + sideZ * lat;
+        try {
+            int groundY = world.getTopSolidOrLiquidBlock(new BlockPos((int) Math.floor(bx), 0, (int) Math.floor(bz))).getY();
+            net.minecraft.entity.item.EntityTNTPrimed tnt =
+                    new net.minecraft.entity.item.EntityTNTPrimed(world, bx, posY - 1.0, bz, this);
+            int fuse = (int) Math.max(20, Math.min(100, (posY - groundY) * 2.0)); // lands ~before detonating
+            tnt.setFuse(fuse);
+            tnt.motionX = lastMoveDirection.x * 0.4 + (rand.nextDouble() - 0.5) * 0.25; // forward throw + jitter
+            tnt.motionZ = lastMoveDirection.z * 0.4 + (rand.nextDouble() - 0.5) * 0.25;
+            tnt.motionY = -0.3;                       // initial downward kick
+            world.spawnEntity(tnt);
+            EpochRunnerMod.logger.info("[AIR] Bomb away (fuse " + fuse + ")");
+        } catch (Throwable t) {
+            BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos((int) Math.floor(bx), (int) posY, (int) Math.floor(bz)));
+            world.newExplosion(this, g.getX(), g.getY(), g.getZ(), bombDmg, true, true);
+        }
     }
 
     /**
@@ -814,6 +925,23 @@ public class EntityGhostAircraft extends EntityLiving {
             world.newExplosion(null,
                     groundPos.getX() + 0.5, groundPos.getY(), groundPos.getZ() + 0.5,
                     radius, false, true);
+            // Draw the round so the aircraft visibly SHOOTS (it was just making ground explosions from
+            // nowhere). A yellow tracer line from the muzzle down to the impact.
+            emitTracer(groundPos.getX() + 0.5, groundPos.getY() + 0.5, groundPos.getZ() + 0.5, 1.0f, 0.85f, 0.2f);
+        }
+    }
+
+    /** Draw a coloured TRACER line from the aircraft to an impact point so its fire is visible. */
+    private void emitTracer(double tx, double ty, double tz, float r, float g, float b) {
+        if (!(world instanceof net.minecraft.world.WorldServer)) return;
+        net.minecraft.world.WorldServer ws = (net.minecraft.world.WorldServer) world;
+        double dx = tx - posX, dy = ty - posY, dz = tz - posZ;
+        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        int n = (int) Math.min(48, Math.max(6, dist / 2));
+        for (int i = 1; i <= n; i++) {
+            double f = (double) i / n;
+            ws.spawnParticle(net.minecraft.util.EnumParticleTypes.REDSTONE,
+                    posX + dx * f, posY + dy * f, posZ + dz * f, 0, r, g, b, 1.0D);
         }
     }
 
@@ -826,44 +954,184 @@ public class EntityGhostAircraft extends EntityLiving {
 
     // ===== MOVEMENT =====
 
+    /**
+     * PILOT AI movement. NOT a ground-mob pathfind -- a flight model built for visual believability:
+     *   LAYER 2  smoothed heading: turn toward the target heading at a capped rate (banking + wide turns),
+     *            then move FORWARD along that heading (the aircraft can't sidestep to the target).
+     *   ALTITUDE terrain-following band: hold desiredY = max(missionY, terrainBelow + clearanceBand), so it
+     *            rises over hills/towers and never sinks into the ground; vertical movement is rate-limited.
+     *   LAYER 3  forward avoidance: raycast ahead; if blocked, steer toward the clearer side and climb.
+     * Insertion near its drop point is exempt (it descends to the ground deliberately).
+     */
     private void moveTowardTarget() {
         if (targetPosition == null) return;
+        if (flightLane < 0) flightLane = (getEntityId() % 4); // stable per-aircraft altitude lane
 
         double dx = targetPosition.x - posX;
-        double dy = targetPosition.y - posY;
         double dz = targetPosition.z - posZ;
-        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        double horiz = Math.sqrt(dx * dx + dz * dz);
 
-        if (dist > 0.1) {
-            double moveX = (dx / dist) * speed;
-            double moveY = (dy / dist) * speed * 0.5;
-            double moveZ = (dz / dist) * speed;
+        boolean heli = isHeli();
+        // Insertion intentionally drops to/near the ground -- only exempt terrain-following/avoidance once it
+        // is actually CLOSE to the drop (still protect the long approach so it doesn't clip en route).
+        boolean lowMission = (mission == MissionType.INSERTION) && horiz < 30;
 
-            double horizDist = Math.sqrt(moveX * moveX + moveZ * moveZ);
-            if (horizDist > 0.01) {
-                lastMoveDirection = new Vec3d(moveX / horizDist, 0, moveZ / horizDist);
+        // ---- LAYER 2: smoothed heading ----
+        float desiredYaw = (horiz > 0.5)
+                ? (float) (MathHelper.atan2(dz, dx) * (180D / Math.PI)) - 90.0F
+                : this.rotationYaw;
+        if (Float.isNaN(headingYaw)) headingYaw = desiredYaw;
+        float turn = MathHelper.wrapDegrees(desiredYaw - headingYaw);
+        float maxTurn = maxTurnRate();
+
+        // ---- LAYER 3: forward collision avoidance ----
+        boolean avoiding = false;
+        double avoidClimb = 0;
+        if (!lowMission) {
+            int look = heli ? 12 : 18;
+            if (blockedAhead(headingYaw, look, 2)) {
+                boolean leftClear  = !blockedAhead(headingYaw + 40, look, 2);
+                boolean rightClear = !blockedAhead(headingYaw - 40, look, 2);
+                float steer = leftClear ? 40 : rightClear ? -40 : 25;
+                turn = MathHelper.clamp(turn + steer, -maxTurn * 2.2f, maxTurn * 2.2f);
+                avoidClimb = 1.0;
+                avoidanceActive = 14;
+                avoiding = true;
             }
-            lastMoveY = moveY;
-
-            setPosition(posX + moveX, posY + moveY, posZ + moveZ);
-
-            float targetYaw = (float) (MathHelper.atan2(dz, dx) * (180D / Math.PI)) - 90.0F;
-            this.rotationYaw = targetYaw;
-            this.rotationYawHead = targetYaw;
-
-            this.rotationPitch = (float) Math.toDegrees(Math.atan2(-moveY, horizDist));
         }
+
+        // While avoiding, grant extra turn authority so the emergency turn is genuinely snappier -- the
+        // *2.2 boost on the steer above is REALIZED here instead of being truncated back to the normal max.
+        float applyMax = avoiding ? maxTurn * 2.2f : maxTurn;
+        headingYaw = MathHelper.wrapDegrees(headingYaw + MathHelper.clamp(turn, -applyMax, applyMax));
+
+        // ---- forward motion along the smoothed heading ----
+        double hyaw = Math.toRadians(headingYaw + 90.0);
+        double fx = Math.cos(hyaw), fz = Math.sin(hyaw);
+        // A plane cannot stop; a heli slows as it closes on its station (no overshoot / no jitter).
+        double step = heli ? Math.min(speed, Math.max(0.15, horiz)) : speed;
+        double moveX = fx * step;
+        double moveZ = fz * step;
+
+        // ---- ALTITUDE: terrain-following band ----
+        double terrainY = terrainYBelow();
+        double desiredY = targetPosition.y;
+        if (!lowMission) {
+            double floorY = terrainY + clearanceBand() + flightLane * 5.0; // lane offset deconflicts stacking
+            desiredY = Math.max(desiredY, floorY);
+        }
+        if (avoiding) desiredY += 10.0; // climb over the obstacle
+        double dY = desiredY - posY;
+        double vRate = (heli ? speed * 0.7 : speed * 0.5) + (avoidanceActive > 0 ? 1.0 : 0.0);
+        double moveY = MathHelper.clamp(dY, -vRate, vRate);
+
+        lastMoveDirection = new Vec3d(fx, 0, fz);
+        lastMoveY = moveY;
+        if (avoidanceActive > 0) avoidanceActive--;
+
+        setPosition(posX + moveX, posY + moveY, posZ + moveZ);
+
+        this.rotationYaw = headingYaw;
+        this.rotationYawHead = headingYaw;
+        this.rotationPitch = (float) Math.toDegrees(Math.atan2(-moveY, Math.max(0.05, step)));
+
+        debugFlight(terrainY, desiredY, avoiding);
     }
 
     private double getDistanceToTarget() {
         if (targetPosition == null) return Double.MAX_VALUE;
-        return new Vec3d(posX, posY, posZ).distanceTo(targetPosition);
+        // HORIZONTAL distance only: terrain-following deliberately holds a different Y than the waypoint
+        // (which is set at an absolute altitude), so a 3D distance would never shrink below the threshold
+        // over high ground and the aircraft would stall on a waypoint forever.
+        double dx = targetPosition.x - posX;
+        double dz = targetPosition.z - posZ;
+        return Math.sqrt(dx * dx + dz * dz);
     }
 
     private double getHorizontalDistanceTo(BlockPos pos) {
         double dx = pos.getX() - posX;
         double dz = pos.getZ() - posZ;
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    // ── PILOT AI helpers ───────────────────────────────────────────────────────────────────────
+
+    /** Helicopters (incl. gunships/transport/special-ops) turn fast + fly low; planes turn slow + fly high. */
+    private boolean isHeli() {
+        try {
+            AirDoctrine.AircraftRole r = AirDoctrine.getProfile(getAircraftType()).role;
+            if (r == AirDoctrine.AircraftRole.ATTACK_HELI || r == AirDoctrine.AircraftRole.GUNSHIP
+                    || r == AirDoctrine.AircraftRole.TRANSPORT || r == AirDoctrine.AircraftRole.SPECIAL_OPS) return true;
+        } catch (Throwable ignored) {}
+        return mission == MissionType.HOVER_STRIKE || mission == MissionType.ORBIT_ATTACK
+                || mission == MissionType.CAS_LOITER || mission == MissionType.INSERTION;
+    }
+
+    /** Max heading change per tick (degrees). Helis turn fast; planes need wide sweeping turns. */
+    private float maxTurnRate() {
+        return isHeli() ? 7.0f : 2.6f;
+    }
+
+    /** Minimum blocks to hold above the terrain/buildings directly below (the "altitude band" floor). */
+    private float clearanceBand() {
+        switch (mission) {
+            case HOVER_STRIKE: return 22f;
+            case ORBIT_ATTACK: return 26f;
+            case CAS_LOITER:   return 28f;
+            case INSERTION:    return 14f; // only used on the long approach (close-in is exempt)
+            default: break;
+        }
+        return isHeli() ? 20f : 26f; // planes/jets/bombers ride a higher floor over terrain + towers
+    }
+
+    /** Highest solid/liquid block in the aircraft's column = the thing it must clear (roofs/trees/towers). */
+    private double terrainYBelow() {
+        try {
+            return world.getTopSolidOrLiquidBlock(
+                    new BlockPos(MathHelper.floor(posX), 0, MathHelper.floor(posZ))).getY();
+        } catch (Throwable ignored) {}
+        return 64;
+    }
+
+    /** Forward raycast: is there solid terrain/building within {@code dist} blocks along {@code yaw}? */
+    private boolean blockedAhead(float yaw, int dist, int vSpread) {
+        double hy = Math.toRadians(yaw + 90.0);
+        double fx = Math.cos(hy), fz = Math.sin(hy);
+        for (int d = 4; d <= dist; d += 2) {
+            for (int vy = -vSpread; vy <= vSpread; vy++) {
+                int x = MathHelper.floor(posX + fx * d);
+                int y = MathHelper.floor(posY + vy);
+                int z = MathHelper.floor(posZ + fz * d);
+                try {
+                    if (world.getBlockState(new BlockPos(x, y, z)).getMaterial().isSolid()) return true;
+                } catch (Throwable ignored) {}
+            }
+        }
+        return false;
+    }
+
+    /** Visible flight-state debug: a green particle on the active waypoint, red on an avoidance maneuver,
+     *  and a periodic state log (aircraft / state / altitudes / heading / avoidance). Toggle DEBUG_FLIGHT. */
+    private void debugFlight(double terrainY, double desiredY, boolean avoiding) {
+        if (!DEBUG_FLIGHT || !(world instanceof net.minecraft.world.WorldServer)) return;
+        net.minecraft.world.WorldServer ws = (net.minecraft.world.WorldServer) world;
+        try {
+            if (targetPosition != null) {
+                ws.spawnParticle(net.minecraft.util.EnumParticleTypes.VILLAGER_HAPPY,
+                        targetPosition.x, targetPosition.y, targetPosition.z, 1, 0.2, 0.2, 0.2, 0.0);
+            }
+            if (avoiding) {
+                ws.spawnParticle(net.minecraft.util.EnumParticleTypes.FLAME,
+                        posX + lastMoveDirection.x * 6, posY, posZ + lastMoveDirection.z * 6, 5, 0.4, 0.4, 0.4, 0.0);
+            }
+            if (ticksOnMission % 40 == 0) {
+                String name = getAircraftType();
+                if (name != null && name.contains(":")) name = name.substring(name.indexOf(':') + 1);
+                EpochRunnerMod.logger.info("[AIRDBG] " + name + "#" + getEntityId() + " STATE=" + mission
+                        + " y=" + (int) posY + " terrainY=" + (int) terrainY + " targetY=" + (int) desiredY
+                        + " hdg=" + (int) headingYaw + " avoid=" + (avoiding ? "YES" : "no"));
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void onWaypointReached() {
@@ -892,15 +1160,19 @@ public class EntityGhostAircraft extends EntityLiving {
     // ===== VISUALS =====
 
     private void updateVisualAngles() {
+        // Roll INTO turns -- the smoothed heading now changes gradually, so the per-tick yaw delta is the
+        // turn rate. Bank harder (and ease back toward level) so sweeping turns read clearly from the ground.
         float yawDelta = MathHelper.wrapDegrees(rotationYaw - prevRotationYaw);
-        bankAngle = MathHelper.clamp(yawDelta * 2, -45, 45);
+        float targetBank = MathHelper.clamp(yawDelta * 6.0f, -55, 55);
+        bankAngle += (targetBank - bankAngle) * 0.25f; // smooth the roll so it doesn't snap
 
         double horizSpeed = Math.sqrt(lastMoveDirection.x * lastMoveDirection.x +
                 lastMoveDirection.z * lastMoveDirection.z) * speed;
 
         if (horizSpeed > 0.01) {
-            pitchAngle = (float) Math.toDegrees(Math.atan2(-lastMoveY, horizSpeed));
-            pitchAngle = MathHelper.clamp(pitchAngle, -30, 30);
+            float targetPitch = MathHelper.clamp(
+                    (float) Math.toDegrees(Math.atan2(-lastMoveY, horizSpeed)), -30, 30);
+            pitchAngle += (targetPitch - pitchAngle) * 0.25f; // ease pitch too (climb/dive nose attitude)
         }
     }
 
@@ -911,23 +1183,18 @@ public class EntityGhostAircraft extends EntityLiving {
 
     @Override
     public boolean attackEntityFrom(DamageSource source, float amount) {
-        // FRIENDLY-FIRE GUARD: the air campaign must never dogfight itself. A flight bombing/strafing
-        // the same area was catching nearby friendly aircraft in its own blasts -- they damaged each
-        // other and chain-exploded, which is the "air deployment fighting each other" the player saw.
-        // Ignore any damage that originates from another ghost aircraft (bombs, missiles, the death
-        // blast). AA fire (handled below) still downs them.
+        if (crashing) return false; // already going down -- ignore further damage so the crash plays out
+        // FRIENDLY-FIRE GUARD. Ghost aircraft are the BESIEGER's air; they must only be downed by the PLAYER
+        // (a direct hit) or by AA fire -- NEVER by their own side: the troops they fast-rope in, another
+        // friendly aircraft's bombs/strafe, or the siege's own catapult (an anonymous explosion with no
+        // source). Previously only other ghost aircraft were spared, so trooper bullets + the catapult +
+        // strafe blasts were shooting the planes down ("planes friendly-fired by their own team").
         Entity src = source.getImmediateSource();
         Entity trueSrc = source.getTrueSource();
-        if (src instanceof EntityGhostAircraft || trueSrc instanceof EntityGhostAircraft) {
-            return false;
-        }
-
-        if (source.getImmediateSource() != null) {
-            String sourceName = source.getImmediateSource().getName().toLowerCase();
-            if (sourceName.contains("aa") || sourceName.contains("flak") || sourceName.contains("bofors")) {
-                amount *= 2.0f;
-            }
-        }
+        boolean fromAA = src != null && aaSource(src.getName());
+        boolean fromPlayer = trueSrc instanceof net.minecraft.entity.player.EntityPlayer;
+        if (!fromAA && !fromPlayer) return false;
+        if (fromAA) amount *= 2.0f;
 
         boolean result = super.attackEntityFrom(source, amount);
 
@@ -941,29 +1208,95 @@ public class EntityGhostAircraft extends EntityLiving {
         return result;
     }
 
+    /** True if a damage source NAME looks like anti-aircraft fire (the one non-player thing allowed to down us). */
+    private static boolean aaSource(String n) {
+        if (n == null) return false;
+        n = n.toLowerCase();
+        return n.contains("aa") || n.contains("flak") || n.contains("bofors") || n.contains("ack") || n.contains("sam");
+    }
+
     private boolean aircraftDestroyed = false;
+    // Death-crash state: when shot down, the aircraft spins around Y and falls to the ground, then
+    // detonates and leaves an iron-bar/rubble wreck (instead of vanishing in a mid-air puff).
+    private boolean crashing = false;
+    private int crashTicks = 0;
+    private boolean crashIsHeli = false; // helis SPIN down; planes nose-dive forward
+    private double crashFallSpeed = 0.0;  // plane descent accelerates as it dives
 
     private void onAircraftDestroyed(Entity killer) {
-        world.newExplosion(this, posX, posY, posZ, 3.0f, true, true);
         EpochRunnerMod.logger.info("[AIR] Aircraft destroyed: " + getAircraftType());
+        boolean heli = false;
+        try {
+            AirDoctrine.AircraftRole role = AirDoctrine.getProfile(getAircraftType()).role;
+            heli = role == AirDoctrine.AircraftRole.ATTACK_HELI || role == AirDoctrine.AircraftRole.GUNSHIP
+                    || role == AirDoctrine.AircraftRole.TRANSPORT || role == AirDoctrine.AircraftRole.SPECIAL_OPS;
+        } catch (Throwable ignored) {}
 
-        // Death message to the player who shot it down -- planes and helicopters get their own, just like
-        // the tank "You destroyed the enemy <vehicle>" notification (EntityAIPilot.attackEntityFrom).
+        // Begin the death CRASH: keep the entity alive (health 1) so onUpdate can fly it down to the
+        // ground, where crashLand() detonates it. Helicopters SPIN down; planes nose-dive forward.
+        crashing = true;
+        crashTicks = 0;
+        crashIsHeli = heli;
+        crashFallSpeed = 0.0;
+        isOnMission = false;
+        this.setHealth(1.0F);
+        this.setNoGravity(true);
+
+        // Death message to the player who shot it down (planes + helis get their own, like the tank kill msg).
         if (!world.isRemote && killer instanceof net.minecraft.entity.player.EntityPlayer) {
             String name = getAircraftType();
             if (name != null && name.contains(":")) name = name.substring(name.indexOf(':') + 1);
-            boolean heli = false;
-            try {
-                AirDoctrine.AircraftRole role = AirDoctrine.getProfile(getAircraftType()).role;
-                heli = role == AirDoctrine.AircraftRole.ATTACK_HELI || role == AirDoctrine.AircraftRole.GUNSHIP
-                        || role == AirDoctrine.AircraftRole.TRANSPORT || role == AirDoctrine.AircraftRole.SPECIAL_OPS;
-            } catch (Throwable ignored) {}
             String kind = heli ? "helicopter" : "aircraft";
             ((net.minecraft.entity.player.EntityPlayer) killer).sendMessage(
                     new net.minecraft.util.text.TextComponentString(
                             net.minecraft.util.text.TextFormatting.AQUA + "✈ You shot down the enemy "
                                     + kind + " (" + name + ")"));
         }
+    }
+
+    /** Death fall. Helicopters SPIN around Y and drop straight down; planes keep flying FORWARD along the
+     *  last heading and nose-dive, accelerating downward. Either way -> crashLand() on ground contact. */
+    private void tickCrash() {
+        crashTicks++;
+        int groundY = world.getTopSolidOrLiquidBlock(getPosition()).getY();
+        if (crashIsHeli) {
+            rotationYaw += 28.0F;            // dramatic flat spin (rotationYaw syncs to clients)
+            rotationYawHead = rotationYaw;
+            rotationPitch = Math.min(45.0F, rotationPitch + 2.0F);
+            double newY = Math.max(groundY + 1.0, posY - 0.9);
+            setPosition(posX, newY, posZ);
+        } else {
+            // PLANE: no spin -- continue forward along the last heading and accelerate the descent.
+            crashFallSpeed += 0.06;
+            double fwd = Math.max(1.2, speed);
+            double nx = posX + lastMoveDirection.x * fwd;
+            double nz = posZ + lastMoveDirection.z * fwd;
+            double newY = Math.max(groundY + 1.0, posY - crashFallSpeed);
+            rotationPitch = Math.min(70.0F, rotationPitch + 3.0F); // nose drops into the dive
+            setPosition(nx, newY, nz);
+        }
+        if (posY <= groundY + 1.2 || crashTicks > 120) crashLand(groundY);
+    }
+
+    /** Impact. Helicopters detonate harder and leave an iron-bar + rubble wreck; planes make a SMALL
+     *  explosion (they hit fast + forward, less wreckage). Then die. */
+    private void crashLand(int groundY) {
+        try {
+            float power = crashIsHeli ? 3.5F : 2.0F;
+            world.newExplosion(this, posX, groundY + 1, posZ, power, true, true);
+            int debris = crashIsHeli ? 6 : 2;
+            for (int i = 0; i < debris; i++) {
+                int rx = (int) Math.floor(posX) + rand.nextInt(5) - 2;
+                int rz = (int) Math.floor(posZ) + rand.nextInt(5) - 2;
+                BlockPos p = world.getTopSolidOrLiquidBlock(new BlockPos(rx, 0, rz));
+                if (world.isAirBlock(p)) {
+                    world.setBlockState(p, (rand.nextBoolean()
+                            ? net.minecraft.init.Blocks.IRON_BARS
+                            : net.minecraft.init.Blocks.COBBLESTONE).getDefaultState(), 2);
+                }
+            }
+        } catch (Throwable ignored) {}
+        setDead();
     }
 
     // ===== NBT =====
@@ -1143,7 +1476,7 @@ public class EntityGhostAircraft extends EntityLiving {
      */
     public void applyStrikeProfile(WarAirstrikeHelper.StrikeProfile profile, net.minecraft.util.math.BlockPos target) {
         if (profile == null) return;
-        this.altitude = (float) profile.altitude;
+        this.altitude = (float) profile.altitude + 30f; // +30 cruise: clears towers, stops ~90% of building collisions
         this.speed = Math.max(0.4f, (float) profile.speed);
         this.setMission(profile.mission);
     }

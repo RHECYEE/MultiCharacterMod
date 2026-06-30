@@ -68,6 +68,43 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
     // Only scouts/transports/boats the SiegeDirector rallies get one; tanks leave it null (unchanged).
     private net.minecraft.util.math.BlockPos rallyPoint = null;
     public void setRallyPoint(net.minecraft.util.math.BlockPos p) { this.rallyPoint = p; }
+
+    // C10: the director's view of the assault route + the army-side hold point just outside the breach. A
+    // ground vehicle reads these to WAIT while the route is being cleared (NEEDS_ENGINEER/BEING_CLEARED) and
+    // roll in the moment it is CLEARED. Both null for any vehicle the director doesn't manage -> unchanged.
+    private studio.ERM.war.strategy.RouteStatus directorRouteStatus = null;
+    private net.minecraft.util.math.BlockPos breachHold = null;
+    public void setDirectorRouteStatus(studio.ERM.war.strategy.RouteStatus s) { this.directorRouteStatus = s; }
+    public void setBreachHold(net.minecraft.util.math.BlockPos p) { this.breachHold = p; }
+
+    // C12: cheap stuck-detection. Sampled ~every STUCK_SAMPLE ticks while the hull is TRYING to advance: if
+    // it barely moved, flag it so the director (which already owns the vehicle list) can divert a crew to
+    // clear whatever is in front. One-way -- the director polls these; no back-reference to the director.
+    private static final int STUCK_SAMPLE = 20;            // sample ~1s
+    private static final double STUCK_MOVE_SQ = 0.5 * 0.5; // moved < 0.5 block over the interval = stuck
+    private double lastSampleX = Double.NaN, lastSampleZ = Double.NaN;
+    private int stuckSampleTick = 0;
+    private boolean stuckBlocked = false;
+    private net.minecraft.util.math.BlockPos blockedPos = null;
+    public boolean isStuckBlocked() { return stuckBlocked; }
+    public net.minecraft.util.math.BlockPos getBlockedPos() { return blockedPos; }
+    public void clearStuckBlocked() { stuckBlocked = false; blockedPos = null; }
+
+    /** Sample hull displacement; flag stuck if the vehicle was trying to move (throttle != 0) yet didn't. */
+    private void sampleStuck(EntityVehicle tank) {
+        if (++stuckSampleTick < STUCK_SAMPLE) return;
+        stuckSampleTick = 0;
+        double x = tank.posX, z = tank.posZ;
+        boolean trying = Math.abs(tank.throttle) > 0.01f;
+        if (!Double.isNaN(lastSampleX) && trying) {
+            double moved = (x - lastSampleX) * (x - lastSampleX) + (z - lastSampleZ) * (z - lastSampleZ);
+            if (moved < STUCK_MOVE_SQ) {
+                stuckBlocked = true;
+                blockedPos = new net.minecraft.util.math.BlockPos(x, tank.posY, z);
+            }
+        }
+        lastSampleX = x; lastSampleZ = z;
+    }
     private static Field seatsField;
     private int initialCrewSize = 0;
 
@@ -78,6 +115,11 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
     public EntityVehicle parentVehicle;
     private Entity lockedTarget;
     private int lockedTargetTicks = 0;
+
+    // ── BOAT PILOT (water-corridor movement: orbit a centre on the water, shore-aware, gradual wide turns) ──
+    private double boatOrbitAngle = 0;
+    private boolean boatOrbitInit = false;
+    private boolean boatOrbitCW = true;
     // Teaming / targeting doctrine
     private static final String NBT_TEAM = "mcmTeam";
     private static final String NBT_ALLOW_VEHICLE_TARGETS = "mcmAllowVehicleTargets";
@@ -795,21 +837,34 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         updateVehicleControl(driving);
         VehicleCategory cat = getVehicleCategory(driving);
 
-        if (rallyPoint != null && driving instanceof EntityVehicle) {
+        if (cat == VehicleCategory.BOAT) {
+            // BOATS always use the water-corridor pilot (it reads rallyPoint as the patrol centre). They must
+            // NOT use the land driveHullToward rally path -- that beaches them charging straight at the point.
+            controlBoat(driving, target);
+        } else if (rallyPoint != null && driving instanceof EntityVehicle) {
             // RALLIED (director-set staging): drive the hull to the staging point and HOLD there instead of
             // charging the player. Unchanged from phase 1 -- the director owns this path for the units it rallies.
             driveHullToward((EntityVehicle) driving, rallyPoint.getX() + 0.5, rallyPoint.getZ() + 0.5);
-        } else if (cat == VehicleCategory.BOAT) {
-            controlBoat(driving, target);
         } else if ((cat == VehicleCategory.TANK || cat == VehicleCategory.TRANSPORT)
                 && driving instanceof EntityVehicle) {
-            // PHASE 2: per-vehicle movement style. DEFAULT falls back to the legacy controlGround so
-            // any unmatched vehicle behaves exactly as before (tanks stay functional).
-            MovementStyle style = getMovementStyle(driving);
-            if (style == MovementStyle.DEFAULT) {
-                controlGround(driving, target, cat == VehicleCategory.TRANSPORT);
+            if (breachHold != null
+                    && (directorRouteStatus == studio.ERM.war.strategy.RouteStatus.NEEDS_ENGINEER
+                     || directorRouteStatus == studio.ERM.war.strategy.RouteStatus.BEING_CLEARED)) {
+                // C11: WAIT FOR THE BREACH. The director says the route isn't cleared yet (engineers still
+                // working), so hold at the army-side breachHold instead of bulldozing an un-breached wall;
+                // resume the moment it flips CLEARED. directorRouteStatus null -> unchanged movement style.
+                driveHullTowardHolding((EntityVehicle) driving, breachHold.getX() + 0.5, breachHold.getZ() + 0.5, 4.0);
             } else {
-                applyMovementStyle((EntityVehicle) driving, target, style, cat == VehicleCategory.TRANSPORT);
+                // PHASE 2: per-vehicle movement style. DEFAULT falls back to the legacy controlGround so
+                // any unmatched vehicle behaves exactly as before (tanks stay functional).
+                MovementStyle style = getMovementStyle(driving);
+                if (style == MovementStyle.DEFAULT) {
+                    controlGround(driving, target, cat == VehicleCategory.TRANSPORT);
+                } else {
+                    applyMovementStyle((EntityVehicle) driving, target, style, cat == VehicleCategory.TRANSPORT);
+                }
+                // C12: only sample stuck-ness when actually trying to advance (not while holding for the breach).
+                if (breachHold != null) sampleStuck((EntityVehicle) driving);
             }
         } else if (cat == VehicleCategory.TRANSPORT) {
             controlGround(driving, target, true);
@@ -1730,10 +1785,117 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         }
     }
 
-    private void controlBoat(EntityDriveable boat, Entity target) {
-        if(!boat.isInWater()) return;
-        if (boat instanceof EntityVehicle) controlGround(boat, target, false);
-        boat.motionY = 0;
+    /**
+     * BOAT PILOT -- mirrors the aircraft model but simpler: follow a WATER corridor, stay in deep water,
+     * avoid shore/shallows, turn GRADUALLY (wider than ground), slow near shore. The boat ORBITS its patrol
+     * centre (the director's rally point on the water, else the target) so it drives back and forth around
+     * the base peppering it with its guns (handleAllTurrets fires every tick). Retreats to open water at low
+     * HP. (TRANSPORT/LANDING dock behaviours belong to the strategic/amphibious layer -- framework only.)
+     */
+    private void controlBoat(EntityDriveable driveable, Entity target) {
+        if (!(driveable instanceof EntityVehicle)) return;
+        EntityVehicle boat = (EntityVehicle) driveable;
+        if (boat.axes == null) return;
+        boat.motionY = 0; // sit on the surface, never dive
+
+        if (!boatOrbitInit) {
+            boatOrbitInit = true;
+            boatOrbitCW = (getEntityId() % 2 == 0);
+            boatOrbitAngle = (getEntityId() % 360) * Math.PI / 180.0;
+        }
+
+        // Patrol centre: the director's rally water point (preferred), else the target, else here.
+        double cx, cz;
+        if (rallyPoint != null) { cx = rallyPoint.getX() + 0.5; cz = rallyPoint.getZ() + 0.5; }
+        else if (target != null) { cx = target.posX; cz = target.posZ; }
+        else { cx = boat.posX; cz = boat.posZ; }
+
+        float hpRatio = getMaxHealth() > 0 ? getHealth() / getMaxHealth() : 1f;
+
+        // RETREAT: low HP -> turn away and run for open water.
+        if (hpRatio < 0.3f) {
+            double ax = boat.posX - cx, az = boat.posZ - cz;
+            double al = Math.max(1e-4, Math.sqrt(ax * ax + az * az));
+            navigateBoat(boat, boat.posX + (ax / al) * 40, boat.posZ + (az / al) * 40);
+            return;
+        }
+
+        // PATROL / ATTACK RUN: advance along a gentle orbit ring around the centre, on the water.
+        boatOrbitAngle += 0.02 * (boatOrbitCW ? 1 : -1);
+        double radius = 26 + (getEntityId() % 4) * 6.0;  // per-boat lane so they don't stack
+        double gx = cx + Math.cos(boatOrbitAngle) * radius;
+        double gz = cz + Math.sin(boatOrbitAngle) * radius;
+        navigateBoat(boat, gx, gz);
+    }
+
+    /** Shore-aware steering: if shore/shallows are close ahead, SLOW and re-aim toward the heading with the
+     *  most open water; else cruise toward the goal. */
+    private void navigateBoat(EntityVehicle boat, double gx, double gz) {
+        double dx = gx - boat.posX, dz = gz - boat.posZ;
+        int clear = waterClearanceAhead(boat, dx, dz, 14);
+        float throttle = 0.6f;
+        if (clear < 14) {
+            throttle = (clear <= 4) ? 0.12f : 0.4f;          // crawl if shore is right there, else slow
+            double[] best = bestWaterHeading(boat, dx, dz);  // steer toward the most open water
+            gx = boat.posX + best[0] * 20; gz = boat.posZ + best[1] * 20;
+        }
+        steerBoatToward(boat, gx, gz, throttle);
+    }
+
+    /** Gentle hull steering for boats: like driveHullToward but a softer wheelsYaw -> wider, gradual turns. */
+    private void steerBoatToward(EntityVehicle boat, double gx, double gz, float throttle) {
+        if (boat.axes == null) return;
+        double dx = gx - boat.posX, dz = gz - boat.posZ;
+        Vector3f forward = boat.axes.getXAxis();
+        double cross = (forward.x * dz) - (forward.z * dx);
+        double dot = (forward.x * dx) + (forward.z * dz);
+        float turnPower = 0f;
+        if (cross > 0.3) turnPower = 1f; else if (cross < -0.3) turnPower = -1f;
+        if (dot < 0) turnPower = (cross >= 0) ? 1f : -1f; // target behind -> commit to a wide turn
+        boat.wheelsYaw = turnPower * 15.0F;               // gentler than tanks (25) -> wider turns
+        boat.throttle = throttle;
+        float power = 0.35F * Math.signum(throttle);
+        boat.motionX += forward.x * power;
+        boat.motionZ += forward.z * power;
+    }
+
+    /** Blocks of continuous DEEP water ahead along (dirx,dirz); maxDist if all clear, smaller if shore. */
+    private int waterClearanceAhead(EntityVehicle boat, double dirx, double dirz, int maxDist) {
+        double len = Math.sqrt(dirx * dirx + dirz * dirz);
+        if (len < 1e-4) return maxDist;
+        dirx /= len; dirz /= len;
+        for (int d = 2; d <= maxDist; d += 2) {
+            int x = MathHelper.floor(boat.posX + dirx * d);
+            int z = MathHelper.floor(boat.posZ + dirz * d);
+            if (!isDeepWaterColumn(x, z)) return d;
+        }
+        return maxDist;
+    }
+
+    /** True if column (x,z) is open water at least 2 deep (a boat floats; shallows/land beach it). */
+    private boolean isDeepWaterColumn(int x, int z) {
+        try {
+            net.minecraft.util.math.BlockPos top =
+                    world.getTopSolidOrLiquidBlock(new net.minecraft.util.math.BlockPos(x, 0, z));
+            return world.getBlockState(top).getMaterial() == net.minecraft.block.material.Material.WATER
+                    && world.getBlockState(top.down()).getMaterial() == net.minecraft.block.material.Material.WATER;
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /** Pick the heading (desired + offsets) with the MOST open-water clearance; returns its unit vector. */
+    private double[] bestWaterHeading(EntityVehicle boat, double dirx, double dirz) {
+        double base = Math.atan2(dirz, dirx);
+        double[] offs = {0, 25, -25, 50, -50, 75, -75, 110, -110, 150, -150};
+        double bestX = Math.cos(base), bestZ = Math.sin(base);
+        int bestClear = -1;
+        for (double off : offs) {
+            double a = base + Math.toRadians(off);
+            double ux = Math.cos(a), uz = Math.sin(a);
+            int c = waterClearanceAhead(boat, ux, uz, 14);
+            if (c > bestClear) { bestClear = c; bestX = ux; bestZ = uz; }
+        }
+        return new double[]{bestX, bestZ};
     }
 
     private void emergencyEject(EntityDriveable vehicle) {

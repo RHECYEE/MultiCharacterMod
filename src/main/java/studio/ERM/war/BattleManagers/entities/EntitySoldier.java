@@ -338,25 +338,39 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
             this.playSound(SoundEvents.ENTITY_SKELETON_SHOOT, 1.0F, 1.0F / (rand.nextFloat() * 0.4F + 0.8F));
             world.spawnEntity(arrow);
         } else {
-            // Flans weapon — try to invoke shoot method via reflection
-            try {
-                // Flans guns fire when right-clicked; simulate that for AI
-                // ItemGun.onItemRightClick(World, EntityPlayer, EnumHand) won't work for non-players
-                // Instead, spawn a projectile manually (arrow as proxy damage)
-                EntityTippedArrow bullet = new EntityTippedArrow(world, this);
-                double dx = target.posX - this.posX;
-                double dy = target.getEntityBoundingBox().minY + (target.height / 2.0) - bullet.posY;
-                double dz = target.posZ - this.posZ;
-                bullet.shoot(dx, dy, dz, 3.0F, 4.0F);
-                bullet.setDamage(3.0 + warLevel);
-                bullet.pickupStatus = EntityArrow.PickupStatus.DISALLOWED;
-                world.spawnEntity(bullet);
-                this.playSound(SoundEvents.ENTITY_FIREWORK_BLAST, 1.0F, 1.4F);
-            } catch (Throwable ignored) {}
+            // Flan GUN: hitscan + a bright TRACER streak. Soldiers were literally firing ARROWS out of their
+            // uzis (an EntityTippedArrow proxy). Now the round is a hitscan with a yellow tracer line, so it
+            // reads as a bullet, not an arrow.
+            fireGunTracer(target);
         }
 
         // Face target
         this.faceEntity(target, 30.0F, 30.0F);
+    }
+
+    /** Gun fire: apply hitscan damage and draw a yellow TRACER line muzzle->target (no arrow entity). */
+    private void fireGunTracer(EntityLivingBase target) {
+        double fx = posX, fy = posY + getEyeHeight(), fz = posZ;
+        double spread = 0.7;
+        double tx = target.posX + (rand.nextDouble() - 0.5) * spread;
+        double ty = target.posY + target.height * 0.5 + (rand.nextDouble() - 0.5) * spread * 0.5;
+        double tz = target.posZ + (rand.nextDouble() - 0.5) * spread;
+
+        target.attackEntityFrom(DamageSource.causeMobDamage(this), (float) (2.0 + warLevel));
+        this.playSound(SoundEvents.ENTITY_BLAZE_HURT, 0.7F, 1.7F); // sharp report
+
+        if (world instanceof net.minecraft.world.WorldServer) {
+            net.minecraft.world.WorldServer ws = (net.minecraft.world.WorldServer) world;
+            double dx = tx - fx, dy = ty - fy, dz = tz - fz;
+            double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            int n = (int) Math.min(24, Math.max(4, dist));
+            for (int i = 1; i <= n; i++) {
+                double f = (double) i / n;
+                // REDSTONE colour trick (count=0, offsets = R,G,B): a yellow dust line = a tracer.
+                ws.spawnParticle(net.minecraft.util.EnumParticleTypes.REDSTONE,
+                        fx + dx * f, fy + dy * f, fz + dz * f, 0, 1.0D, 0.85D, 0.2D, 1.0D);
+            }
+        }
     }
 
     // ══════════════════════════════════════
