@@ -884,11 +884,13 @@ public class EntityGhostAircraft extends EntityLiving {
             int groundY = world.getTopSolidOrLiquidBlock(new BlockPos((int) Math.floor(bx), 0, (int) Math.floor(bz))).getY();
             net.minecraft.entity.item.EntityTNTPrimed tnt =
                     new net.minecraft.entity.item.EntityTNTPrimed(world, bx, posY - 1.0, bz, this);
-            int fuse = (int) Math.max(20, Math.min(100, (posY - groundY) * 2.0)); // lands ~before detonating
+            // Fuse must outlast the FALL from high altitude, or the bomb detonates in mid-air ("the TNT
+            // despawns before hitting the ground"). Match it to the drop height (with headroom) up to 200t.
+            int fuse = (int) Math.max(30, Math.min(200, (posY - groundY) / 1.6 + 12));
             tnt.setFuse(fuse);
             tnt.motionX = lastMoveDirection.x * 0.4 + (rand.nextDouble() - 0.5) * 0.25; // forward throw + jitter
             tnt.motionZ = lastMoveDirection.z * 0.4 + (rand.nextDouble() - 0.5) * 0.25;
-            tnt.motionY = -0.3;                       // initial downward kick
+            tnt.motionY = -1.0;                       // strong downward kick so it actually reaches the ground
             world.spawnEntity(tnt);
             EpochRunnerMod.logger.info("[AIR] Bomb away (fuse " + fuse + ")");
         } catch (Throwable t) {

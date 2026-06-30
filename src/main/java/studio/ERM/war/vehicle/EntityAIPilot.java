@@ -933,6 +933,12 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         // beat to react / take cover instead of being hit the instant the turret swings on.
         if (lockedTargetTicks < 30) return;
 
+        // MIN RANGE for the main CANNON: a freshly spawned tank that fires its shell at a target right on top
+        // of it detonates on the ground beneath itself and suicides ("tanks shoot the ground under themselves
+        // and kill themselves immediately"). Hold the cannon until the target is >10 blocks out. MGs may still
+        // fire close -- they don't self-detonate.
+        if (isMainGun && distToTarget < 100.0) return;
+
         double dist = Math.sqrt(distToTarget);
         double targetHeight = target instanceof EntityLivingBase ? ((EntityLivingBase)target).getEyeHeight() * 0.7 : target.height * 0.5;
         double dx = target.posX - seat.posX;
@@ -1336,19 +1342,43 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                 net.minecraft.init.SoundEvents.ENTITY_GENERIC_EXPLODE,
                 net.minecraft.util.SoundCategory.HOSTILE, 4.0F, 0.8F + rand.nextFloat() * 0.4F);
 
+        // LAUNCH everything the blast catches (up + outward) so a tank shell reads as DEVASTATING.
+        launchEntitiesFromBlast(explosionX, explosionY, explosionZ, explosionPower);
+
         if (dist < 70.0D) {
-            // ACCURACY NERF: the main gun is NOT a guaranteed hit. Before this it ALWAYS applied full
-            // damage to any target within 70 blocks regardless of aim -- that is why it deleted the player
-            // the instant any pixel was visible. Now the direct hit chance falls off hard with range (the
-            // scatter explosion above can still clip the player on a "miss"), and each hit is softer.
-            double hitChance = (dist < 12) ? 0.65 : (dist < 25) ? 0.42 : (dist < 45) ? 0.26 : 0.14;
+            // Accuracy is a HIT ROLL that falls off with range, so the tank misses often -- but when it HITS
+            // it hits HARD: ~8 hearts + a hard launch. (Misses still scatter the AoE, which can clip the
+            // target.) This keeps the tank survivable-but-scary, not a guaranteed delete.
+            double hitChance = (dist < 12) ? 0.6 : (dist < 25) ? 0.42 : (dist < 45) ? 0.26 : 0.14;
             if (this.rand.nextDouble() < hitChance) {
-                float baseDamage = ModConfig.vehicleCombat.mainGunDamage;
-                float damage = (baseDamage - (float)(dist / 2.5)) * 0.6f;
-                if (damage > 0) {
-                    target.attackEntityFrom(DamageSource.causeExplosionDamage(this), damage);
+                target.attackEntityFrom(DamageSource.causeExplosionDamage(this), 16.0F); // 8 hearts on a clean hit
+                if (target instanceof EntityLivingBase) {
+                    double kx = target.posX - explosionX, kz = target.posZ - explosionZ;
+                    double kl = Math.max(0.001, Math.sqrt(kx * kx + kz * kz));
+                    target.addVelocity((kx / kl) * 1.6, 0.9, (kz / kl) * 1.6);
+                    ((EntityLivingBase) target).velocityChanged = true;
                 }
             }
+        }
+    }
+
+    /** Hurl every non-friendly entity in the blast radius up + outward -- the "launch things it hits". */
+    private void launchEntitiesFromBlast(double x, double y, double z, float power) {
+        double r = power * 1.8 + 2.0;
+        net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                x - r, y - r, z - r, x + r, y + r, z + r);
+        String myTeam = this.getMcmTeam();
+        for (Entity e : world.getEntitiesWithinAABB(Entity.class, box)) {
+            if (e == null || e.isDead || e == this) continue;
+            if (e instanceof EntityAIPilot && sameTeam(myTeam, ((EntityAIPilot) e).getMcmTeam())) continue;
+            if (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier
+                    && sameTeam(myTeam, ((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).getTeam_())) continue;
+            double dx = e.posX - x, dy = e.posY - y, dz = e.posZ - z;
+            double d = Math.max(0.6, Math.sqrt(dx * dx + dy * dy + dz * dz));
+            if (d > r) continue;
+            double f = (1.0 - d / r) * 2.2; // closer = bigger launch
+            e.addVelocity((dx / d) * f, Math.max(0.5, (dy / d) * f) + 0.6, (dz / d) * f);
+            e.velocityChanged = true;
         }
     }
 

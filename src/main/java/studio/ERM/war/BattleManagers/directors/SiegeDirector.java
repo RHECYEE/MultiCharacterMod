@@ -580,7 +580,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // Position the catapults behind the centre of the line. Counts by level: L3-5=1, L6-7=2, L8+=3.
         catapultSites.clear();
         catapultCooldown = 20;
-        int guns = (warLevel >= 9) ? 4 : (warLevel >= 8) ? 3 : (warLevel >= 6) ? 2 : 1;
+        int guns = (warLevel >= 10) ? 5 : (warLevel >= 9) ? 4 : (warLevel >= 8) ? 3 : (warLevel >= 6) ? 2 : 1;
         double gmid = (guns - 1) / 2.0;
         for (int i = 0; i < guns; i++) {
             double lateral = (i - gmid) * 18.0;
@@ -2350,7 +2350,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private void tickCatapults(World world) {
         if (!catapultSites.isEmpty()) {
             if (catapultCooldown > 0) catapultCooldown--;
-            else { launchCatapult(world); catapultCooldown = Math.max(10, 50 - warLevel * 4); } // ~150% more shots, faster at high level
+            // SLOW + METHODICAL: a deliberate ~2s cadence (not a machine-gun barrage). Slower fire reads as a
+            // proper siege bombardment, and each round does big destruction (see breachWall radius below).
+            else { launchCatapult(world); catapultCooldown = Math.max(34, 70 - warLevel * 3); }
         }
         Iterator<CatapultShot> it = catapultShots.iterator();
         while (it.hasNext()) {
@@ -2413,8 +2415,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // the siege's own troops/tanks/aircraft -- the old world.newExplosion(null,...) caught every
                 // nearby entity (null source = the FF handler couldn't cancel it). breachWall is the antigrief
                 // damageBlock sphere: claimed land -> repairable scaffold, rival/neutral -> cleared to air.
-                // Radius 3 ~= a strong TNT crater.
-                breachWall(world, impact, 3);
+                // DEVASTATING: a big crater per round (scaled by tech level) so the bombardment actually
+                // tears the base apart. Block-only (no entity damage) keeps it friendly-safe.
+                breachWall(world, impact, (warLevel >= 8) ? 5 : (warLevel >= 6) ? 4 : 3);
                 if (alive) s.block.setDead();
                 it.remove();
             }
@@ -2445,7 +2448,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
             // level -- at L10 it walks deep into the base and pulverises it. Aim at the breach FOOT Y
             // (ground), NOT surfaceY (which is the roof). Real artillery SPREAD, not machine-accuracy.
             int maxCreep = (warLevel >= 9) ? 26 : (warLevel >= 6) ? 16 : 8;
-            int creep = Math.min(maxCreep, (tickAge - lastPhaseChangeTick) / 25);
+            // SLOW creep -- the aim point walks inward methodically (~1 block every 3s) so each spot gets
+            // properly pulverised before the barrage moves on, instead of racing across the base.
+            int creep = Math.min(maxCreep, (tickAge - lastPhaseChangeTick) / 60);
             double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
             int cx = breachCorridor.getX() + (int) Math.round(Math.cos(toCore) * creep);
             int cz = breachCorridor.getZ() + (int) Math.round(Math.sin(toCore) * creep);
