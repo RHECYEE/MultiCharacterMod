@@ -1191,10 +1191,18 @@ public class EntityGhostAircraft extends EntityLiving {
         // strafe blasts were shooting the planes down ("planes friendly-fired by their own team").
         Entity src = source.getImmediateSource();
         Entity trueSrc = source.getTrueSource();
-        boolean fromAA = src != null && aaSource(src.getName());
-        boolean fromPlayer = trueSrc instanceof net.minecraft.entity.player.EntityPlayer;
-        if (!fromAA && !fromPlayer) return false;
-        if (fromAA) amount *= 2.0f;
+        // BLOCKLIST (safer than an allowlist -- never accidentally makes the aircraft unkillable by the
+        // player's own gun, whatever DamageSource Flan uses). Block our OWN side only:
+        //   - other ghost aircraft (bombs/strafe/death blast)
+        //   - the troops we fast-rope in + friendly ground vehicles (EntitySoldier / EntityAIPilot)
+        //   - the siege's own catapult / any anonymous AoE: an explosion with no PLAYER behind it
+        // Everything else (the player's gun/explosives, AA, vanilla) still downs us.
+        boolean friendlyUnit = src instanceof EntityGhostAircraft || trueSrc instanceof EntityGhostAircraft
+                || isFriendlyGroundUnit(src) || isFriendlyGroundUnit(trueSrc);
+        boolean anonExplosion = source.isExplosion() && !(trueSrc instanceof net.minecraft.entity.player.EntityPlayer);
+        if (friendlyUnit || anonExplosion) return false;
+
+        if (src != null && aaSource(src.getName())) amount *= 2.0f; // AA hits harder
 
         boolean result = super.attackEntityFrom(source, amount);
 
@@ -1206,6 +1214,12 @@ public class EntityGhostAircraft extends EntityLiving {
         }
 
         return result;
+    }
+
+    /** True if the entity is one of the siege's OWN ground units (its troops or AI-crewed vehicles). */
+    private static boolean isFriendlyGroundUnit(Entity e) {
+        return e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier
+                || e instanceof studio.ERM.war.vehicle.EntityAIPilot;
     }
 
     /** True if a damage source NAME looks like anti-aircraft fire (the one non-player thing allowed to down us). */
