@@ -60,6 +60,18 @@ public class EpochRunnerMod {
         logger.info("[NUCLEAR-LOG] Starting Pre-Init for " + MODID);
 
         try {
+            // LOAD THE WAR CONFIGS. WarMasterConfig + WarLevelsConfig are manual GSON loaders that were NEVER
+            // called -> "none of the configs load" (they write defaults to config/Homosapien/ on first run).
+            // (WarWeaponsConfig is a Forge @Config and auto-loads separately.)
+            try {
+                java.io.File cfgDir = event.getModConfigurationDirectory();
+                studio.ERM.war.config.WarMasterConfig.load(cfgDir);
+                studio.ERM.war.config.WarLevelsConfig.load(cfgDir);
+                logger.info("[Config] WarMaster + WarLevels configs loaded from " + cfgDir);
+            } catch (Throwable t) {
+                logger.error("[Config] failed to load war configs", t);
+            }
+
             network = NetworkRegistry.INSTANCE.newSimpleChannel("epoch_net");
 
             // Register tactical war map packets
@@ -145,6 +157,8 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(new studio.ERM.war.WarRepairHandler());
             MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.WarAmbushTracker());
             MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.WarTriggerHandler());
+            // Disable friendly fire within the war army (two sides only: RIVAL + PLAYER).
+            MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.WarFriendlyFireHandler());
             MinecraftForge.EVENT_BUS.register(invasionHandlerInstance);
             MinecraftForge.EVENT_BUS.register(new studio.ERM.handlers.SleepBlocker());
             // WorldBackupManager has private constructor - register class for static @SubscribeEvent if needed
@@ -251,17 +265,14 @@ public class EpochRunnerMod {
                 net.minecraft.util.ResourceLocation[] recipes = (net.minecraft.util.ResourceLocation[]) val;
                 if (recipes.length == 0) continue;
 
-                java.util.List<net.minecraft.util.ResourceLocation> valid = new java.util.ArrayList<>();
-                for (net.minecraft.util.ResourceLocation rl : recipes) {
-                    if (rl != null && net.minecraft.item.crafting.CraftingManager.getRecipe(rl) != null) {
-                        valid.add(rl);
-                    }
-                }
-                if (valid.size() != recipes.length) {
-                    recipesField.set(rewards, valid.toArray(new net.minecraft.util.ResourceLocation[0]));
-                    fixedAdvancements++;
-                    droppedRecipes += (recipes.length - valid.size());
-                }
+                // STRIP ALL recipe rewards (not just dangling ones). The crash ALSO fires for recipes that
+                // resolve but have a null/blank registry name -- sendRecipeBook NPEs on name.toString(),
+                // which the old dangling-only filter missed (and is exactly the crash that recurred). The
+                // advancement recipe-book auto-unlock is purely cosmetic, so clearing every recipe reward
+                // permanently kills the "Ticking player -> sendRecipeBook NPE" crash for good.
+                recipesField.set(rewards, new net.minecraft.util.ResourceLocation[0]);
+                fixedAdvancements++;
+                droppedRecipes += recipes.length;
             }
             // Log once, the first time we actually scan a populated advancement set, so it's clear the
             // guard ran (and whether anything was dangling).

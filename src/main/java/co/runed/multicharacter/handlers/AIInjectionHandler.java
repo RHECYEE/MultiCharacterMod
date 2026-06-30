@@ -78,6 +78,21 @@ public class AIInjectionHandler {
                         // Priority 2: Find Ammo (only runs when the gun AI can't — i.e. out of ammo).
                         npc.tasks.addTask(2, new EntityAIFindAmmo(npc));
 
+                        // Make the player's AW2 guards HOSTILE to the besieging army + its vehicles/aircraft.
+                        // AW2's faction targeting doesn't know our siege units exist, so inject a target task
+                        // for empire-team soldiers/vehicles + ghost aircraft. It only acquires anything when
+                        // empire units are actually present (a siege ON the player), where these AW2 combat
+                        // NPCs are the defenders -- so it's a no-op when the player is attacking a rival city.
+                        if (isAW2Soldier) {
+                            npc.targetTasks.addTask(1, new net.minecraft.entity.ai.EntityAINearestAttackableTarget<>(
+                                    npc, net.minecraft.entity.EntityLivingBase.class, 10, true, false,
+                                    new com.google.common.base.Predicate<net.minecraft.entity.EntityLivingBase>() {
+                                        @Override public boolean apply(net.minecraft.entity.EntityLivingBase e) {
+                                            return isSiegeEnemy(e);
+                                        }
+                                    }));
+                        }
+
                         // Initialize Ammo NBT if missing
                         if (!npc.getEntityData().hasKey("Infantry_CurrentAmmo")) {
                             npc.getEntityData().setInteger("Infantry_CurrentAmmo", 30);
@@ -89,5 +104,19 @@ public class AIInjectionHandler {
                 }
             }
         }
+    }
+
+    /** A besieging-army unit a player-side AW2 guard should shoot: empire-team soldier/vehicle, or any
+     *  ghost aircraft (the air is always the attacker's). */
+    private static boolean isSiegeEnemy(net.minecraft.entity.EntityLivingBase e) {
+        if (e == null || !e.isEntityAlive()) return false;
+        if (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) {
+            return "empire".equalsIgnoreCase(((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).getTeam_());
+        }
+        if (e instanceof studio.ERM.war.vehicle.EntityAIPilot) {
+            try { return "empire".equalsIgnoreCase(((studio.ERM.war.vehicle.EntityAIPilot) e).getMcmTeam()); }
+            catch (Throwable ignored) { return false; }
+        }
+        return e instanceof studio.ERM.war.air.EntityGhostAircraft;
     }
 }
