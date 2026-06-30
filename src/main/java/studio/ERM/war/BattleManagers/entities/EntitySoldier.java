@@ -74,6 +74,14 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     // don't mow down their own infantry. Player-caused explosives are unaffected.
     private boolean explosionShield = false;
 
+    // ── DIRECTOR CONTROL ──
+    // When the SiegeDirector sets a march objective this soldier is a DIRECTED siege unit: it walks to its
+    // objective and only engages an enemy that is right on top of it -- it does NOT free-hunt the player
+    // across the map like a vanilla mob (the "everyone just chases me like a dumb minecraft mob" complaint).
+    // The director refreshes this each tick; clearing it returns the soldier to normal autonomous behaviour.
+    private net.minecraft.util.math.BlockPos marchObjective = null;
+    private static final double DIRECTOR_ENGAGE_SQ = 36.0; // only fight a player within 6 blocks while marching
+
     public EntitySoldier(World worldIn) {
         super(worldIn);
         this.setSize(0.6F, 1.8F);
@@ -237,10 +245,52 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         } else {
             idleTicks = 0;
         }
+
+        // DIRECTOR MARCH: walk to the assigned objective unless we're in an adjacent fight. This is what
+        // makes a released siege soldier SEEK ITS OBJECTIVE (room-to-room) instead of standing around or
+        // chasing the player -- the director directs it.
+        if (marchObjective != null) {
+            EntityLivingBase mtgt = getAttackTarget();
+            boolean adjacentFight = mtgt != null && !mtgt.isDead && this.getDistanceSq(mtgt) < 9.0;
+            if (!adjacentFight) {
+                double dObj = this.getDistanceSq(marchObjective.getX() + 0.5, marchObjective.getY(),
+                        marchObjective.getZ() + 0.5);
+                if (dObj > 6.25 && (this.getNavigator().noPath() || this.ticksExisted % 15 == 0)) {
+                    this.getNavigator().tryMoveToXYZ(marchObjective.getX() + 0.5, marchObjective.getY(),
+                            marchObjective.getZ() + 0.5, 1.1D);
+                }
+            }
+        }
     }
 
     public void setExplosionShield(boolean shielded) {
         this.explosionShield = shielded;
+    }
+
+    /** Director order: march to this objective and stop free-hunting the player (see {@link #marchObjective}). */
+    public void setMarchObjective(net.minecraft.util.math.BlockPos pos) {
+        this.marchObjective = pos;
+        // CLEAR an existing distant-player target. setAttackTarget's guard only blocks ACQUIRING a new
+        // distant player; a soldier that locked onto the player BEFORE being ordered would otherwise keep
+        // chasing forever (the "everyone just chases me like a dumb mob" bug). Break it off so it marches.
+        if (pos != null) {
+            EntityLivingBase cur = getAttackTarget();
+            if (cur instanceof EntityPlayer && this.getDistanceSq(cur) > DIRECTOR_ENGAGE_SQ) {
+                super.setAttackTarget(null);
+                this.getNavigator().clearPath();
+            }
+        }
+    }
+
+    @Override
+    public void setAttackTarget(EntityLivingBase target) {
+        // DIRECTOR CONTROL: a marching siege soldier does not break off to chase a distant player -- the
+        // director sends it to an objective; it only engages a player that is right on top of it.
+        if (marchObjective != null && target instanceof EntityPlayer
+                && this.getDistanceSq(target) > DIRECTOR_ENGAGE_SQ) {
+            return;
+        }
+        super.setAttackTarget(target);
     }
 
     @Override

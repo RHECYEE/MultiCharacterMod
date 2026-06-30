@@ -59,6 +59,9 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
     private String vehicleToSummon = "";
     private boolean hasSpawnedVehicle = false;
     private boolean crewSpawned = false;
+    // One-shot guard so the "you destroyed the enemy vehicle / killed a soldier" feedback (incl. via a
+    // player-called airstrike) is sent exactly once when this pilot/vehicle dies.
+    private boolean killReported = false;
     public boolean isPassenger = false;
 
     // Director-set staging point: a rallied vehicle drives HERE and holds, instead of charging the player.
@@ -602,7 +605,8 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         if (this.getHealth() <= 0.0F) {
             this.isDying = true;
 
-            if (!this.world.isRemote && source.getTrueSource() instanceof EntityPlayer) {
+            if (!this.world.isRemote && !killReported && source.getTrueSource() instanceof EntityPlayer) {
+                killReported = true;
                 EntityPlayer player = (EntityPlayer) source.getTrueSource();
                 String veh = (this.vehicleToSummon != null) ? this.vehicleToSummon.trim() : "";
                 boolean inVehicle = this.isRiding() && this.getRidingEntity() instanceof EntitySeat
@@ -612,9 +616,10 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                 } else {
                     player.sendMessage(new TextComponentString(TextFormatting.RED + "You killed an enemy soldier"));
                 }
-            } else if (!this.world.isRemote
+            } else if (!this.world.isRemote && !killReported
                     && source.getTrueSource() instanceof studio.ERM.war.air.EntityGhostAircraft
                     && "PLAYER".equalsIgnoreCase(((studio.ERM.war.air.EntityGhostAircraft) source.getTrueSource()).getMcmTeam())) {
+                killReported = true;
                 // The player's AIRSTRIKE (designator-called friendly aircraft) destroyed this vehicle --
                 // give them the kill feedback too, not just direct hits ("the message should still play").
                 EntityPlayer p = this.world.getClosestPlayerToEntity(this, 160.0D);

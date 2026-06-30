@@ -140,6 +140,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // chunk facing the army -- "conduct a siege against the base", not "attack where the player stood".
     private java.util.List<StrategicChunk> baseCluster = null;
     private StrategicChunk baseCore = null;
+    // Base-type detection (SURFACE/UNDERGROUND/SKY/OCEAN + real approach ground level + doctrine hints),
+    // computed ONCE at siege start so the director attacks the base as the right KIND of problem.
+    private studio.ERM.war.strategy.BaseAnalyzer.BaseAnalysis baseAnalysis = null;
 
     // Temporary siege-camp ground/decor. Every block the camp build changes is recorded here with
     // its ORIGINAL state, exactly like the repair system stores claimed chunks, so the whole camp
@@ -226,6 +229,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
             EpochRunnerMod.logger.info("[Siege] target = " + site + " via " + tr.reason
                     + " (protectedBlocks=" + tr.protectedBlocks.size()
                     + ", hottest=" + (tr.hottest != null ? (int) tr.hottest.totalHeat() : 0) + ")");
+            // BASE-TYPE DETECTION: classify the base (surface/underground/sky/ocean) + the REAL approach
+            // ground level so the breach + doctrine target the actual base, not roofs/trees/the trigger spot.
+            try {
+                this.baseAnalysis = studio.ERM.war.strategy.BaseAnalyzer.analyze(world, site, tr.protectedBlocks);
+                EpochRunnerMod.logger.info("[Siege] base analysis: " + baseAnalysis);
+            } catch (Throwable bt) { EpochRunnerMod.logger.warn("[Siege] base analysis failed: " + bt); }
         } catch (Throwable t) {
             EpochRunnerMod.logger.warn("[Siege] targeting failed: " + t);
         }
@@ -328,6 +337,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int s6 = surfaceY(world, o6.getX(), o6.getZ());
         int s9 = surfaceY(world, o9.getX(), o9.getZ());
         int gOut = Math.max(Math.min(s3, s6), Math.min(Math.max(s3, s6), s9)); // median of the 3 samples
+        // Prefer the BaseAnalyzer's detected approach ground on the army's side (vegetation-skipping +
+        // ring-bucketed = the deliberate "real ground" measure that fixes roof/tree/tower false positives),
+        // but only when it broadly agrees with the local median (sanity clamp, so a bad analysis can't throw
+        // the breach off).
+        if (baseAnalysis != null) {
+            int approach = baseAnalysis.approachYToward(routeStart != null ? routeStart : wallPos);
+            if (Math.abs(approach - gOut) <= 6) gOut = approach;
+        }
         breachCorridor = new BlockPos(wallPos.getX(), gOut, wallPos.getZ());
         EpochRunnerMod.logger.info("[Siege] breach corridor = " + breachCorridor + " (near core "
                 + site.getX() + "," + site.getZ() + "; route starts at staging " + routeStart.getX()
@@ -837,10 +854,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
             int z = (int) Math.round(node.z + pz * w);
             try {
                 BlockPos floor = new BlockPos(x, node.gradeY - 1, z);
+                // Over water the grade sits AT the water surface, so a deck at gradeY-1 is 1 block UNDER
+                // water and floods (the "bridge covered itself with water" bug). Detect water and RAISE the
+                // deck one block: lay cobblestone at gradeY too, and walk/clear from gradeY+1 up -- so the
+                // causeway sits ABOVE the waterline. On land it behaves as before (floor gradeY-1, walk gradeY).
+                boolean overWater = world.getBlockState(floor).getMaterial().isLiquid()
+                        || world.getBlockState(new BlockPos(x, node.gradeY, z)).getMaterial().isLiquid();
                 if (world.isAirBlock(floor) || world.getBlockState(floor).getMaterial().isLiquid()) {
                     setCampBlock(world, floor, Blocks.COBBLESTONE.getDefaultState());
                 }
-                for (int y = node.gradeY; y <= node.gradeY + hh; y++) {
+                int deck = node.gradeY;
+                if (overWater) {
+                    setCampBlock(world, new BlockPos(x, node.gradeY, z), Blocks.COBBLESTONE.getDefaultState());
+                    deck = node.gradeY + 1; // walkway one block above the waterline
+                }
+                for (int y = deck; y <= deck + hh; y++) {
                     BlockPos hp = new BlockPos(x, y, z);
                     Material m = world.getBlockState(hp).getMaterial();
                     if (m.isLiquid()) setCampBlock(world, hp, Blocks.AIR.getDefaultState());
@@ -955,23 +983,21 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 continue;
             }
 
-            BlockPos wp = workPos(world, t);
-            double d = eng.getDistance(wp.getX(), wp.getY(), wp.getZ());
-            // If a crew can't PATH to the work in time (e.g. a moat it refuses to wade), build it
-            // remotely anyway so the obstacle is still cleared -- the engineering must not just stall.
-            boolean stuck = (tickAge - crew.reservedAtTick) > 120;
-            if (d > ARRIVE_DIST && !stuck) { eng.setMoveTarget(wp, 0.07 + warLevel * 0.004); continue; }
-
+            // Engineers MUSTER on the DRY army side of the breach and build their task REMOTELY. The director
+            // places the route blocks regardless of the crew's exact stance, so the crew never needs to wade
+            // out to each obstacle -- that caused the "build the bridge up to the moat, then stop and swim it"
+            // weirdness. Keep them clustered just outside the breach foot.
+            BlockPos muster = outsidePoint(world, breachCorridor, 6.0);
+            if (eng.getDistance(muster.getX(), muster.getY(), muster.getZ()) > ARRIVE_DIST) {
+                eng.setMoveTarget(muster, 0.07 + warLevel * 0.004);
+            }
             if (!crew.arrived) {
                 crew.arrived = true;
-                EpochRunnerMod.logger.info("[EngDebug] crew#" + crew.id
-                        + (d > ARRIVE_DIST ? " STUCK pathing (d=" + (int) d + ") -> building remotely"
-                                           : " ARRIVED (d=" + (int) d + ")")
-                        + " -> executing " + toolLabel(t.work) + " on " + t.obstacle);
+                EpochRunnerMod.logger.info("[EngDebug] crew#" + crew.id + " mustered at breach foot -> building "
+                        + toolLabel(t.work) + " on " + t.obstacle + " remotely");
             }
-
             crew.workTicks++;
-            doTaskWork(world, crew, t); // one unit of visible work
+            doTaskWork(world, crew, t); // one unit of visible work (placed along the route, not at the crew)
         }
 
         boolean allDone = true;
@@ -1109,13 +1135,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // already well inside, not milling at the breach.
         setupInteriorObjectives(world);
 
-        for (EntityFormationCarrier c : carriers) {
-            if (c == null || c.isDead || c.isEngineerMode()) continue;
-            // Release at the breach (reachable); interiorObjective is the movement goal that flows them up
-            // the dug staircases into the base instead of milling at the mouth.
-            c.setBattleContext(activator, breachCorridor);
-            c.setMoveTarget(breachCorridor, 0.06 + warLevel * 0.004);
-        }
+        // The director DRIVES each formation (carrier + its puppet squad) through the breach to its assigned
+        // objective, and keeps any released soldiers marching to objectives. Don't dump them at the breach.
+        driveFormationsToObjectives(world);
+        driveSoldiersToObjectives(world);
 
         spawnCavalryCharge(world);
 
@@ -1199,13 +1222,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // they exist (in case the surge was cut short), but DON'T re-scan -- that would reset capture progress.
         setupInteriorObjectives(world);
 
-        // Top up the storming force and make sure everyone is seeking an objective.
+        // Top up the storming force and make sure every formation + soldier is directed at an objective.
         int forced = 0;
         for (EntityFormationCarrier c : carriers) {
             if (c == null || c.isDead || c.isEngineerMode()) continue;
             forced += c.releaseContactSlice(3);
         }
-        driveSoldiersToObjectives(world, true);
+        driveFormationsToObjectives(world);
+        driveSoldiersToObjectives(world);
         publishAssaultDebug(world);
         EpochRunnerMod.logger.info("[Siege] INTERIOR ASSAULT: " + heatspots.size() + " objectives, depot @ "
                 + (lootDepot != null ? xyz(lootDepot) : "?") + "; committed " + forced + " more troops");
@@ -1368,9 +1392,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
      *  actually REACHES it (or a staggered timeout fires, so a spot a squad can't path to still resolves). */
     private void tickLooting(World world, int tsp) {
         if (heatspots.isEmpty()) return;
-        // Move the actual released SOLDIERS (the visible troops), not the spent carriers, so the assault
-        // force SEEKS AND CAPTURES instead of milling at the breach.
-        driveSoldiersToObjectives(world, true);
+        // THE DIRECTOR DIRECTS: keep driving each formation (carrier + puppet squad) to its objective, and
+        // keep the released soldiers marching to objectives -- not chasing the player.
+        driveFormationsToObjectives(world);
+        driveSoldiersToObjectives(world);
         // Refresh the debug overlay every 5s so captured/uncaptured states update live.
         if (tickAge % 100 == 0) publishAssaultDebug(world);
 
@@ -1402,38 +1427,46 @@ public class SiegeDirector implements IPhasedBattleDirector {
     }
 
     /**
-     * Drive the actual released EntitySoldiers (the VISIBLE troops) to their objectives so the assault
-     * force SEEKS AND CAPTURES instead of standing at the breach. Each soldier is HOMED on its goal --
-     * EntityAIMoveTowardsRestriction then walks it there room-to-room -- and idle soldiers also get a
-     * direct march order so they actually cross the breach and climb the engineer stairs. Their combat
-     * AI is left intact, so they still fight anything they meet on the way in.
-     *
-     * @param assault true during the interior assault (each soldier seeks the nearest UNCAPTURED heatspot);
-     *                false during the surge (everyone flows to the single interior objective / breach).
+     * THE DIRECTOR DIRECTS. Assign each surviving combat FORMATION (carrier + its puppet squad) to an
+     * interior objective and DRIVE IT there -- squads advancing as units toward the green markers, not
+     * soldiers reverting to vanilla "chase the player" mob AI. The carrier's release point is set to its
+     * objective so its contact slice commits AT the objective. Round-robins the formations across the
+     * uncaptured objectives so they fan out across the base instead of all stacking on one spot.
      */
-    private void driveSoldiersToObjectives(World world, boolean assault) {
-        if (site == null) return;
-        double R = 140.0;
+    private void driveFormationsToObjectives(World world) {
+        if (heatspots.isEmpty()) return;
+        java.util.List<BlockPos> targets = new ArrayList<>();
+        for (BlockPos h : heatspots) if (!capturedSpots.contains(h)) targets.add(h);
+        if (targets.isEmpty()) targets.add((lootDepot != null) ? lootDepot : breachCorridor);
+        int i = 0;
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead || c.isEngineerMode()) continue;
+            BlockPos obj = targets.get(i % targets.size());
+            i++;
+            c.setBattleContext(activator, obj); // commit the contact slice AT the objective, not the breach
+            if (c.getDistance(obj.getX(), obj.getY(), obj.getZ()) > 4.0) {
+                c.setMoveTarget(obj, 0.08 + warLevel * 0.004);
+            }
+        }
+    }
+
+    /**
+     * Keep the already-released EntitySoldiers (contact-slice fighters + cavalry) under DIRECTOR CONTROL:
+     * give each a march objective (the nearest uncaptured one) so it walks there and only engages an
+     * adjacent enemy, instead of reverting to vanilla "chase the player" mob AI. See
+     * {@link EntitySoldier#setMarchObjective}.
+     */
+    private void driveSoldiersToObjectives(World world) {
+        if (site == null || heatspots.isEmpty()) return;
+        double R = 160.0;
         net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
                 site.getX() - R, 0, site.getZ() - R, site.getX() + R, 255, site.getZ() + R);
         for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
             if (s == null || s.isDead) continue;
             try { if (!"empire".equalsIgnoreCase(s.getTeam_())) continue; } catch (Throwable ignored) { continue; }
-            BlockPos goal;
-            if (assault) {
-                goal = nearestUncaptured(s.getPosition());
-                if (goal == null) goal = (lootDepot != null) ? lootDepot : interiorObjective;
-            } else {
-                goal = (interiorObjective != null) ? interiorObjective : breachCorridor;
-            }
-            if (goal == null) continue;
-            try { s.setHomePosAndDistance(goal, 3); } catch (Throwable ignored) {}
-            // Re-path only periodically -- the home restriction drives the continuous seek; issuing a
-            // fresh tryMoveToXYZ every tick would thrash the navigator and make the troops jitter in place.
-            if (tickAge % 10 == 0 && s.getAttackTarget() == null && s.getDistanceSq(goal) > 16.0) {
-                try { s.getNavigator().tryMoveToXYZ(goal.getX() + 0.5, goal.getY(), goal.getZ() + 0.5, 1.15D); }
-                catch (Throwable ignored) {}
-            }
+            BlockPos goal = nearestUncaptured(s.getPosition());
+            if (goal == null) goal = (lootDepot != null) ? lootDepot : breachCorridor;
+            s.setMarchObjective(goal);
         }
     }
 
@@ -1598,12 +1631,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 break;
 
             case P_SURGE:
-                // INVASION: funnel the army THROUGH the breach the engineers opened and up the ramp
-                // into the base, instead of milling at the wall. This is the assault going in.
-                advanceThroughBreach(world, 0.06 + warLevel * 0.004);
-                // Flow the already-released soldiers INTO the base toward the SPREAD of objectives, so they
-                // start getting inside DURING the surge instead of piling up at the breach mouth.
-                if (tickAge % 5 == 0) driveSoldiersToObjectives(world, true);
+                // THE DIRECTOR DIRECTS: drive each formation (carrier + puppet squad) through the breach to
+                // its assigned objective, and keep the released soldiers MARCHING to objectives (not chasing
+                // the player). Squads advance as units; by the assault they are well inside.
+                if (tickAge % 5 == 0) { driveFormationsToObjectives(world); driveSoldiersToObjectives(world); }
                 if (tsp >= PHASE_SURGE_TICKS || waveDefeated(tsp)) beginInteriorAssault(world);
                 break;
 
@@ -1702,6 +1733,23 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 s.lastY = (int) Math.floor(s.block.posY);
                 s.lastZ = (int) Math.floor(s.block.posZ);
             }
+            // MEME: a DIRECT cobblestone hit on the player -> massive knockback + ~8 hearts.
+            if (alive && activator != null && !activator.isDead) {
+                double ddx = s.block.posX - activator.posX;
+                double ddy = s.block.posY - (activator.posY + 1.0);
+                double ddz = s.block.posZ - activator.posZ;
+                if (ddx * ddx + ddy * ddy + ddz * ddz < 2.6 * 2.6) {
+                    activator.attackEntityFrom(net.minecraft.util.DamageSource.FALLING_BLOCK, 16.0F);
+                    double kx = activator.posX - s.block.posX, kz = activator.posZ - s.block.posZ;
+                    double klen = Math.max(0.001, Math.sqrt(kx * kx + kz * kz));
+                    activator.addVelocity((kx / klen) * 2.4, 1.2, (kz / klen) * 2.4);
+                    activator.velocityChanged = true;
+                    explosionEffect(world, new BlockPos((int) activator.posX, (int) activator.posY, (int) activator.posZ));
+                    s.block.setDead();
+                    it.remove();
+                    continue;
+                }
+            }
             boolean landed = !alive && s.lastY != Integer.MIN_VALUE;
             if (landed || tickAge >= s.impactTick) {
                 if (landed) { // remove the cobblestone the falling block left where it came to rest
@@ -1730,10 +1778,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
                         ? new BlockPos(s.lastX, s.lastY, s.lastZ)
                         : new BlockPos(s.target.getX(), surfaceY(world, s.target.getX(), s.target.getZ()), s.target.getZ());
                 explosionEffect(world, impact);
-                try {
-                    world.newExplosion(null, impact.getX() + 0.5, impact.getY() + 0.5, impact.getZ() + 0.5,
-                            3.8F, false, true);
-                } catch (Throwable ignored) {}
+                // FULL-TNT destruction but BLOCK-ONLY (no entity damage) so the catapult never friendly-fires
+                // the siege's own troops/tanks/aircraft -- the old world.newExplosion(null,...) caught every
+                // nearby entity (null source = the FF handler couldn't cancel it). breachWall is the antigrief
+                // damageBlock sphere: claimed land -> repairable scaffold, rival/neutral -> cleared to air.
+                // Radius 3 ~= a strong TNT crater.
+                breachWall(world, impact, 3);
                 if (alive) s.block.setDead();
                 it.remove();
             }
@@ -2131,13 +2181,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
             } catch (Throwable ignored) {}
         }
         if (waterRing < samples / 2) return; // not a water base; the jeeps are fine
-        int boats = (warLevel >= 6) ? 4 : 2;
+        int boats = Math.min(8, 3 + warLevel / 2); // a real flotilla for a water base (was only 2-4)
         int placed = 0;
         for (int i = 0; i < boats; i++) {
             double ang = (Math.PI * 2 * i) / boats;
-            int x = site.getX() + (int) Math.round(Math.cos(ang) * 40);
-            int z = site.getZ() + (int) Math.round(Math.sin(ang) * 40);
-            BlockPos water = findWaterSurface(world, x, z);
+            BlockPos water = null;
+            // Search OUTWARD from the base for genuinely deep open sea -- spawning at the inner ring landed
+            // the boats in the shallow moat where they beached. Push them out to water >=2 deep.
+            for (int rad = 44; rad <= 76 && water == null; rad += 8) {
+                int x = site.getX() + (int) Math.round(Math.cos(ang) * rad);
+                int z = site.getZ() + (int) Math.round(Math.sin(ang) * rad);
+                water = findWaterSurface(world, x, z);
+            }
             if (water == null) continue;
             EntityAIPilot boat = spawnBoatAt(world, water, "s100");
             if (boat != null) { boat.setRallyPoint(water); placed++; }
@@ -2146,11 +2201,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 + " -> spawned " + placed + " S100 boat(s)");
     }
 
-    /** The water surface block in a column, or null if the column isn't open water. */
+    /** A point of OPEN water at least 3 blocks deep (so a boat floats and doesn't beach in the shallow moat). */
     private BlockPos findWaterSurface(World world, int x, int z) {
         try {
-            BlockPos top = world.getTopSolidOrLiquidBlock(new BlockPos(x, 64, z));
-            if (world.getBlockState(top).getMaterial() == Material.WATER) return top;
+            // getTopSolidOrLiquidBlock returns the AIR block ABOVE the surface, so the water SURFACE is
+            // top.down(). The old code checked `top` for WATER (it's air) and so ALWAYS returned null --
+            // which is why no S100s ever spawned. Check the surface column for >=3 deep open water.
+            BlockPos surface = world.getTopSolidOrLiquidBlock(new BlockPos(x, 64, z)).down();
+            if (world.getBlockState(surface).getMaterial() == Material.WATER
+                    && world.getBlockState(surface.down()).getMaterial() == Material.WATER
+                    && world.getBlockState(surface.down(2)).getMaterial() == Material.WATER) {
+                return surface; // the water surface block, floatable
+            }
         } catch (Throwable ignored) {}
         return null;
     }
@@ -2240,10 +2302,16 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * form up out on open ocean. Scans 16 bearings and scores each by how much of its camp zone is dry.
      */
     private double pickLandwardBearing(World world) {
-        double best = world.rand.nextDouble() * Math.PI * 2;
-        int bestLand = -1;
+        // Score all 16 bearings by how much of their staging zone is dry land, then pick RANDOMLY among
+        // the ones that are "land enough" (>= 70% of the best), plus a small jitter. This gives the siege
+        // a different staging side each time (variety) instead of deterministically the single best one,
+        // which made the platform always start in the same spot.
+        double[] angles = new double[16];
+        int[] lands = new int[16];
+        int bestLand = 0;
         for (int i = 0; i < 16; i++) {
             double ang = i * (Math.PI * 2.0 / 16.0);
+            angles[i] = ang;
             double cx = Math.cos(ang), cz = Math.sin(ang);
             double lx = -Math.sin(ang), lz = Math.cos(ang);
             int land = 0;
@@ -2257,9 +2325,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
                     } catch (Throwable ignored) {}
                 }
             }
-            if (land > bestLand) { bestLand = land; best = ang; }
+            lands[i] = land;
+            if (land > bestLand) bestLand = land;
         }
-        return best;
+        java.util.List<Double> ok = new ArrayList<>();
+        int threshold = (int) Math.ceil(bestLand * 0.7);
+        for (int i = 0; i < 16; i++) if (lands[i] >= threshold) ok.add(angles[i]);
+        if (ok.isEmpty()) return world.rand.nextDouble() * Math.PI * 2; // all water -> stage anywhere
+        double chosen = ok.get(world.rand.nextInt(ok.size()));
+        return chosen + (world.rand.nextDouble() - 0.5) * (Math.PI / 16.0); // jitter off the cardinal angle
     }
 
     /**
@@ -2352,6 +2426,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * a slab floating over the sea. Fill depth is bounded so deep ocean doesn't explode the edit count.
      */
     private void padColumn(World world, int x, int z) {
+        // FIRST strip any trees/vegetation in the camp footprint so the army doesn't deploy buried in a
+        // thick jungle (the "platform didn't clear land" report). Runs even on high ground (where the fill
+        // below early-returns), so a jungle hilltop camp still gets its canopy + trunks removed.
+        clearVegetationColumn(world, x, z);
         int orig = surfaceY(world, x, z); // top of water/terrain (getTopSolidOrLiquidBlock)
         if (orig > padY) return;          // already at/above pad level -> leave it
         // Fill from the pad floor DOWN to the actual SOLID seabed, not just one slab over the water,
@@ -2364,6 +2442,27 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
         BlockPos above = new BlockPos(x, padY, z);
         if (!world.isAirBlock(above)) setCampBlock(world, above, Blocks.AIR.getDefaultState());
+    }
+
+    /** Strip trees + ground vegetation (logs, leaves, plants, vines, cactus, pumpkins, snow) in a camp
+     *  column from the pad floor up ~14 blocks, so the staging area is clear ground, not jungle. Routed
+     *  through setCampBlock so it's recorded and reverts when the siege ends. */
+    private void clearVegetationColumn(World world, int x, int z) {
+        int top = surfaceY(world, x, z);
+        int hi = Math.max(padY + 14, top + 14);
+        for (int y = hi; y >= padY; y--) {
+            BlockPos p = new BlockPos(x, y, z);
+            try {
+                if (world.isAirBlock(p)) continue;
+                IBlockState st = world.getBlockState(p);
+                net.minecraft.block.material.Material m = st.getMaterial();
+                net.minecraft.block.Block b = st.getBlock();
+                boolean veg = m == Material.LEAVES || m == Material.PLANTS || m == Material.VINE
+                        || m == Material.CACTUS || m == Material.GOURD || m == Material.SNOW
+                        || b == Blocks.LOG || b == Blocks.LOG2;
+                if (veg) setCampBlock(world, p, Blocks.AIR.getDefaultState());
+            } catch (Throwable ignored) {}
+        }
     }
 
     /** Top SOLID block in a column (skipping water/air) so the pad fills down to real ground. */
