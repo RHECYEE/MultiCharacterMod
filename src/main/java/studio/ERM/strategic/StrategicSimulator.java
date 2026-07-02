@@ -124,7 +124,8 @@ public final class StrategicSimulator {
         if (dirty) data.markDirty();
     }
 
-    /** Build + send the strategic snapshot to every player in this world (the map traffic overlay). */
+    /** Build + send the strategic snapshot to every player in this world: traffic objects, LIVE unit
+     *  dots (friendly = the player's AW2 army; red = the besiegers), and the siege-camp alert. */
     private static void syncToPlayers(WorldServer world, StrategicMapData data) {
         java.util.List<studio.ERM.war.map.net.S2CStrategicSync.Data> snap = new ArrayList<>();
         for (StrategicObject o : data.objects.values()) {
@@ -137,13 +138,64 @@ public final class StrategicSimulator {
             d.strength = o.strength;
             snap.add(d);
         }
+
+        // LIVE UNIT DOTS around each player (capped; later narrowed to KNOWN/SEEN enemies).
+        java.util.List<Integer> fd = new ArrayList<>(), ed = new ArrayList<>();
+        java.util.Set<Integer> seen = new java.util.HashSet<>();
+        for (EntityPlayer p : world.playerEntities) {
+            if (p == null || p.isDead) continue;
+            net.minecraft.util.math.AxisAlignedBB box = p.getEntityBoundingBox().grow(220, 128, 220);
+            for (net.minecraft.entity.EntityLivingBase e
+                    : world.getEntitiesWithinAABB(net.minecraft.entity.EntityLivingBase.class, box)) {
+                if (e == null || e.isDead || e instanceof EntityPlayer) continue;
+                if (!seen.add(e.getEntityId())) continue;
+                if (fd.size() + ed.size() >= 700) break;
+                if (studio.ERM.strategic.defense.Aw2Npc.isPlayerOwnedCombat(e)) {
+                    fd.add((int) e.posX); fd.add((int) e.posZ);
+                } else if (isSiegeHostile(e)) {
+                    ed.add((int) e.posX); ed.add((int) e.posZ);
+                }
+            }
+        }
+
+        // SIEGE ALERT: the active battle's site ("enemy camp gathering here").
+        boolean siege = false; int sx = 0, sz = 0;
+        try {
+            studio.ERM.war.BattleManagers.core.BattleEngine engine =
+                    studio.ERM.war.BattleManagers.core.BattleEngine.get(world);
+            net.minecraft.util.math.BlockPos site = (engine != null) ? engine.getActiveSite() : null;
+            if (site != null) { siege = true; sx = site.getX(); sz = site.getZ(); }
+        } catch (Throwable ignored) {}
+
+        studio.ERM.war.map.net.S2CStrategicSync pkt = new studio.ERM.war.map.net.S2CStrategicSync(
+                snap, toIntArray(fd), toIntArray(ed), siege, sx, sz);
         for (EntityPlayer p : world.playerEntities) {
             if (p instanceof net.minecraft.entity.player.EntityPlayerMP) {
-                studio.ERM.war.map.net.TacticalWarMapNetwork.sendTo(
-                        new studio.ERM.war.map.net.S2CStrategicSync(snap),
+                studio.ERM.war.map.net.TacticalWarMapNetwork.sendTo(pkt,
                         (net.minecraft.entity.player.EntityPlayerMP) p);
             }
         }
+    }
+
+    /** A besieging-army unit for the red map dots: empire-team soldiers/pilots + hostile faction npcs. */
+    private static boolean isSiegeHostile(net.minecraft.entity.EntityLivingBase e) {
+        if (e instanceof EntitySoldier) {
+            try { return "empire".equalsIgnoreCase(((EntitySoldier) e).getTeam_()); } catch (Throwable t) { return false; }
+        }
+        if (e instanceof studio.ERM.war.vehicle.EntityAIPilot) {
+            try { return "empire".equalsIgnoreCase(((studio.ERM.war.vehicle.EntityAIPilot) e).getMcmTeam()); }
+            catch (Throwable t) { return false; }
+        }
+        if (e instanceof studio.ERM.war.air.EntityGhostAircraft) return true;
+        // Hostile AW2 faction npcs (the empire faction is the invader in this pack).
+        String fac = studio.ERM.strategic.defense.Aw2Npc.faction(e);
+        return !fac.isEmpty();
+    }
+
+    private static int[] toIntArray(java.util.List<Integer> list) {
+        int[] a = new int[list.size()];
+        for (int i = 0; i < a.length; i++) a[i] = list.get(i);
+        return a;
     }
 
     /**

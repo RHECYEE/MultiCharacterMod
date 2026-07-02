@@ -149,13 +149,13 @@ public final class DefensePlanExecutor {
         // Fresh order book each pass (debug-locked probes excepted): dead/ungathered npcs drop off.
         clearUnlocked();
 
-        // Build the slot list in PRIORITY ORDER: strongpoints first, then the ACTIVE lines, so an
-        // under-staffed plan fills what matters most. Lines are staffed in PEACETIME too (a standing
-        // garrison on the wall reads right and makes the plan visibly testable without a siege);
-        // the FALL BACK toggle picks which line family is active.
+        // Build the slot list in PRIORITY ORDER with each marker contributing exactly its player-set
+        // ASSIGNED count: strongpoints (clustered around the point), then the ACTIVE line family (spread
+        // evenly along the polyline; the FALL BACK toggle picks primary vs fallback). Lines staff in
+        // peacetime too (standing garrison).
         List<BlockPos> slots = new ArrayList<>();
         for (DefenseMarker m : plan.markers) {
-            if (m.type == DefenseMarker.STRONGPOINT && !m.points.isEmpty()) slots.add(m.points.get(0));
+            if (m.type == DefenseMarker.STRONGPOINT && !m.points.isEmpty()) addPointSlots(m, slots);
         }
         int lineType = plan.fallbackActive ? DefenseMarker.FALLBACK_LINE : DefenseMarker.LINE;
         for (DefenseMarker m : plan.markers) {
@@ -177,25 +177,31 @@ public final class DefensePlanExecutor {
             driveTo(world, best, slot, plan);
         }
 
-        // LEFTOVERS: reserves wait at the reserve areas during a siege; in peacetime they walk patrols.
-        if (!pool.isEmpty()) {
-            if (siege) {
-                List<BlockPos> reserves = pointsOf(plan, DefenseMarker.RESERVE);
-                if (reserves.isEmpty()) reserves = pointsOf(plan, DefenseMarker.RALLY);
-                if (!reserves.isEmpty()) {
-                    int i = 0;
-                    for (EntityCreature d : pool) driveTo(world, d, reserves.get(i++ % reserves.size()), plan);
-                }
-            } else {
-                List<DefenseMarker> patrols = new ArrayList<>();
-                for (DefenseMarker m : plan.markers) {
-                    if (m.type == DefenseMarker.PATROL_ROUTE && m.points.size() >= 2) patrols.add(m);
-                }
-                int i = 0;
+        // PATROLS: dedicated crews of exactly the assigned size (no longer just leftovers), each walking
+        // its own circuit. Nearest defenders are drafted per route.
+        for (DefenseMarker m : plan.markers) {
+            if (m.type != DefenseMarker.PATROL_ROUTE || m.points.size() < 2) continue;
+            for (int k = 0; k < m.assigned && !pool.isEmpty(); k++) {
+                BlockPos anchor = m.points.get(0);
+                EntityCreature best = null;
+                double bd = Double.MAX_VALUE;
                 for (EntityCreature d : pool) {
-                    if (patrols.isEmpty()) break;
-                    tickPatrol(world, d, patrols.get(i++ % patrols.size()), plan);
+                    double dd = d.getDistanceSq(anchor.getX() + 0.5, d.posY, anchor.getZ() + 0.5);
+                    if (dd < bd) { bd = dd; best = d; }
                 }
+                pool.remove(best);
+                tickPatrol(world, best, m, plan);
+            }
+        }
+
+        // LEFTOVERS: during a siege they wait at RESERVE (else RALLY) areas; in peacetime they are left
+        // to their normal AW2 lives (no standing order) -- the plan only commands what it was given.
+        if (!pool.isEmpty() && siege) {
+            List<BlockPos> reserves = pointsOf(plan, DefenseMarker.RESERVE);
+            if (reserves.isEmpty()) reserves = pointsOf(plan, DefenseMarker.RALLY);
+            if (!reserves.isEmpty()) {
+                int i = 0;
+                for (EntityCreature d : pool) driveTo(world, d, reserves.get(i++ % reserves.size()), plan);
             }
         }
 
@@ -276,19 +282,79 @@ public final class DefensePlanExecutor {
         return out;
     }
 
-    /** Spread infantry slots along a polyline every ~{@link #LINE_SPACING} blocks. */
+    /** Spread exactly the marker's ASSIGNED count of slots evenly along the whole polyline. */
     private static void addLineSlots(DefenseMarker m, List<BlockPos> slots) {
+        if (m.points.size() < 2) return;
+        // Total polyline length, then place `assigned` slots at even fractions along it.
+        double total = 0;
+        double[] seg = new double[m.points.size() - 1];
         for (int i = 0; i + 1 < m.points.size(); i++) {
             BlockPos a = m.points.get(i), b = m.points.get(i + 1);
-            double dx = b.getX() - a.getX(), dz = b.getZ() - a.getZ();
-            double len = Math.sqrt(dx * dx + dz * dz);
-            int n = Math.max(1, (int) (len / LINE_SPACING));
-            for (int s = 0; s <= n; s++) {
-                double f = (double) s / n;
-                slots.add(new BlockPos((int) Math.round(a.getX() + dx * f), 0,
-                        (int) Math.round(a.getZ() + dz * f)));
+            seg[i] = Math.hypot(b.getX() - a.getX(), b.getZ() - a.getZ());
+            total += seg[i];
+        }
+        if (total < 1) { slots.add(m.points.get(0)); return; }
+        int n = Math.max(1, Math.min(255, m.assigned));
+        for (int s = 0; s < n; s++) {
+            double f = (n == 1) ? 0.5 : (double) s / (n - 1);
+            double target = f * total, walked = 0;
+            for (int i = 0; i < seg.length; i++) {
+                if (walked + seg[i] >= target || i == seg.length - 1) {
+                    double lf = seg[i] <= 0 ? 0 : (target - walked) / seg[i];
+                    BlockPos a = m.points.get(i), b = m.points.get(i + 1);
+                    slots.add(new BlockPos(
+                            (int) Math.round(a.getX() + (b.getX() - a.getX()) * lf), 0,
+                            (int) Math.round(a.getZ() + (b.getZ() - a.getZ()) * lf)));
+                    break;
+                }
+                walked += seg[i];
             }
         }
+    }
+
+    /** The marker's ASSIGNED count of slots clustered around a point marker (centre + expanding ring). */
+    private static void addPointSlots(DefenseMarker m, List<BlockPos> slots) {
+        BlockPos c = m.points.get(0);
+        int n = Math.max(1, Math.min(255, m.assigned));
+        slots.add(c);
+        for (int k = 1; k < n; k++) {
+            double a = k * 2.399963; // golden-angle spiral: even cluster, no overlaps
+            double r = 1.5 + 0.9 * Math.sqrt(k);
+            slots.add(new BlockPos((int) Math.round(c.getX() + Math.cos(a) * r), 0,
+                    (int) Math.round(c.getZ() + Math.sin(a) * r)));
+        }
+    }
+
+    /** Count the conscriptable defenders near the plan (used by the map's assign-all + X/Y readout). */
+    public static int countDefenders(WorldServer world, DefensePlanData plan) {
+        if (plan.markers.isEmpty()) return 0;
+        return gatherDefenders(world, plan).size();
+    }
+
+    /** True if an entity holds a ranged weapon (bow or a Flan gun) -- ranged defenders engage from
+     *  their station; melee may pursue a good bit further. */
+    private static boolean isRanged(EntityCreature d) {
+        try {
+            net.minecraft.item.ItemStack main = d.getHeldItemMainhand();
+            if (main.isEmpty()) return false;
+            if (main.getItem() instanceof net.minecraft.item.ItemBow) return true;
+            String cls = main.getItem().getClass().getName().toLowerCase();
+            return cls.contains("itemgun") || cls.contains("flansmod");
+        } catch (Throwable t) { return false; }
+    }
+
+    /** True if the entity stands inside any ENGAGEMENT ZONE (centre = point 0, radius = dist to point 1).
+     *  Targets inside a zone are ALWAYS engageable at any range -- the "open up together" trigger. */
+    private static boolean insideEngagementZone(DefensePlanData plan, net.minecraft.entity.Entity e) {
+        for (DefenseMarker m : plan.markers) {
+            if (m.type != DefenseMarker.ENGAGEMENT_ZONE || m.points.size() < 2) continue;
+            BlockPos c = m.points.get(0);
+            double r = Math.max(4.0, Math.min(64.0,
+                    Math.hypot(m.points.get(1).getX() - c.getX(), m.points.get(1).getZ() - c.getZ())));
+            double dx = e.posX - (c.getX() + 0.5), dz = e.posZ - (c.getZ() + 0.5);
+            if (dx * dx + dz * dz <= r * r) return true;
+        }
+        return false;
     }
 
     private static List<BlockPos> pointsOf(DefensePlanData plan, int type) {
@@ -325,11 +391,16 @@ public final class DefensePlanExecutor {
         try {
             ensureOrderTask(d);
 
-            // Combat override: allow the close fight, cancel the distant chase (re-arms our AI task).
+            // Combat override: engage while adhering to navigation. RANGED defenders may hold and shoot
+            // anything within ~28; MELEE may pursue a good bit (~18) before being recalled. A target
+            // standing inside an ENGAGEMENT ZONE is always fair game at any range ("open up together").
             net.minecraft.entity.EntityLivingBase tgt = d.getAttackTarget();
-            if (tgt != null && !tgt.isDead && d.getDistanceSq(tgt) >= 64.0) {
-                d.setAttackTarget(null);
-                d.getNavigator().clearPath();
+            if (tgt != null && !tgt.isDead) {
+                double lim = isRanged(d) ? 28.0 * 28.0 : 18.0 * 18.0;
+                if (d.getDistanceSq(tgt) >= lim && !insideEngagementZone(plan, tgt)) {
+                    d.setAttackTarget(null);
+                    d.getNavigator().clearPath();
+                }
             }
 
             BlockPos resolved = sanitizeSlot(world, slot); // check H: never order into a wall/fence/liquid

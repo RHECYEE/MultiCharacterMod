@@ -27,11 +27,24 @@ public class S2CStrategicSync implements IMessage {
     }
 
     private List<Data> objects = new ArrayList<>();
+    // LIVE UNIT DOTS: loaded soldiers as map dots -- friendly (the player's army) and enemy (the
+    // besiegers; later narrowed to KNOWN/SEEN enemies). Flat x,z pairs, capped server-side.
+    private int[] friendlyDots = new int[0];
+    private int[] enemyDots = new int[0];
+    // SIEGE ALERT: "enemy camp gathering here" banner position while a battle is active.
+    private boolean siegeActive = false;
+    private int siegeX, siegeZ;
 
     public S2CStrategicSync() {}
 
-    public S2CStrategicSync(List<Data> objects) {
+    public S2CStrategicSync(List<Data> objects, int[] friendlyDots, int[] enemyDots,
+                            boolean siegeActive, int siegeX, int siegeZ) {
         this.objects = objects != null ? objects : new ArrayList<>();
+        this.friendlyDots = friendlyDots != null ? friendlyDots : new int[0];
+        this.enemyDots = enemyDots != null ? enemyDots : new int[0];
+        this.siegeActive = siegeActive;
+        this.siegeX = siegeX;
+        this.siegeZ = siegeZ;
     }
 
     @Override
@@ -48,6 +61,11 @@ public class S2CStrategicSync implements IMessage {
             d.strength = buf.readInt();
             objects.add(d);
         }
+        friendlyDots = readIntArray(buf);
+        enemyDots = readIntArray(buf);
+        siegeActive = buf.readBoolean();
+        siegeX = buf.readInt();
+        siegeZ = buf.readInt();
     }
 
     @Override
@@ -61,12 +79,31 @@ public class S2CStrategicSync implements IMessage {
             buf.writeBoolean(d.live);
             buf.writeInt(d.strength);
         }
+        writeIntArray(buf, friendlyDots);
+        writeIntArray(buf, enemyDots);
+        buf.writeBoolean(siegeActive);
+        buf.writeInt(siegeX);
+        buf.writeInt(siegeZ);
+    }
+
+    private static void writeIntArray(ByteBuf buf, int[] a) {
+        buf.writeInt(a.length);
+        for (int v : a) buf.writeInt(v);
+    }
+
+    private static int[] readIntArray(ByteBuf buf) {
+        int n = Math.max(0, Math.min(4096, buf.readInt()));
+        int[] a = new int[n];
+        for (int i = 0; i < n; i++) a[i] = buf.readInt();
+        return a;
     }
 
     public static class Handler implements IMessageHandler<S2CStrategicSync, IMessage> {
         @Override
         public IMessage onMessage(S2CStrategicSync message, MessageContext ctx) {
-            Minecraft.getMinecraft().addScheduledTask(() -> ClientStrategicCache.update(message.objects));
+            Minecraft.getMinecraft().addScheduledTask(() -> ClientStrategicCache.update(
+                    message.objects, message.friendlyDots, message.enemyDots,
+                    message.siegeActive, message.siegeX, message.siegeZ));
             return null;
         }
     }

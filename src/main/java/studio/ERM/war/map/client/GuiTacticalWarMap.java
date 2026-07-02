@@ -89,8 +89,13 @@ public class GuiTacticalWarMap extends GuiScreen {
             0xFFFFFFFF, // RALLY white
             0xFF2E7D32, // RESERVE dark green
             0xFFFF6D00, // FALLBACK orange
-            0xFF76FF03  // PATROL light green
+            0xFF76FF03, // PATROL light green
+            0xFF40C4FF, // LZ sky blue
+            0xFFFF8A80, // MEDICAL red-white
+            0xFFFF1744  // ENGAGEMENT ZONE red
     };
+    // Mouse position captured each frame for marker hover readouts.
+    private int uiMouseX, uiMouseY;
 
     // ==================== Status Messages ====================
     private String statusMessage = "";
@@ -247,6 +252,14 @@ public class GuiTacticalWarMap extends GuiScreen {
             return;
         }
 
+        // CLEAR ALL (Military tab, beside FALL BACK): wipe the whole defensive plan.
+        if (activeTab == 2 && mouseButton == 0 && isOnClearAllButton(mouseX, mouseY)) {
+            planPending.clear();
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.clearAll());
+            setStatus(TextFormatting.YELLOW + "Defensive plan cleared.");
+            return;
+        }
+
         if (!isOnCanvas(mouseX, mouseY)) {
             super.mouseClicked(mouseX, mouseY, mouseButton);
             return;
@@ -262,6 +275,11 @@ public class GuiTacticalWarMap extends GuiScreen {
                 probe.type = planMode;
                 if (probe.isPolyline()) {
                     planPending.add(new net.minecraft.util.math.BlockPos(w[0], 0, w[1]));
+                    // Engagement zone = exactly 2 clicks (centre, then radius edge) -> auto-commit.
+                    if (planMode == studio.ERM.strategic.defense.DefenseMarker.ENGAGEMENT_ZONE
+                            && planPending.size() >= 2) {
+                        commitPendingPolyline();
+                    }
                 } else {
                     probe.points.add(new net.minecraft.util.math.BlockPos(w[0], 0, w[1]));
                     TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.add(probe));
@@ -280,6 +298,29 @@ public class GuiTacticalWarMap extends GuiScreen {
                 }
             }
             return;
+        }
+
+        // TROOP ASSIGNMENT on existing markers (Military tab, planning off): left-click a node/line +1,
+        // right-click -1, SHIFT+left-click assigns all unassigned units. Falls through to pan / deploy
+        // when no marker is under the cursor.
+        if (activeTab == 2 && planMode < 0) {
+            studio.ERM.strategic.defense.DefenseMarker hit = markerAt(mouseX, mouseY);
+            if (hit != null && hit.isAssignable()) {
+                net.minecraft.util.math.BlockPos c = hit.center();
+                if (mouseButton == 0 && GuiScreen.isShiftKeyDown()) {
+                    TacticalWarMapNetwork.sendToServer(
+                            studio.ERM.war.map.net.C2SDefensePlanEdit.assignAll(c.getX(), c.getZ()));
+                    setStatus(TextFormatting.GREEN + "All unassigned units -> "
+                            + studio.ERM.strategic.defense.DefenseMarker.nameOf(hit.type) + ".");
+                } else if (mouseButton == 0) {
+                    TacticalWarMapNetwork.sendToServer(
+                            studio.ERM.war.map.net.C2SDefensePlanEdit.adjust(c.getX(), c.getZ(), +1));
+                } else if (mouseButton == 1) {
+                    TacticalWarMapNetwork.sendToServer(
+                            studio.ERM.war.map.net.C2SDefensePlanEdit.adjust(c.getX(), c.getZ(), -1));
+                }
+                return;
+            }
         }
 
         if (GuiScreen.isShiftKeyDown() && activeTab == 0) { // claiming lives on the CLAIMS tab
@@ -523,17 +564,29 @@ public class GuiTacticalWarMap extends GuiScreen {
             drawSelectionRectangle();
         }
 
+        uiMouseX = mouseX;
+        uiMouseY = mouseY;
+
         // Draw the DEFENSIVE PLAN (Military tab only) under the traffic + player markers.
         if (activeTab == 2) drawDefensePlan();
+
+        // LIVE UNIT DOTS (Military tab): every loaded friendly soldier + red enemy dots.
+        if (activeTab == 2) drawUnitDots();
 
         // Strategic traffic (filtered per tab: civilian on CIVILIAN, military on MILITARY).
         if (activeTab != 0) drawStrategicMarkers();
 
+        // "ENEMY CAMP GATHERING HERE" siege alert (all tabs -- the player must never miss it).
+        drawSiegeAlert();
+
         // Draw player marker
         drawPlayerMarker();
 
-        // The FALL BACK toggle + planning-mode readout (Military tab only).
+        // The FALL BACK + CLEAR ALL buttons and planning-mode readout (Military tab only).
         if (activeTab == 2) drawFallbackButton();
+
+        // The military side panel: units assigned X/Y + control reminders (Military tab only).
+        if (activeTab == 2) drawMilitaryPanel();
 
         // The Claims / Civilian / Military tab bar (always).
         drawTabs();
@@ -828,7 +881,11 @@ public class GuiTacticalWarMap extends GuiScreen {
                 studio.ERM.war.map.client.ClientDefensePlanCache.markers();
         for (studio.ERM.strategic.defense.DefenseMarker m : markers) {
             int color = PLAN_COLORS[Math.max(0, Math.min(m.type, PLAN_COLORS.length - 1))];
-            drawPlanPolyline(m.points, color, false);
+            if (m.type == studio.ERM.strategic.defense.DefenseMarker.ENGAGEMENT_ZONE && m.points.size() >= 2) {
+                drawZoneCircle(m, color); // kill-zone circle: centre + radius edge
+            } else {
+                drawPlanPolyline(m.points, color, false);
+            }
             if (!m.isPolyline() && !m.points.isEmpty()) {
                 int[] scr = worldToScreen(m.points.get(0).getX(), m.points.get(0).getZ());
                 if (scr != null && onCanvasPoint(scr)) {
@@ -838,11 +895,120 @@ public class GuiTacticalWarMap extends GuiScreen {
                             scr[0] + 5, scr[1] - 3, color);
                 }
             }
+            // HOVER READOUT: troops assigned to this marker (adjust with L/R/Shift+L click).
+            if (m.isAssignable()) {
+                net.minecraft.util.math.BlockPos c = m.center();
+                int[] scr = worldToScreen(c.getX(), c.getZ());
+                if (scr != null && onCanvasPoint(scr)) {
+                    int dx = uiMouseX - scr[0], dy = uiMouseY - scr[1];
+                    if (dx * dx + dy * dy <= 100) { // within 10 px
+                        String label = m.assigned + " assigned";
+                        int tw = fontRenderer.getStringWidth(label);
+                        Gui.drawRect(scr[0] - tw / 2 - 2, scr[1] - 22, scr[0] + tw / 2 + 2, scr[1] - 11, 0xCC000000);
+                        fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] - 20, 0xFFFFD54F);
+                    }
+                }
+            }
         }
         // Pending polyline preview (what you're mid-drawing).
         if (planMode >= 0 && !planPending.isEmpty()) {
             int color = (PLAN_COLORS[Math.max(0, Math.min(planMode, PLAN_COLORS.length - 1))] & 0x00FFFFFF) | 0x88000000;
             drawPlanPolyline(planPending, color, true);
+        }
+    }
+
+    /** The marker (any type) whose centre is within ~9 px of the mouse, else null. */
+    private studio.ERM.strategic.defense.DefenseMarker markerAt(int mx, int my) {
+        for (studio.ERM.strategic.defense.DefenseMarker m
+                : studio.ERM.war.map.client.ClientDefensePlanCache.markers()) {
+            net.minecraft.util.math.BlockPos c = m.center();
+            int[] scr = worldToScreen(c.getX(), c.getZ());
+            if (scr == null) continue;
+            int dx = mx - scr[0], dy = my - scr[1];
+            if (dx * dx + dy * dy <= 81) return m;
+        }
+        return null;
+    }
+
+    /** Draw an engagement-zone circle (centre = point 0, radius = distance to point 1). */
+    private void drawZoneCircle(studio.ERM.strategic.defense.DefenseMarker m, int color) {
+        net.minecraft.util.math.BlockPos c = m.points.get(0);
+        double r = Math.max(4.0, Math.min(64.0,
+                Math.hypot(m.points.get(1).getX() - c.getX(), m.points.get(1).getZ() - c.getZ())));
+        int[] prev = null;
+        for (int i = 0; i <= 24; i++) {
+            double a = i * (Math.PI * 2 / 24);
+            int wx = (int) Math.round(c.getX() + Math.cos(a) * r);
+            int wz = (int) Math.round(c.getZ() + Math.sin(a) * r);
+            int[] scr = worldToScreen(wx, wz);
+            if (scr == null) { prev = null; continue; }
+            if (prev != null) drawMapLine(prev[0], prev[1], scr[0], scr[1], color);
+            prev = scr;
+        }
+        int[] cs = worldToScreen(c.getX(), c.getZ());
+        if (cs != null && onCanvasPoint(cs)) {
+            Gui.drawRect(cs[0] - 1, cs[1] - 1, cs[0] + 2, cs[1] + 2, color);
+            fontRenderer.drawStringWithShadow("KZ", cs[0] + 4, cs[1] - 3, color);
+        }
+    }
+
+    /** Live unit dots: green = the player's army (each loaded soldier), red = enemies. */
+    private void drawUnitDots() {
+        int[] fd = studio.ERM.war.map.client.ClientStrategicCache.friendlyDots();
+        for (int i = 0; i + 1 < fd.length; i += 2) {
+            int[] scr = worldToScreen(fd[i], fd[i + 1]);
+            if (scr == null || !onCanvasPoint(scr)) continue;
+            Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 1, scr[1] + 1, 0xFF00E676);
+        }
+        int[] ed = studio.ERM.war.map.client.ClientStrategicCache.enemyDots();
+        for (int i = 0; i + 1 < ed.length; i += 2) {
+            int[] scr = worldToScreen(ed[i], ed[i + 1]);
+            if (scr == null || !onCanvasPoint(scr)) continue;
+            Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 1, scr[1] + 1, 0xFFFF1744);
+        }
+    }
+
+    /** The "enemy camp gathering here" siege alert: a pulsing red beacon + label at the battle site. */
+    private void drawSiegeAlert() {
+        if (!studio.ERM.war.map.client.ClientStrategicCache.siegeActive()) return;
+        int[] scr = worldToScreen(studio.ERM.war.map.client.ClientStrategicCache.siegeX(),
+                studio.ERM.war.map.client.ClientStrategicCache.siegeZ());
+        if (scr == null || !onCanvasPoint(scr)) return;
+        // Pulse so the eye is drawn to it.
+        int pulse = (int) ((System.currentTimeMillis() / 90) % 8);
+        int s = 4 + (pulse < 4 ? pulse : 8 - pulse);
+        Gui.drawRect(scr[0] - s, scr[1] - s, scr[0] + s + 1, scr[1] + s + 1, 0x66FF1744);
+        Gui.drawRect(scr[0] - 2, scr[1] - 2, scr[0] + 3, scr[1] + 3, 0xFFFF1744);
+        String label = "ENEMY CAMP GATHERING HERE";
+        int tw = fontRenderer.getStringWidth(label);
+        Gui.drawRect(scr[0] - tw / 2 - 2, scr[1] - 22, scr[0] + tw / 2 + 2, scr[1] - 11, 0xCC330000);
+        fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] - 20, 0xFFFF5252);
+    }
+
+    /** Military side panel (right-inside the canvas): units assigned X/Y + the control reminders. */
+    private void drawMilitaryPanel() {
+        int x0 = canvasLeft + canvasSize - 96;
+        int y0 = canvasTop + 18;
+        int assigned = 0;
+        for (studio.ERM.strategic.defense.DefenseMarker m
+                : studio.ERM.war.map.client.ClientDefensePlanCache.markers()) {
+            if (m.isAssignable()) assigned += m.assigned;
+        }
+        int have = studio.ERM.war.map.client.ClientStrategicCache.friendlyCount();
+        String[] lines = {
+                TextFormatting.GOLD + "Units assigned: " + assigned + "/" + have,
+                TextFormatting.GRAY + "P: cycle marker type",
+                TextFormatting.GRAY + "Click node: +1 troop",
+                TextFormatting.GRAY + "R-click node: -1 troop",
+                TextFormatting.GRAY + "Shift+Click: assign all",
+                TextFormatting.GRAY + "R-click line: finish it",
+                TextFormatting.GRAY + "R-click map: deploy",
+                TextFormatting.GRAY + "Zone: centre, then edge",
+        };
+        int h = lines.length * 10 + 6;
+        Gui.drawRect(x0 - 3, y0 - 3, x0 + 95, y0 + h - 3, 0x99000000);
+        for (int i = 0; i < lines.length; i++) {
+            fontRenderer.drawStringWithShadow(lines[i], x0, y0 + i * 10, 0xFFFFFFFF);
         }
     }
 
@@ -913,7 +1079,17 @@ public class GuiTacticalWarMap extends GuiScreen {
         return mx >= b[0] && mx < b[2] && my >= b[1] && my < b[3];
     }
 
-    /** The one-click FALL BACK toggle + the current planning-mode readout. */
+    private int[] clearAllButtonBounds() {
+        int[] f = fallbackButtonBounds();
+        return new int[]{f[2] + 4, f[1], f[2] + 4 + 58, f[3]};
+    }
+
+    private boolean isOnClearAllButton(int mx, int my) {
+        int[] b = clearAllButtonBounds();
+        return mx >= b[0] && mx < b[2] && my >= b[1] && my < b[3];
+    }
+
+    /** The one-click FALL BACK toggle, the CLEAR ALL button, and the planning-mode readout. */
     private void drawFallbackButton() {
         boolean fb = studio.ERM.war.map.client.ClientDefensePlanCache.isFallbackActive();
         int[] b = fallbackButtonBounds();
@@ -923,6 +1099,15 @@ public class GuiTacticalWarMap extends GuiScreen {
         String label = fb ? "FALLING BACK!" : "FALL BACK";
         int tw = fontRenderer.getStringWidth(label);
         fontRenderer.drawStringWithShadow(label, b[0] + (b[2] - b[0] - tw) / 2f, b[1] + 3, fb ? 0xFFFFCDD2 : 0xFFFF5252);
+
+        int[] cb = clearAllButtonBounds();
+        Gui.drawRect(cb[0], cb[1], cb[2], cb[3], 0xEE263238);
+        Gui.drawRect(cb[0], cb[1], cb[2], cb[1] + 1, 0xFFFFFFFF);
+        Gui.drawRect(cb[0], cb[3] - 1, cb[2], cb[3], 0xFF000000);
+        String cl = "CLEAR ALL";
+        int ctw = fontRenderer.getStringWidth(cl);
+        fontRenderer.drawStringWithShadow(cl, cb[0] + (cb[2] - cb[0] - ctw) / 2f, cb[1] + 3, 0xFFFFC107);
+
         if (planMode >= 0) {
             fontRenderer.drawStringWithShadow(
                     "PLAN: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)

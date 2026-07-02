@@ -23,16 +23,29 @@ public class DefenseMarker {
     public static final int RESERVE = 5;       // reserves wait here until needed (point)
     public static final int FALLBACK_LINE = 6; // secondary line used when FALL BACK is hit (polyline)
     public static final int PATROL_ROUTE = 7;  // peacetime patrol circuit (polyline)
+    public static final int LZ = 8;            // friendly helicopter landing zone (reinforce/medevac/logistics)
+    public static final int MEDICAL = 9;       // casualty collection point (future: downed soldiers carried here)
+    public static final int ENGAGEMENT_ZONE = 10; // hold fire until enemies ENTER this circle, then open up
 
     public static final String[] NAMES = {
             "Defensive Line", "Strongpoint", "Vehicle Position", "AA Position",
-            "Rally Point", "Reserve Area", "Fallback Line", "Patrol Route" };
+            "Rally Point", "Reserve Area", "Fallback Line", "Patrol Route",
+            "Helicopter LZ", "Medical Point", "Engagement Zone" };
 
     public int type = LINE;
     public final List<BlockPos> points = new ArrayList<>();
+    // Troops assigned to this marker (1-255), adjustable from the map: left-click +1, right-click -1,
+    // shift-left-click assigns all unassigned. Only meaningful for LINE/STRONGPOINT/FALLBACK/PATROL.
+    public int assigned = 1;
 
     public boolean isPolyline() {
-        return type == LINE || type == FALLBACK_LINE || type == PATROL_ROUTE;
+        return type == LINE || type == FALLBACK_LINE || type == PATROL_ROUTE
+                || type == ENGAGEMENT_ZONE; // zone = 2 clicks: centre then radius edge
+    }
+
+    /** Marker types whose troop count is player-adjustable. */
+    public boolean isAssignable() {
+        return type == LINE || type == STRONGPOINT || type == FALLBACK_LINE || type == PATROL_ROUTE;
     }
 
     public static String nameOf(int type) {
@@ -49,6 +62,7 @@ public class DefenseMarker {
 
     public NBTTagCompound writeToNBT(NBTTagCompound tag) {
         tag.setInteger("type", type);
+        tag.setInteger("assigned", assigned);
         int[] flat = new int[points.size() * 2];
         for (int i = 0; i < points.size(); i++) {
             flat[i * 2] = points.get(i).getX();
@@ -60,6 +74,7 @@ public class DefenseMarker {
 
     public void readFromNBT(NBTTagCompound tag) {
         type = tag.getInteger("type");
+        assigned = Math.max(1, Math.min(255, tag.hasKey("assigned") ? tag.getInteger("assigned") : 1));
         points.clear();
         int[] flat = tag.getIntArray("pts");
         for (int i = 0; i + 1 < flat.length; i += 2) points.add(new BlockPos(flat[i], 0, flat[i + 1]));
@@ -67,6 +82,7 @@ public class DefenseMarker {
 
     public void toBytes(ByteBuf buf) {
         buf.writeByte(type);
+        buf.writeShort(assigned);
         buf.writeShort(points.size());
         for (BlockPos p : points) { buf.writeInt(p.getX()); buf.writeInt(p.getZ()); }
     }
@@ -74,6 +90,7 @@ public class DefenseMarker {
     public static DefenseMarker fromBytes(ByteBuf buf) {
         DefenseMarker m = new DefenseMarker();
         m.type = buf.readByte();
+        m.assigned = Math.max(1, Math.min(255, buf.readShort()));
         int n = buf.readShort();
         for (int i = 0; i < n; i++) m.points.add(new BlockPos(buf.readInt(), 0, buf.readInt()));
         return m;

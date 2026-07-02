@@ -49,7 +49,22 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
     private boolean adjacentFight() {
         if (DEBUG_FORCE_MOVEMENT) return false; // check D: no combat yield in diagnosis mode
         EntityLivingBase t = npc.getAttackTarget();
-        return t != null && !t.isDead && npc.getDistanceSq(t) < 64.0;
+        if (t == null || t.isDead) return false;
+        // Engage while adhering to navigation: RANGED units yield within ~24 (they stand where they are
+        // and shoot until the threat is dealt with); MELEE units yield within ~16 (they may leave their
+        // navigation a good bit to attack, and are recalled by the executor beyond that).
+        double lim = isRangedNpc() ? 24.0 * 24.0 : 16.0 * 16.0;
+        return npc.getDistanceSq(t) < lim;
+    }
+
+    private boolean isRangedNpc() {
+        try {
+            net.minecraft.item.ItemStack main = npc.getHeldItemMainhand();
+            if (main.isEmpty()) return false;
+            if (main.getItem() instanceof net.minecraft.item.ItemBow) return true;
+            String cls = main.getItem().getClass().getName().toLowerCase();
+            return cls.contains("itemgun") || cls.contains("flansmod");
+        } catch (Throwable t) { return false; }
     }
 
     private double distSqToOrder(BlockPos o) {

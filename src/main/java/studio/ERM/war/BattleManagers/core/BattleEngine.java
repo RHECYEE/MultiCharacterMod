@@ -66,6 +66,11 @@ public final class BattleEngine {
         return activeDirector != null;
     }
 
+    /** The active battle's site (for the map's "enemy camp gathering here" alert); null when idle. */
+    public BlockPos getActiveSite() {
+        return hasActiveBattle() ? activeSite : null;
+    }
+
     public IBattleDirector getActiveDirector() {
         return activeDirector;
     }
