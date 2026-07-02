@@ -243,7 +243,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
     // no earlier pending obstacle that could still open its path (a crew waiting at the moat while another
     // crew finishes the causeway is the intended picture, not a stall).
     private static final int ENG_WORK_INTERVAL = 3;        // ~0.15s per block
-    private static final int ENG_NO_PROGRESS_GIVEUP = 300; // 15s with ZERO march progress -> remote fallback
+    private static final int ENG_NO_PROGRESS_GIVEUP = 160; // 8s with ZERO march progress -> remote fallback (keep the work moving)
     private static final int ENG_MARCH_CAP = 1500;         // 75s absolute walk budget per task (never-stall)
 
     public SiegeDirector(UnitCard card) {
@@ -2768,10 +2768,40 @@ public class SiegeDirector implements IPhasedBattleDirector {
         for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
             if (s == null || s.isDead) continue;
             if (couriers.containsKey(s)) continue; // a hauling courier marches to the depot, don't re-target it
+            if (s.getEntityData().hasKey("erm_strategic")) continue; // a passing strategic patrol is NOT ours
             try { if (!"empire".equalsIgnoreCase(s.getTeam_())) continue; } catch (Throwable ignored) { continue; }
             BlockPos goal = nearestUncaptured(s.getPosition());
             if (goal == null) goal = (lootDepot != null) ? lootDepot : breachCorridor;
             s.setMarchObjective(goal);
+        }
+    }
+
+    /**
+     * PRE-SURGE DISCIPLINE. Before the breach opens there are no interior objectives, so loose soldiers
+     * (contact slices, catapult crews, cavalry survivors) had NO march order -- they free-hunted the
+     * player into an ugly orbiting swarm. March them to a HOLD LINE instead: a rank spread along the
+     * wall-face axis, {@code standoff} blocks outside the breach. Each soldier gets a stable slot from
+     * its entity id, so the crowd resolves into a WAITING BATTLE LINE (the RTS look); the 6-block march
+     * engage-guard means they still fight anything that walks into them.
+     */
+    private void holdSoldiersAtLine(World world, double standoff) {
+        if (site == null || breachCorridor == null) return;
+        BlockPos anchor = outsidePoint(world, breachCorridor, Math.max(6.0, standoff));
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang); // along the wall face
+        double R = 150.0;
+        net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                site.getX() - R, 0, site.getZ() - R, site.getX() + R, 255, site.getZ() + R);
+        for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
+            if (s == null || s.isDead) continue;
+            if (couriers.containsKey(s)) continue;
+            if (s.getEntityData().hasKey("erm_strategic")) continue;
+            try { if (!"empire".equalsIgnoreCase(s.getTeam_())) continue; } catch (Throwable ignored) { continue; }
+            int slot = (s.getEntityId() % 17) - 8;                 // stable rank slot, ~2-block spacing
+            int rank = (s.getEntityId() / 17) % 3;                 // up to 3 ranks deep
+            int hx = (int) Math.round(anchor.getX() + px * slot * 2.0 + Math.cos(ang) * rank * 2.0);
+            int hz = (int) Math.round(anchor.getZ() + pz * slot * 2.0 + Math.sin(ang) * rank * 2.0);
+            s.setMarchObjective(new BlockPos(hx, surfaceY(world, hx, hz), hz));
         }
     }
 
@@ -2900,6 +2930,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 refreshBombardment();
                 tickBombardmentAir(world);
                 advanceLine(world, BOMBARD_RING, 0.045 + warLevel * 0.003);
+                // Loose soldiers (contact slices, crews) HOLD A LINE at standoff instead of free-hunting
+                // the player into an ugly swarm -- the RTS look: ranks waiting for the breach.
+                if (tickAge % 100 == 0) holdSoldiersAtLine(world, BOMBARD_RING - 6.0);
                 if (tsp >= PHASE_BOMBARD_TICKS || waveDefeated(tsp)) beginEngineerPush(world);
                 break;
 
@@ -2910,6 +2943,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 refreshBombardment();
                 tickEngineers(world);
                 advanceLine(world, WALL_RING + 4.0, 0.05 + warLevel * 0.003);
+                // Ranks form up just outside the breach, waiting for the engineers -- not swarming the player.
+                if (tickAge % 100 == 0) holdSoldiersAtLine(world, 12.0);
+                // Keep the engineer plan board (route line + obstacle boxes) VISIBLE for the whole phase --
+                // it published once and expired after 90s, which is why the blue route line "disappeared".
+                if (tsp > 0 && tsp % (60 * 20) == 0) publishEngineerPlanDebug(world);
                 // Only advance early once the engineers GENUINELY finished (engineersComplete now means
                 // every task is done, not "all dead") AND a minimum dwell has passed, so they actually
                 // get seen laddering / mining / sapping.
@@ -2996,7 +3034,19 @@ public class SiegeDirector implements IPhasedBattleDirector {
         final double MAX = 14.0; // near enough for the ground navigator to always solve a path
         if (d <= MAX) { c.setMoveTarget(goal, speed); return; }
         double f = MAX / d;
-        c.setMoveTarget(new BlockPos(c.posX + dx * f, goal.getY(), c.posZ + dz * f), speed);
+        double wx = c.posX + dx * f, wz = c.posZ + dz * f;
+        // SLIDE TO THE OPENING. A straight-line intermediate point can land ON a wall face, stalling the
+        // march until the give-up timer. Probe sideways along the face for a column whose surface is
+        // walkable from here (small rise only) and aim there instead -- units now flow around walls
+        // through existing gates/gaps/stairs rather than bumping the face.
+        double ux = dx / d, uz = dz / d, px = -uz, pz = ux;
+        int allowY = (int) Math.max(c.posY, goal.getY()) + 3; // tolerate stairs/ramps toward a high goal
+        double bx = wx, bz = wz;
+        for (int off : new int[]{0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12}) {
+            int sxi = (int) Math.floor(wx + px * off), szi = (int) Math.floor(wz + pz * off);
+            if (surfaceY(c.world, sxi, szi) <= allowY) { bx = wx + px * off; bz = wz + pz * off; break; }
+        }
+        c.setMoveTarget(new BlockPos(bx, goal.getY(), bz), speed);
     }
 
     /** March each volley/ballista carrier to its firing slot (they spawn at the staging line now) and

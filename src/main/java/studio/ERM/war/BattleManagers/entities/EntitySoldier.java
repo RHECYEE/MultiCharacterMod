@@ -270,8 +270,32 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
                     // capped so the navigator doesn't overshoot. Default 3x -> ~2.7x march.
                     double marchMult = Math.max(1.0, Math.min(3.2,
                             0.9 * studio.ERM.war.config.WarLevelsConfig.walkSpeedMultiplier()));
-                    this.getNavigator().tryMoveToXYZ(marchObjective.getX() + 0.5, marchObjective.getY(),
-                            marchObjective.getZ() + 0.5, marchMult);
+                    double gx = marchObjective.getX() + 0.5, gz = marchObjective.getZ() + 0.5;
+                    double ddx = gx - posX, ddz = gz - posZ;
+                    double dH = Math.sqrt(ddx * ddx + ddz * ddz);
+                    if (dH > 14.0) {
+                        // FAR objective: the 1.12 navigator's search box (~follow range) can't solve a long
+                        // path, so aiming straight at it just bumped walls. March via a CLAMPED waypoint
+                        // ~12 blocks ahead instead -- the local A* then genuinely paths around walls and up
+                        // existing stairs -- and SLIDE that waypoint sideways off any wall face to the
+                        // nearest walkable column (gates/gaps), so the column flows through openings.
+                        double ux = ddx / dH, uz = ddz / dH, px = -uz, pz = ux;
+                        double wx = posX + ux * 12.0, wz = posZ + uz * 12.0;
+                        int allowY = (int) Math.max(posY, marchObjective.getY()) + 3;
+                        double bx = wx, bz = wz;
+                        for (int off : new int[]{0, 2, -2, 4, -4, 6, -6, 9, -9}) {
+                            int sxi = net.minecraft.util.math.MathHelper.floor(wx + px * off);
+                            int szi = net.minecraft.util.math.MathHelper.floor(wz + pz * off);
+                            try {
+                                int surf = world.getTopSolidOrLiquidBlock(
+                                        new net.minecraft.util.math.BlockPos(sxi, 64, szi)).getY();
+                                if (surf <= allowY) { bx = wx + px * off; bz = wz + pz * off; break; }
+                            } catch (Throwable ignored) {}
+                        }
+                        this.getNavigator().tryMoveToXYZ(bx, posY, bz, marchMult);
+                    } else {
+                        this.getNavigator().tryMoveToXYZ(gx, marchObjective.getY(), gz, marchMult);
+                    }
                 }
                 // LADDER CLIMB: the 1.12 ground navigator walks INTO a ladder column but never climbs it.
                 // While marching to an objective ABOVE us, actively climb any ladder we're standing in --
