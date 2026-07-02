@@ -82,6 +82,12 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     private net.minecraft.util.math.BlockPos marchObjective = null;
     private static final double DIRECTOR_ENGAGE_SQ = 36.0; // only fight a player within 6 blocks while marching
 
+    // ── STRATEGIC MANAGEMENT (Phase 2) ──
+    // True when this soldier is a live representation of a StrategicObject (a materialized patrol member).
+    // The strategic map owns its lifecycle: it must NEVER idle-despawn (the simulator dematerializes it
+    // back onto the map instead), and the orphan sweep removes stale chunk-saved copies.
+    private boolean strategicManaged = false;
+
     public EntitySoldier(World worldIn) {
         super(worldIn);
         this.setSize(0.6F, 1.8F);
@@ -230,20 +236,24 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
             }
         }
 
-        // Idle despawn — if no attack target and no player nearby for 5 minutes
-        if (getAttackTarget() == null) {
-            Entity nearest = world.getClosestPlayerToEntity(this, 64.0);
-            if (nearest == null) {
-                idleTicks++;
-                if (idleTicks > MAX_IDLE_TICKS) {
-                    setDead();
-                    return;
+        // Idle despawn — if no attack target and no player nearby for 5 minutes. Strategic-managed
+        // soldiers are EXEMPT: the strategic map owns their lifecycle (it dematerializes them back
+        // onto the map instead of letting them evaporate mid-route).
+        if (!strategicManaged) {
+            if (getAttackTarget() == null) {
+                Entity nearest = world.getClosestPlayerToEntity(this, 64.0);
+                if (nearest == null) {
+                    idleTicks++;
+                    if (idleTicks > MAX_IDLE_TICKS) {
+                        setDead();
+                        return;
+                    }
+                } else {
+                    idleTicks = 0;
                 }
             } else {
                 idleTicks = 0;
             }
-        } else {
-            idleTicks = 0;
         }
 
         // DIRECTOR MARCH: walk to the assigned objective unless we're in an adjacent fight. This is what
@@ -291,6 +301,11 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
                 this.getNavigator().clearPath();
             }
         }
+    }
+
+    /** Mark this soldier as a live representation of a StrategicObject (see {@link #strategicManaged}). */
+    public void setStrategicManaged(boolean managed) {
+        this.strategicManaged = managed;
     }
 
     @Override
@@ -470,6 +485,7 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         if (this.unitRole.isEmpty()) this.unitRole = "MELEE";
         this.dataManager.set(DW_SKIN_KEY, tag.getString("ermSkinKey"));
         this.idleTicks = tag.getInteger("erm_idle");
+        this.strategicManaged = tag.getBoolean("erm_strategic_managed");
 
         applyLevelScaling();
 
@@ -489,6 +505,7 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         tag.setString("erm_unitRole", unitRole);
         tag.setString("ermSkinKey", this.dataManager.get(DW_SKIN_KEY));
         tag.setInteger("erm_idle", idleTicks);
+        tag.setBoolean("erm_strategic_managed", strategicManaged);
     }
 
     // ══════════════════════════════════════

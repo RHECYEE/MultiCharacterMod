@@ -193,6 +193,12 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.war.air.AirStrikeController.class);
             logger.info("[War] AirStrikeController tick registered (air operations are LIVE)");
 
+            // PHASE 2 -- the strategic world simulation tick loop (Base module). Static @SubscribeEvent
+            // -> register the CLASS. Without this the whole strategic map is dead (the classic
+            // unregistered-handler failure), so log it loudly.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.StrategicSimulator.class);
+            logger.info("[Strategic] simulator registered (strategic map is LIVE)");
+
             // CRITICAL FIX: populate the battle-director registry. It was never initialized, so the
             // map's "Deploy Battle" menu listed ZERO battle types (empty dropdown) and any registry
             // lookup returned nothing. init() is idempotent and self-guards on `initialized`.

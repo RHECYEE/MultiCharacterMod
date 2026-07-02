@@ -73,10 +73,13 @@ public class CommandWar extends CommandBase {
             return getListOfStringsMatchingLastWord(args,
                     "siege", "debug", "stop", "status", "airstrike",
                     "summon", "rival", "claim", "unclaim", "cp", "sync", "repair", "heat",
-                    "chinook", "fastrope");
+                    "chinook", "fastrope", "strat");
         }
         if (args.length == 2 && "rival".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, "guards", "city", "status");
+        }
+        if (args.length == 2 && "strat".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, "patrol", "list", "clear");
         }
         return java.util.Collections.emptyList();
     }
@@ -105,6 +108,7 @@ public class CommandWar extends CommandBase {
             case "repair":  repair(sender, args);      break;
             case "heat":    heat(sender, args);        break;
             case "chinook": insertion(sender, "chinook");   break;
+            case "strat":   strat(sender, args);            break;
             case "fastrope":
             case "heli":
             case "insertion": insertion(sender, args.length >= 2 ? args[1] : "littlebird"); break;
@@ -359,6 +363,80 @@ public class CommandWar extends CommandBase {
         }
     }
 
+    // ===== /war strat — PHASE 2 strategic-simulation debug =====
+
+    /**
+     * /war strat patrol [count] [level] — register a strategic PATROL that circuits a ring of waypoints
+     * around you. It exists on the strategic map (moving by pure math while unloaded), MATERIALIZES as a
+     * marching soldier column when you're within ~100 blocks, and dematerializes back to the map when you
+     * leave (~140). Walk away and come back to watch the whole loop.
+     * /war strat list  — print every strategic object (type, position, strength, loaded state).
+     * /war strat clear — remove all strategic objects (despawning any live entities).
+     */
+    private void strat(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        World world = player.world;
+        if (world.isRemote) return;
+
+        studio.ERM.strategic.StrategicMapData data = studio.ERM.strategic.StrategicMapData.get(world);
+        String op = (args.length >= 2) ? args[1].toLowerCase(java.util.Locale.ROOT) : "list";
+        switch (op) {
+            case "patrol": {
+                int count = (args.length >= 3) ? parseInt(args[2], 1, 12) : 4;
+                int level = (args.length >= 4) ? parseInt(args[3], 1, 10) : 3;
+                studio.ERM.strategic.StrategicPatrol p = new studio.ERM.strategic.StrategicPatrol();
+                p.strength = count;
+                p.warLevel = level;
+                // An octagonal circuit around where you stand, radius ~56 -- big enough that the far side
+                // is beyond dematerialize range, so walking the ring shows both transitions.
+                int r = 56;
+                for (int i = 0; i < 8; i++) {
+                    double a = i * (Math.PI * 2 / 8);
+                    p.route.add(new BlockPos(
+                            player.getPosition().getX() + (int) Math.round(Math.cos(a) * r), 0,
+                            player.getPosition().getZ() + (int) Math.round(Math.sin(a) * r)));
+                }
+                BlockPos start = p.route.get(0);
+                p.x = start.getX() + 0.5;
+                p.z = start.getZ() + 0.5;
+                data.add(p);
+                msg(sender, TextFormatting.GREEN + "Strategic patrol registered: " + count + " soldiers (L"
+                        + level + "), 8-point circuit r=" + r + " around you.");
+                msg(sender, TextFormatting.GRAY + "It materializes within ~100 blocks and dematerializes "
+                        + "beyond ~140 — walk away and return to watch the loop. Watch [Strategic] chat lines.");
+                break;
+            }
+            case "clear": {
+                int n = data.objects.size();
+                for (studio.ERM.strategic.StrategicObject o : new java.util.ArrayList<>(data.objects.values())) {
+                    if (o.materialized && world instanceof net.minecraft.world.WorldServer) {
+                        try { o.dematerialize((net.minecraft.world.WorldServer) world); } catch (Throwable ignored) {}
+                    }
+                    data.remove(o.id);
+                }
+                msg(sender, TextFormatting.GREEN + "Cleared " + n + " strategic object(s).");
+                break;
+            }
+            case "list":
+            default: {
+                if (data.objects.isEmpty()) {
+                    msg(sender, TextFormatting.GRAY + "No strategic objects. Use /war strat patrol to add one.");
+                    break;
+                }
+                msg(sender, TextFormatting.GOLD + "=== Strategic Map (" + data.objects.size() + ") ===");
+                for (studio.ERM.strategic.StrategicObject o : data.objects.values()) {
+                    int dist = (int) Math.hypot(o.x - player.posX, o.z - player.posZ);
+                    msg(sender, TextFormatting.YELLOW + o.label() + TextFormatting.WHITE
+                            + " @ " + (int) o.x + ", " + (int) o.z
+                            + TextFormatting.GRAY + "  (" + dist + "m away, "
+                            + (o.materialized ? TextFormatting.AQUA + "LIVE" : TextFormatting.DARK_GRAY + "on map")
+                            + TextFormatting.GRAY + ", wp " + (o.routeIndex + 1) + "/" + o.route.size() + ")");
+                }
+                break;
+            }
+        }
+    }
+
     // ===== /war summon <vehicle> [count] =====
 
     private void summonVehicle(ICommandSender sender, String[] args) throws CommandException {
@@ -558,6 +636,8 @@ public class CommandWar extends CommandBase {
                 TextFormatting.YELLOW + "/war status" + TextFormatting.GRAY + " - show faction/battle/raid status",
                 TextFormatting.YELLOW + "/war airstrike [1-10]" + TextFormatting.GRAY + " - give yourself an Air Target Designator",
                 TextFormatting.YELLOW + "/war chinook" + TextFormatting.GRAY + " - call a Chinook insertion (fast-rope) in front of you",
+                TextFormatting.YELLOW + "/war strat patrol [n] [lvl]" + TextFormatting.GRAY + " - register a strategic patrol circuit (Phase 2 demo)",
+                TextFormatting.YELLOW + "/war strat list|clear" + TextFormatting.GRAY + " - inspect / wipe the strategic map",
                 TextFormatting.YELLOW + "/war fastrope [heli]" + TextFormatting.GRAY + " - test a heli fast-rope (default LittleBird)",
                 TextFormatting.YELLOW + "/war summon <vehicle> [n]" + TextFormatting.GRAY + " - spawn enemy Flan's vehicles",
                 TextFormatting.YELLOW + "/war rival guards [n] [lvl]" + TextFormatting.GRAY + " - spawn rival guards",
