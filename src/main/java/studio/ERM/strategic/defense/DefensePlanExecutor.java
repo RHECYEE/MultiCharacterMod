@@ -78,7 +78,7 @@ public final class DefensePlanExecutor {
                 if (dd < bd) { bd = dd; best = d; }
             }
             pool.remove(best);
-            driveTo(world, best, slot);
+            driveTo(world, best, slot, plan);
         }
 
         // LEFTOVERS: reserves wait at the reserve areas during a siege; in peacetime they walk patrols.
@@ -88,7 +88,7 @@ public final class DefensePlanExecutor {
                 if (reserves.isEmpty()) reserves = pointsOf(plan, DefenseMarker.RALLY);
                 if (!reserves.isEmpty()) {
                     int i = 0;
-                    for (EntityCreature d : pool) driveTo(world, d, reserves.get(i++ % reserves.size()));
+                    for (EntityCreature d : pool) driveTo(world, d, reserves.get(i++ % reserves.size()), plan);
                 }
             } else {
                 List<DefenseMarker> patrols = new ArrayList<>();
@@ -98,13 +98,19 @@ public final class DefensePlanExecutor {
                 int i = 0;
                 for (EntityCreature d : pool) {
                     if (patrols.isEmpty()) break;
-                    tickPatrol(world, d, patrols.get(i++ % patrols.size()));
+                    tickPatrol(world, d, patrols.get(i++ % patrols.size()), plan);
                 }
             }
         }
     }
 
-    /** The player's AW2 combat NPCs near the plan (excluding strategic-map-owned entities). */
+    /**
+     * The player's ARMY near the plan: PLAYER-OWNED AW2 combat NPCs, classified by RUNTIME ENTITY STATE
+     * ({@link Aw2Npc} — instanceof NpcPlayerOwned + getNpcType() "combat", which includes the bow
+     * "archer" subtype since that's the same NpcCombat class). Never by spawner items or registry-name
+     * strings; the registry heuristic remains only as a fallback when AW2's classes can't be resolved.
+     * Faction NPCs (a rival's soldiers wandering past) are NEVER conscripted.
+     */
     private static List<EntityCreature> gatherDefenders(WorldServer world, DefensePlanData plan) {
         // One bounding sweep around the plan's overall extent.
         int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
@@ -120,9 +126,14 @@ public final class DefensePlanExecutor {
         for (EntityCreature c : world.getEntitiesWithinAABB(EntityCreature.class, box)) {
             if (c == null || c.isDead) continue;
             if (c.getEntityData().hasKey("erm_strategic")) continue; // strategic-map units are not ours
-            ResourceLocation id = EntityList.getKey(c);
-            String reg = (id != null) ? id.toString() : "";
-            if (reg.contains("ancientwarfare") && reg.contains("combat")) out.add(c);
+            if (Aw2Npc.isPlayerOwnedCombat(c)) { out.add(c); continue; }
+            // Fallback only when the classifier can't see AW2 at all (reflection failed): the old
+            // registry-name heuristic, explicitly excluding anything the classifier DID identify.
+            if (Aw2Npc.allegiance(c) == Aw2Npc.Allegiance.NONE && !Aw2Npc.isAw2Npc(c)) {
+                ResourceLocation id = EntityList.getKey(c);
+                String reg = (id != null) ? id.toString() : "";
+                if (reg.contains("ancientwarfare") && reg.contains("combat")) out.add(c);
+            }
         }
         return out;
     }
@@ -149,7 +160,7 @@ public final class DefensePlanExecutor {
     }
 
     /** Walk a defender one leg of its patrol circuit, keeping per-entity progress in its NBT. */
-    private static void tickPatrol(WorldServer world, EntityCreature d, DefenseMarker route) {
+    private static void tickPatrol(WorldServer world, EntityCreature d, DefenseMarker route, DefensePlanData plan) {
         int idx = d.getEntityData().getInteger("erm_patrol_idx") % route.points.size();
         BlockPos wp = route.points.get(idx);
         double dd = d.getDistanceSq(wp.getX() + 0.5, d.posY, wp.getZ() + 0.5);
@@ -158,17 +169,67 @@ public final class DefensePlanExecutor {
             d.getEntityData().setInteger("erm_patrol_idx", idx);
             wp = route.points.get(idx);
         }
-        driveTo(world, d, wp);
+        driveTo(world, d, wp, plan);
     }
 
-    /** Send a defender to a slot (surface-resolved); only re-path when it has strayed. */
-    private static void driveTo(WorldServer world, EntityCreature d, BlockPos slot) {
+    /**
+     * FINAL SAY movement. The Military AI owns what every defender is doing at all times — this is the
+     * player's means of controlling their army. A defender may finish an ADJACENT fight (target within
+     * 8 blocks); a distant chase is CANCELLED and the plan's order reasserted. A defender that cannot
+     * close on its slot across several passes (unpathable line / destroyed position) REGROUPS at the
+     * rally point instead of wandering, and gets reassigned from there.
+     */
+    private static void driveTo(WorldServer world, EntityCreature d, BlockPos slot, DefensePlanData plan) {
         if (d == null || slot == null) return;
         try {
+            // Combat override: allow the close fight, cancel the distant chase.
+            net.minecraft.entity.EntityLivingBase tgt = d.getAttackTarget();
+            if (tgt != null && !tgt.isDead) {
+                if (d.getDistanceSq(tgt) < 64.0) return; // finish the adjacent fight
+                d.setAttackTarget(null);                  // the plan overrides the chase
+                d.getNavigator().clearPath();
+            }
+
             BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos(slot.getX(), 64, slot.getZ()));
             double dd = d.getDistanceSq(slot.getX() + 0.5, g.getY(), slot.getZ() + 0.5);
-            if (dd <= 6.25) return; // holding its position
+            if (dd <= 6.25) {
+                d.getEntityData().setInteger("erm_def_stuck", 0); // on station
+                return;
+            }
+
+            // STUCK -> REGROUP: no meaningful progress toward the slot across ~4 passes (12s).
+            double last = d.getEntityData().getDouble("erm_def_lastd");
+            int stuck = d.getEntityData().getInteger("erm_def_stuck");
+            stuck = (last > 0 && dd > last - 4.0) ? stuck + 1 : 0;
+            d.getEntityData().setDouble("erm_def_lastd", dd);
+            d.getEntityData().setInteger("erm_def_stuck", stuck);
+            if (stuck >= 4) {
+                BlockPos rally = regroupPoint(plan);
+                if (rally != null) {
+                    BlockPos rg = world.getTopSolidOrLiquidBlock(new BlockPos(rally.getX(), 64, rally.getZ()));
+                    d.getNavigator().tryMoveToXYZ(rally.getX() + 0.5, rg.getY(), rally.getZ() + 0.5, 1.05D);
+                    // Reaching the regroup point clears the counter so reassignment can retry the line.
+                    if (d.getDistanceSq(rally.getX() + 0.5, rg.getY(), rally.getZ() + 0.5) < 25.0) {
+                        d.getEntityData().setInteger("erm_def_stuck", 0);
+                        d.getEntityData().setDouble("erm_def_lastd", 0);
+                    }
+                    return;
+                }
+            }
+
             d.getNavigator().tryMoveToXYZ(slot.getX() + 0.5, g.getY(), slot.getZ() + 0.5, 1.05D);
         } catch (Throwable ignored) {}
+    }
+
+    /** Where broken/unpathable units regroup: the first RALLY marker, else the plan's centroid. */
+    private static BlockPos regroupPoint(DefensePlanData plan) {
+        for (DefenseMarker m : plan.markers) {
+            if (m.type == DefenseMarker.RALLY && !m.points.isEmpty()) return m.points.get(0);
+        }
+        long sx = 0, sz = 0; int n = 0;
+        for (DefenseMarker m : plan.markers) {
+            for (BlockPos p : m.points) { sx += p.getX(); sz += p.getZ(); n++; }
+        }
+        return n == 0 ? null : new BlockPos((int) (sx / n), 0, (int) (sz / n));
     }
 }

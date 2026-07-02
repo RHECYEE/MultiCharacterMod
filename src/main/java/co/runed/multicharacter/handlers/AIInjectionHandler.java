@@ -28,7 +28,17 @@ public class AIInjectionHandler {
             // (Modern/Modular CITIZENS are deliberately NOT gun users -- per the design they are
             // civilian workers; the gun role belongs to AW2 soldiers / EntitySoldier. They were
             // briefly added here and that was wrong, so they're excluded again.)
-            boolean isAW2Soldier = regName.contains("ancientwarfare") && regName.contains("combat");
+            // AW2 npcs are classified by RUNTIME ENTITY STATE (Aw2Npc: instanceof + getNpcType), per the
+            // integration notes -- the registry-name heuristic only remains as the reflection-failure
+            // fallback. This also correctly covers FACTION combat npcs holding guns (soldier/archer
+            // classes), which the old "combat"-substring check missed entirely.
+            studio.ERM.strategic.defense.Aw2Npc.Allegiance aw2 =
+                    studio.ERM.strategic.defense.Aw2Npc.allegiance(npc);
+            boolean aw2PlayerCombat = studio.ERM.strategic.defense.Aw2Npc.isPlayerOwnedCombat(npc);
+            boolean isAW2Soldier = aw2PlayerCombat
+                    || aw2 == studio.ERM.strategic.defense.Aw2Npc.Allegiance.AW2_FACTION
+                    || (aw2 == studio.ERM.strategic.defense.Aw2Npc.Allegiance.NONE
+                        && regName.contains("ancientwarfare") && regName.contains("combat"));
             boolean isSkeleton = regName.contains("wither_skeleton");
             boolean isErmInfantry = npc instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier;
 
@@ -80,10 +90,12 @@ public class AIInjectionHandler {
 
                         // Make the player's AW2 guards HOSTILE to the besieging army + its vehicles/aircraft.
                         // AW2's faction targeting doesn't know our siege units exist, so inject a target task
-                        // for empire-team soldiers/vehicles + ghost aircraft. It only acquires anything when
-                        // empire units are actually present (a siege ON the player), where these AW2 combat
-                        // NPCs are the defenders -- so it's a no-op when the player is attacking a rival city.
-                        if (isAW2Soldier) {
+                        // for empire-team soldiers/vehicles + ghost aircraft. Gated on PLAYER-OWNED combat via
+                        // the classifier (a rival FACTION npc must never be ordered onto our anti-siege task;
+                        // faction-vs-siege hostility is EntitySoldier's side). Registry fallback only when the
+                        // classifier can't resolve AW2.
+                        if (aw2PlayerCombat || (aw2 == studio.ERM.strategic.defense.Aw2Npc.Allegiance.NONE
+                                && regName.contains("ancientwarfare") && regName.contains("combat"))) {
                             npc.targetTasks.addTask(1, new net.minecraft.entity.ai.EntityAINearestAttackableTarget<>(
                                     npc, net.minecraft.entity.EntityLivingBase.class, 10, true, false,
                                     new com.google.common.base.Predicate<net.minecraft.entity.EntityLivingBase>() {

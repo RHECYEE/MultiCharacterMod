@@ -150,7 +150,18 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         // (the "they shot their own LittleBird down" bug). Air support is not a ground-troop target.
         if (target instanceof studio.ERM.war.air.EntityGhostAircraft) return false;
 
-        // Don't attack AW2 empire faction NPCs
+        // AW2 CLASSIFIER (runtime entity state, per the integration notes): the siege army carries
+        // faction id "aw2:empire". Never attack empire-faction NPCs (our own side's civilians/soldiers);
+        // ALWAYS attack the defender's PLAYER-OWNED NPCs (their crafted guards, whatever they hold);
+        // attack any OTHER faction's NPCs (the invasion is hostile to them too).
+        studio.ERM.strategic.defense.Aw2Npc.Allegiance al =
+                studio.ERM.strategic.defense.Aw2Npc.allegiance(target);
+        if (al == studio.ERM.strategic.defense.Aw2Npc.Allegiance.AW2_FACTION) {
+            return !"empire".equalsIgnoreCase(studio.ERM.strategic.defense.Aw2Npc.faction(target));
+        }
+        if (al == studio.ERM.strategic.defense.Aw2Npc.Allegiance.PLAYER_OWNED) return true;
+
+        // Don't attack AW2 empire faction NPCs (string-based fallback for when the classifier can't load)
         if (isAW2EmpireNPC(target)) return false;
 
         // Don't attack passive animals (cows, sheep, horses, etc.)
