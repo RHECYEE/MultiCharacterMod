@@ -410,6 +410,17 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 EpochRunnerMod.logger.info("[Siege] breach biased to entrance " + entr);
             }
         }
+        // WALK-AROUND CHECK. If there's an EXISTING walk-through opening near the chosen point -- a gate /
+        // archway / gap, or simply the OPEN END of the wall -- steer the corridor to THAT instead of
+        // breaching a solid wall right beside it ("they breached a wall they could've walked around").
+        // planMilitaryRoute then sees a passable column (no breach task) and the army just walks in.
+        BlockPos opening = findExistingOpening(world, wallPos);
+        if (opening != null) {
+            wallPos = opening;
+            EpochRunnerMod.logger.info("[Siege] existing opening near breach -> WALK THROUGH @ "
+                    + xyz(opening) + " (no breach needed)");
+        }
+
         // Breach foot = the open-field ground just OUTSIDE the wall on the army side (where the assault
         // forms up). Sample surfaceY at 3/6/9 blocks out and take the MEDIAN, which rejects a single tree's
         // roof (too high) or a single pit (too low). Do NOT use terrainGroundY here: it dives past the
@@ -468,6 +479,54 @@ public class SiegeDirector implements IPhasedBattleDirector {
         int bx = (int) Math.round(to.getX() - ux * 6);  // no clear wall: breach just outside the core
         int bz = (int) Math.round(to.getZ() - uz * 6);
         return new BlockPos(bx, surfaceY(world, bx, bz), bz);
+    }
+
+    /**
+     * Scan the wall face around {@code wallPos} for an EXISTING walk-through opening the army could just use
+     * -- a gate/archway/gap, or the OPEN END of the wall -- so we don't breach a solid wall right beside an
+     * open way in. An opening = a lateral column where body-height space is CLEAR across the wall line (2
+     * blocks outside to 3 inside). Returns the nearest such column on the wall line, else null (wall is
+     * solid across the scan window -> a real breach is warranted).
+     */
+    private BlockPos findExistingOpening(World world, BlockPos wallPos) {
+        double ang = Math.atan2(wallPos.getZ() - site.getZ(), wallPos.getX() - site.getX()); // core -> wall (outward)
+        double px = -Math.sin(ang), pz = Math.cos(ang);  // along the wall face
+        double ix = Math.cos(ang), iz = Math.sin(ang);   // outward; -ix,-iz = inward toward the core
+        BlockPos best = null; int bestLat = Integer.MAX_VALUE;
+        for (int lat = -16; lat <= 16; lat++) {
+            int wx = (int) Math.round(wallPos.getX() + px * lat);
+            int wz = (int) Math.round(wallPos.getZ() + pz * lat);
+            int gy = terrainGroundY(world, wx, wz);
+            boolean clear = true;
+            for (int d = 2; d >= -3; d--) { // from 2 outside to 3 inside of the wall line
+                int cx = (int) Math.round(wx + ix * d);
+                int cz = (int) Math.round(wz + iz * d);
+                try {
+                    if (world.getBlockState(new BlockPos(cx, gy + 1, cz)).getMaterial().isSolid()
+                     || world.getBlockState(new BlockPos(cx, gy + 2, cz)).getMaterial().isSolid()) { clear = false; break; }
+                } catch (Throwable t) { clear = false; break; }
+            }
+            if (clear && Math.abs(lat) < bestLat) { bestLat = Math.abs(lat); best = new BlockPos(wx, gy, wz); }
+        }
+        return best;
+    }
+
+    /** True if a solid wall actually blocks the way in just past the breach foot (body height, 0-5 blocks
+     *  inward toward the core). Gates the forced-breach failsafe so we never breach an already-open path. */
+    private boolean wallBlocksBreach(World world) {
+        if (breachCorridor == null) return false;
+        double toCore = Math.atan2(site.getZ() - breachCorridor.getZ(), site.getX() - breachCorridor.getX());
+        double ix = Math.cos(toCore), iz = Math.sin(toCore);
+        int fy = breachCorridor.getY();
+        for (int d = 0; d <= 5; d++) {
+            int x = (int) Math.round(breachCorridor.getX() + ix * d);
+            int z = (int) Math.round(breachCorridor.getZ() + iz * d);
+            try {
+                if (world.getBlockState(new BlockPos(x, fy + 1, z)).getMaterial().isSolid()
+                 || world.getBlockState(new BlockPos(x, fy + 2, z)).getMaterial().isSolid()) return true;
+            } catch (Throwable ignored) {}
+        }
+        return false;
     }
 
     /** The base-cluster chunk on the side the army comes from, preferring the LOWEST-defense edge. */
@@ -827,11 +886,14 @@ public class SiegeDirector implements IPhasedBattleDirector {
             i = j + 1;
         }
 
-        // FAILSAFE: the wall IS the objective -- guarantee a breach task at it even if the surface scan
-        // never flagged a height jump (a flat-topped wall level with its own approach).
+        // FAILSAFE: guarantee a breach task ONLY IF a wall genuinely blocks the way in. Previously this
+        // ALWAYS forced a breach when the route scan found no WALL node -- but "no wall on the route" means
+        // the army can already WALK IN, so forcing a breach made engineers mine a wall next to an open path
+        // ("breached a wall they could've walked around"). Now it only fires when there's a real solid wall
+        // at body height just inside the breach foot.
         boolean haveBreach = false;
         for (EngTask t : engQueue) if (t.work == EngWork.BREACH) { haveBreach = true; break; }
-        if (!haveBreach && breachIdx >= 0) {
+        if (!haveBreach && breachIdx >= 0 && wallBlocksBreach(world)) {
             engQueue.add(new EngTask(EngWork.BREACH, Obstacle.WALL, breachIdx, breachIdx, 100));
         }
         // OCEAN doctrine: prioritise the CAUSEWAY -- get the bridges across the water down first so the
