@@ -64,21 +64,26 @@ public class StrategicTrader extends StrategicObject {
         trader.enablePersistence();
         adopt(world, trader);
 
-        // 2) THE CHEST CART — config-driven entity id, else a chest mule leashed to the merchant.
-        EntityLiving cart = tryCreate(world, splitIds(
-                studio.ERM.war.config.WarLevelsConfig.trafficCartId()));
+        // 2) THE CHEST CART. Priority: the config entity id (any mod's cart) -> the REAL AW2 chest cart
+        // (ancientwarfarevehicle:vehicle + VehicleType "chest_cart", spawned reflectively so the vehicle
+        // module stays a soft dependency) -> a leashed chest mule. AW2 carts aren't living entities, so
+        // the merchant FAUX-PULLS them: driveLoaded drags the cart along behind him every tick.
+        Entity cart = tryCreateAny(world, splitIds(studio.ERM.war.config.WarLevelsConfig.trafficCartId()));
+        if (cart == null) cart = tryCreateAw2Cart(world);
         if (cart == null) {
             EntityMule mule = new EntityMule(world);
             mule.setChested(true);
             mule.setHorseTamed(true);
             cart = mule;
         }
-        double cx = at.getX() + 0.5 - fx * 2.2, cz = at.getZ() + 0.5 - fz * 2.2;
+        double cx = at.getX() + 0.5 - fx * 2.4, cz = at.getZ() + 0.5 - fz * 2.4;
         BlockPos cg = surface(world, cx, cz);
         cart.setLocationAndAngles(cx, cg.getY() + 1.0, cz, yawDeg, 0F);
-        cart.enablePersistence();
+        if (cart instanceof EntityLiving) ((EntityLiving) cart).enablePersistence();
         adopt(world, cart);
-        try { cart.setLeashHolder(trader, true); } catch (Throwable ignored) {}
+        if (cart instanceof EntityLiving) {
+            try { ((EntityLiving) cart).setLeashHolder(trader, true); } catch (Throwable ignored) {}
+        }
 
         // 3) ESCORTS — flanking guards reusing the proven soldier march AI.
         java.util.Random rng = new java.util.Random(id.getLeastSignificantBits());
@@ -108,12 +113,15 @@ public class StrategicTrader extends StrategicObject {
         BlockPos goal = surface(world, wp.getX() + 0.5, wp.getZ() + 0.5);
 
         EntityLiving trader = null;
+        Entity cart = null;
         int escortsAlive = 0, idx = 0;
         for (UUID u : new ArrayList<>(entityIds)) {
             Entity e = world.getEntityFromUuid(u);
-            boolean alive = e instanceof EntityLiving && !e.isDead;
+            boolean alive = e != null && !e.isDead;
             if (idx == 0) {                       // slot 0 = the merchant
-                if (alive) trader = (EntityLiving) e;
+                if (alive && e instanceof EntityLiving) trader = (EntityLiving) e;
+            } else if (idx == 1) {                // slot 1 = the chest cart
+                if (alive) cart = e;
             } else if (alive && e instanceof EntitySoldier) {
                 escortsAlive++;
                 ((EntitySoldier) e).setMarchObjective(goal);
@@ -126,7 +134,25 @@ public class StrategicTrader extends StrategicObject {
         if (trader == null) { strength = 0; return; }
         strength = 1 + escortsAlive;
 
-        navToward(trader, world, goal, 1.0);
+        // Called EVERY tick while materialized; throttle the pathfind, not the tow.
+        if (trader.ticksExisted % 15 == 0 || trader.getNavigator().noPath()) {
+            navToward(trader, world, goal, 1.0);
+        }
+
+        // FAUX-PULL the cart: a non-living cart (the AW2 chest cart) has no leash physics, so drag it
+        // to a hitch point ~2.4 behind the merchant each tick (smooth lerp + kill residual motion so the
+        // vehicle physics doesn't fight the tow). A living cart (the mule) follows its leash instead.
+        if (cart != null && !(cart instanceof EntityLiving)) {
+            double hx = trader.posX - Math.cos(facing) * 2.4;
+            double hz = trader.posZ - Math.sin(facing) * 2.4;
+            double nx = cart.posX + (hx - cart.posX) * 0.22;
+            double nz = cart.posZ + (hz - cart.posZ) * 0.22;
+            BlockPos cg = surface(world, nx, nz);
+            float cartYaw = (float) Math.toDegrees(facing) - 90F;
+            cart.setPositionAndRotation(nx, cg.getY() + 0.05, nz, cartYaw, 0F);
+            cart.motionX = 0; cart.motionY = 0; cart.motionZ = 0;
+        }
+
         x = trader.posX;
         z = trader.posZ;
         double dx = (goal.getX() + 0.5) - trader.posX, dz = (goal.getZ() + 0.5) - trader.posZ;
@@ -135,14 +161,20 @@ public class StrategicTrader extends StrategicObject {
     }
 
     /** Adopt a non-soldier caravan entity: tag + track + spawn (uuid recorded BEFORE spawn for the sweep). */
-    private void adopt(WorldServer world, EntityLiving e) {
+    private void adopt(WorldServer world, Entity e) {
         e.getEntityData().setString("erm_strategic", id.toString());
         entityIds.add(e.getUniqueID());
         world.spawnEntity(e);
     }
 
-    /** Try a list of entity ids ("mod:name" or bare AW2 npc names) and return the first that resolves. */
+    /** Try a list of entity ids ("mod:name" or bare AW2 npc names) and return the first LIVING one. */
     private static EntityLiving tryCreate(WorldServer world, String[] ids) {
+        Entity e = tryCreateAny(world, ids);
+        return (e instanceof EntityLiving) ? (EntityLiving) e : null;
+    }
+
+    /** Same, but any Entity (the cart config can point at non-living cart/vehicle entities). */
+    private static Entity tryCreateAny(WorldServer world, String[] ids) {
         if (ids == null) return null;
         for (String raw : ids) {
             if (raw == null || raw.trim().isEmpty()) continue;
@@ -151,10 +183,48 @@ public class StrategicTrader extends StrategicObject {
                     : new ResourceLocation("ancientwarfarenpc", s);
             try {
                 Entity e = EntityList.createEntityByIDFromName(rl, world);
-                if (e instanceof EntityLiving) return (EntityLiving) e;
+                if (e != null) return e;
             } catch (Throwable ignored) {}
         }
         return null;
+    }
+
+    /**
+     * The REAL AW2 chest cart: spawn ancientwarfarevehicle:vehicle and apply the "chest_cart"
+     * VehicleType reflectively (same soft-dependency pattern as the siege machines). Returns null if
+     * the AW2 vehicle module isn't installed.
+     */
+    private static Entity tryCreateAw2Cart(WorldServer world) {
+        try {
+            Entity v = EntityList.createEntityByIDFromName(
+                    new ResourceLocation("ancientwarfarevehicle", "vehicle"), world);
+            if (v == null) return null;
+            Class<?> vtClass = Class.forName("net.shadowmage.ancientwarfare.vehicle.entity.types.VehicleType");
+            java.lang.reflect.Field f = vtClass.getDeclaredField("vehicleTypes");
+            f.setAccessible(true);
+            Object reg = f.get(null);
+            Iterable<?> all;
+            if (reg instanceof Object[]) all = java.util.Arrays.asList((Object[]) reg);
+            else if (reg instanceof Iterable) all = (Iterable<?>) reg;
+            else if (reg instanceof java.util.Map) all = ((java.util.Map<?, ?>) reg).values();
+            else return null;
+            Object cartType = null;
+            for (Object vt : all) {
+                if (vt == null) continue;
+                try {
+                    Object cn = vt.getClass().getMethod("getConfigName").invoke(vt);
+                    if (cn != null && cn.toString().toLowerCase().contains("cart")) { cartType = vt; break; }
+                } catch (Throwable ignored) {}
+            }
+            if (cartType == null) return null;
+            Class<?> iVehicleType = Class.forName("net.shadowmage.ancientwarfare.vehicle.entity.IVehicleType");
+            v.getClass().getMethod("setVehicleType", iVehicleType, int.class).invoke(v, cartType, 0);
+            return v;
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.info("[Strategic] AW2 chest cart unavailable (" + t.getClass().getSimpleName()
+                    + ") -> mule fallback");
+            return null;
+        }
     }
 
     private static String[] splitIds(String csv) {

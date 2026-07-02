@@ -37,17 +37,35 @@ public final class StrategicSimulator {
     /** Debug chat to the nearest player on every materialize/dematerialize/destroyed event. */
     public static boolean DEBUG = true;
 
-    private static final double MATERIALIZE_RANGE = 100.0;
-    private static final double DEMATERIALIZE_RANGE = 140.0;
-
     private StrategicSimulator() {}
+
+    /** Materialize range = the player's actual RENDER DISTANCE (server view distance in blocks). */
+    private static double materializeRange(WorldServer world) {
+        try {
+            return Math.max(64.0, world.getMinecraftServer().getPlayerList().getViewDistance() * 16.0);
+        } catch (Throwable t) {
+            return 160.0;
+        }
+    }
 
     @SubscribeEvent
     public static void onWorldTick(TickEvent.WorldTickEvent e) {
         if (e.phase != TickEvent.Phase.END) return;
         if (e.world == null || e.world.isRemote || !(e.world instanceof WorldServer)) return;
         WorldServer world = (WorldServer) e.world;
-        if (world.getTotalWorldTime() % 20 != 0) return; // strategic tick = 1/second
+        StrategicMapData data = StrategicMapData.get(world);
+
+        // MATERIALIZED objects drive EVERY tick (they're the few near the player): smooth cart towing,
+        // waypoint bookkeeping, march-order refresh. Their own nav calls throttle internally.
+        if (world.getTotalWorldTime() % 20 != 0) {
+            for (StrategicObject o : new ArrayList<>(data.objects.values())) {
+                if (!o.materialized) continue;
+                try { o.driveLoaded(world); } catch (Throwable ignored) {}
+            }
+            return;
+        }
+
+        // ── 1/second STRATEGIC PASS ─────────────────────────────────────────────────────────────
 
         // TRAFFIC GENERATION: keep each nearby rival city's level-scaled quota of patrols/traders topped
         // up (gently, one per type per pass). Runs on its own slower cadence.
@@ -57,8 +75,16 @@ public final class StrategicSimulator {
             catch (Throwable t) { EpochRunnerMod.logger.warn("[Strategic] traffic ensure failed: " + t); }
         }
 
-        StrategicMapData data = StrategicMapData.get(world);
+        // MAP SYNC: push the strategic snapshot to every player's tactical map every 2s (tiny packet;
+        // sent even when empty so stale client markers clear).
+        if (world.getTotalWorldTime() % 40 == 0) {
+            try { syncToPlayers(world, data); } catch (Throwable ignored) {}
+        }
+
         if (data.objects.isEmpty()) return;
+
+        double matRange = materializeRange(world);
+        double dematRange = matRange + 32.0; // hysteresis just past the render horizon
 
         boolean dirty = false;
         for (StrategicObject o : new ArrayList<>(data.objects.values())) {
@@ -66,7 +92,7 @@ public final class StrategicSimulator {
                 double playerDist = nearestPlayerHorizDist(world, o.x, o.z);
                 if (!o.materialized) {
                     o.tickUnloaded(1.0);
-                    if (playerDist <= MATERIALIZE_RANGE) {
+                    if (playerDist <= matRange) {
                         o.materialize(world);
                         EpochRunnerMod.logger.info("[Strategic] MATERIALIZE " + o.label() + " @ "
                                 + (int) o.x + "," + (int) o.z);
@@ -74,7 +100,7 @@ public final class StrategicSimulator {
                                 + " materialized at " + (int) o.x + ", " + (int) o.z);
                     }
                 } else {
-                    if (playerDist > DEMATERIALIZE_RANGE) {
+                    if (playerDist > dematRange) {
                         o.dematerialize(world);
                         EpochRunnerMod.logger.info("[Strategic] DEMATERIALIZE " + o.label() + " @ "
                                 + (int) o.x + "," + (int) o.z + " (back to map)");
@@ -96,6 +122,28 @@ public final class StrategicSimulator {
             }
         }
         if (dirty) data.markDirty();
+    }
+
+    /** Build + send the strategic snapshot to every player in this world (the map traffic overlay). */
+    private static void syncToPlayers(WorldServer world, StrategicMapData data) {
+        java.util.List<studio.ERM.war.map.net.S2CStrategicSync.Data> snap = new ArrayList<>();
+        for (StrategicObject o : data.objects.values()) {
+            studio.ERM.war.map.net.S2CStrategicSync.Data d = new studio.ERM.war.map.net.S2CStrategicSync.Data();
+            d.type = o.typeId();
+            d.label = o.label();
+            d.x = (int) o.x;
+            d.z = (int) o.z;
+            d.live = o.materialized;
+            d.strength = o.strength;
+            snap.add(d);
+        }
+        for (EntityPlayer p : world.playerEntities) {
+            if (p instanceof net.minecraft.entity.player.EntityPlayerMP) {
+                studio.ERM.war.map.net.TacticalWarMapNetwork.sendTo(
+                        new studio.ERM.war.map.net.S2CStrategicSync(snap),
+                        (net.minecraft.entity.player.EntityPlayerMP) p);
+            }
+        }
     }
 
     /**

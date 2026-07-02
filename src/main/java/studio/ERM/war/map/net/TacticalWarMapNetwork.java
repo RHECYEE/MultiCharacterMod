@@ -31,6 +31,8 @@ public final class TacticalWarMapNetwork {
                 PacketDeployedBattlesSync.Handler.class, PacketDeployedBattlesSync.class, nextId++, Side.CLIENT);
         EpochRunnerMod.network.registerMessage(
                 S2CTerritorySync.Handler.class, S2CTerritorySync.class, nextId++, Side.CLIENT);
+        EpochRunnerMod.network.registerMessage(
+                S2CStrategicSync.Handler.class, S2CStrategicSync.class, nextId++, Side.CLIENT);
     }
 
     public static void sendToServer(IMessage msg) {

@@ -415,6 +415,9 @@ public class GuiTacticalWarMap extends GuiScreen {
             drawSelectionRectangle();
         }
 
+        // Draw the STRATEGIC TRAFFIC overlay (patrols/traders moving on the map) under the player marker.
+        drawStrategicMarkers();
+
         // Draw player marker
         drawPlayerMarker();
 
@@ -697,6 +700,46 @@ public class GuiTacticalWarMap extends GuiScreen {
             label += " (" + cost + " CP)";
         }
         fontRenderer.drawStringWithShadow(label, x1 + 2, y1 - 10, claimDragging ? 0xFF00FF00 : 0xFFFF4444);
+    }
+
+    // PHASE 2 traffic-overlay icons -- REAL AW2 art (AW2 is a hard dependency, its assets are loadable):
+    // a coin for trader caravans, a combat order for military patrols.
+    private static final net.minecraft.util.ResourceLocation ICON_STRAT_TRADER =
+            new net.minecraft.util.ResourceLocation("ancientwarfare", "textures/items/npc/coin.png");
+    private static final net.minecraft.util.ResourceLocation ICON_STRAT_PATROL =
+            new net.minecraft.util.ResourceLocation("ancientwarfare", "textures/items/npc/combat_order.png");
+
+    /**
+     * Draw every strategic object (patrols, trader caravans...) as a live icon on the map -- the
+     * "watch the civilization operating" overlay. Positions stream from the server every 2s
+     * ({@link studio.ERM.war.map.net.S2CStrategicSync}); a green corner dot marks objects that are
+     * MATERIALIZED (physically in the world) right now, and squads show their remaining strength.
+     */
+    private void drawStrategicMarkers() {
+        java.util.List<studio.ERM.war.map.net.S2CStrategicSync.Data> objs =
+                studio.ERM.war.map.client.ClientStrategicCache.snapshot();
+        if (objs.isEmpty()) return;
+        for (studio.ERM.war.map.net.S2CStrategicSync.Data d : objs) {
+            int[] scr = worldToScreen(d.x, d.z);
+            if (scr == null) continue;
+            int sx = scr[0], sy = scr[1];
+            if (sx < canvasLeft || sx >= canvasLeft + canvasSize) continue;
+            if (sy < canvasTop || sy >= canvasTop + canvasSize) continue;
+
+            net.minecraft.util.ResourceLocation icon =
+                    "trader".equals(d.type) ? ICON_STRAT_TRADER : ICON_STRAT_PATROL;
+            GlStateManager.color(1F, 1F, 1F, 1F);
+            GlStateManager.enableBlend();
+            mc.getTextureManager().bindTexture(icon);
+            Gui.drawScaledCustomSizeModalRect(sx - 5, sy - 5, 0, 0, 16, 16, 10, 10, 16F, 16F);
+            GlStateManager.disableBlend();
+
+            if (d.live) Gui.drawRect(sx + 3, sy - 6, sx + 6, sy - 3, 0xFF00FF55); // green = physically live
+            if (d.strength > 1) {
+                fontRenderer.drawStringWithShadow(String.valueOf(d.strength), sx + 6, sy, 0xFFFFFFFF);
+            }
+        }
+        GlStateManager.color(1F, 1F, 1F, 1F);
     }
 
     private void drawPlayerMarker() {
