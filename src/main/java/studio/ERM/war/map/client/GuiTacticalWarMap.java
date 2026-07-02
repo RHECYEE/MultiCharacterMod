@@ -491,8 +491,9 @@ public class GuiTacticalWarMap extends GuiScreen {
             commitPendingPolyline();
             planMode = (planMode >= studio.ERM.strategic.defense.DefenseMarker.NAMES.length - 1) ? -1 : planMode + 1;
             setStatus(planMode < 0
-                    ? TextFormatting.GRAY + "Planning OFF"
-                    : TextFormatting.AQUA + "PLAN: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
+                    ? TextFormatting.GOLD + "TOOL: Troop Allocation" + TextFormatting.GRAY
+                      + "  (click a marker to edit its units/formation, P = place markers)"
+                    : TextFormatting.AQUA + "TOOL: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
                       + TextFormatting.GRAY + "  (click to place, right-click removes/commits, P = next)");
         }
     }
@@ -1264,12 +1265,13 @@ public class GuiTacticalWarMap extends GuiScreen {
         int rtw = fontRenderer.getStringWidth(rl);
         fontRenderer.drawStringWithShadow(rl, rb[0] + (rb[2] - rb[0] - rtw) / 2f, rb[1] + 3, 0xFF69F0AE);
 
-        if (planMode >= 0) {
-            fontRenderer.drawStringWithShadow(
-                    "PLAN: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
-                            + (planPending.isEmpty() ? "" : " (" + planPending.size() + " pts)"),
-                    b[0], b[3] + 3, 0xFF00E5FF);
-        }
+        // ALWAYS show the active tool -- "Troop Allocation" (edit markers) is the default tool, so the
+        // player knows clicking a marker opens its properties rather than feeling like an empty mode.
+        String tool = (planMode < 0)
+                ? "TOOL: Troop Allocation"
+                : "TOOL: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
+                  + (planPending.isEmpty() ? "" : " (" + planPending.size() + " pts)");
+        fontRenderer.drawStringWithShadow(tool, b[0], b[3] + 3, planMode < 0 ? 0xFFFFD54F : 0xFF00E5FF);
     }
 
     // PHASE 2 traffic-overlay icons -- REAL AW2 art (AW2 is a hard dependency, its assets are loadable):

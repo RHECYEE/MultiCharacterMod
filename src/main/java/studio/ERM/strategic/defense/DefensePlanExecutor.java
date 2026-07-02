@@ -299,10 +299,8 @@ public final class DefensePlanExecutor {
         return out;
     }
 
-    /** Spread exactly the marker's ASSIGNED count of slots evenly along the whole polyline. */
-    private static void addLineSlots(DefenseMarker m, List<BlockPos> slots) {
-        if (m.points.size() < 2) return;
-        // Total polyline length, then place `assigned` slots at even fractions along it.
+    /** Point on the polyline at fraction f (0..1) of its total length. */
+    private static double[] polylineAt(DefenseMarker m, double f) {
         double total = 0;
         double[] seg = new double[m.points.size() - 1];
         for (int i = 0; i + 1 < m.points.size(); i++) {
@@ -310,33 +308,128 @@ public final class DefensePlanExecutor {
             seg[i] = Math.hypot(b.getX() - a.getX(), b.getZ() - a.getZ());
             total += seg[i];
         }
-        if (total < 1) { slots.add(m.points.get(0)); return; }
+        double target = Math.max(0, Math.min(1, f)) * Math.max(1e-6, total), walked = 0;
+        for (int i = 0; i < seg.length; i++) {
+            if (walked + seg[i] >= target || i == seg.length - 1) {
+                double lf = seg[i] <= 0 ? 0 : (target - walked) / seg[i];
+                BlockPos a = m.points.get(i), b = m.points.get(i + 1);
+                double dirX = seg[i] <= 0 ? 1 : (b.getX() - a.getX()) / seg[i];
+                double dirZ = seg[i] <= 0 ? 0 : (b.getZ() - a.getZ()) / seg[i];
+                return new double[]{a.getX() + (b.getX() - a.getX()) * lf,
+                        a.getZ() + (b.getZ() - a.getZ()) * lf, dirX, dirZ};
+            }
+            walked += seg[i];
+        }
+        return new double[]{m.points.get(0).getX(), m.points.get(0).getZ(), 1, 0};
+    }
+
+    /**
+     * FORMATION-AWARE line staffing: exactly the marker's ASSIGNED count of slots, shaped by the panel's
+     * formation preset. Auto/Line = even spread; Spread Out = even + staggered ranks; Shield Wall =
+     * tight 1.2-spacing wall at the centre; Column = single file along the line; Wedge = V at the
+     * midpoint; Square = box at the midpoint; escorts default to Auto for now.
+     */
+    private static void addLineSlots(DefenseMarker m, List<BlockPos> slots) {
+        if (m.points.size() < 2) return;
         int n = Math.max(1, Math.min(255, m.assigned));
-        for (int s = 0; s < n; s++) {
-            double f = (n == 1) ? 0.5 : (double) s / (n - 1);
-            double target = f * total, walked = 0;
-            for (int i = 0; i < seg.length; i++) {
-                if (walked + seg[i] >= target || i == seg.length - 1) {
-                    double lf = seg[i] <= 0 ? 0 : (target - walked) / seg[i];
-                    BlockPos a = m.points.get(i), b = m.points.get(i + 1);
-                    slots.add(new BlockPos(
-                            (int) Math.round(a.getX() + (b.getX() - a.getX()) * lf), 0,
-                            (int) Math.round(a.getZ() + (b.getZ() - a.getZ()) * lf)));
-                    break;
+        int form = m.formation;
+        double[] mid = polylineAt(m, 0.5);
+        double px = -mid[3], pz = mid[2]; // perpendicular to the line at its midpoint
+
+        switch (form) {
+            case 2: { // SPREAD OUT: even spread + alternating +-1.5 perpendicular stagger (loose ranks)
+                for (int s = 0; s < n; s++) {
+                    double f = (n == 1) ? 0.5 : (double) s / (n - 1);
+                    double[] p = polylineAt(m, f);
+                    double off = (s % 2 == 0) ? 1.5 : -1.5;
+                    slots.add(new BlockPos((int) Math.round(p[0] + (-p[3]) * off), 0,
+                            (int) Math.round(p[1] + p[2] * off)));
                 }
-                walked += seg[i];
+                return;
+            }
+            case 3: { // SHIELD WALL: a tight 1.2-spacing wall centred on the midpoint
+                for (int s = 0; s < n; s++) {
+                    double off = (s - (n - 1) / 2.0) * 1.2;
+                    slots.add(new BlockPos((int) Math.round(mid[0] + mid[2] * off), 0,
+                            (int) Math.round(mid[1] + mid[3] * off)));
+                }
+                return;
+            }
+            case 4: { // COLUMN: single file stacked BEHIND the midpoint (perpendicular = depth)
+                for (int s = 0; s < n; s++) {
+                    slots.add(new BlockPos((int) Math.round(mid[0] + px * (s * 1.4)), 0,
+                            (int) Math.round(mid[1] + pz * (s * 1.4))));
+                }
+                return;
+            }
+            case 5: { // WEDGE: a V opening from the midpoint
+                slots.add(new BlockPos((int) Math.round(mid[0]), 0, (int) Math.round(mid[1])));
+                for (int s = 1; s < n; s++) {
+                    int k = (s + 1) / 2;
+                    double side = (s % 2 == 0) ? 1 : -1;
+                    slots.add(new BlockPos(
+                            (int) Math.round(mid[0] + mid[2] * side * k * 1.4 + px * k * 1.4), 0,
+                            (int) Math.round(mid[1] + mid[3] * side * k * 1.4 + pz * k * 1.4)));
+                }
+                return;
+            }
+            case 6: { // SQUARE: a box perimeter around the midpoint
+                int per = Math.max(1, n);
+                int sideLen = Math.max(2, (int) Math.ceil(per / 4.0) + 1);
+                double half = sideLen * 1.2 / 2.0;
+                for (int s = 0; s < n; s++) {
+                    double t = (double) s / n * 4.0;
+                    int side = (int) t;
+                    double f = t - side;
+                    double lx, lz;
+                    switch (side) {
+                        case 0: lx = -half + f * 2 * half; lz = -half; break;
+                        case 1: lx = half; lz = -half + f * 2 * half; break;
+                        case 2: lx = half - f * 2 * half; lz = half; break;
+                        default: lx = -half; lz = half - f * 2 * half; break;
+                    }
+                    slots.add(new BlockPos(
+                            (int) Math.round(mid[0] + mid[2] * lx + px * lz), 0,
+                            (int) Math.round(mid[1] + mid[3] * lx + pz * lz)));
+                }
+                return;
+            }
+            default: { // AUTO / LINE / escorts: even spread along the whole polyline
+                for (int s = 0; s < n; s++) {
+                    double f = (n == 1) ? 0.5 : (double) s / (n - 1);
+                    double[] p = polylineAt(m, f);
+                    slots.add(new BlockPos((int) Math.round(p[0]), 0, (int) Math.round(p[1])));
+                }
             }
         }
     }
 
-    /** The marker's ASSIGNED count of slots clustered around a point marker (centre + expanding ring). */
+    /** The marker's ASSIGNED count of slots around a point marker, shaped by its formation. */
     private static void addPointSlots(DefenseMarker m, List<BlockPos> slots) {
         BlockPos c = m.points.get(0);
         int n = Math.max(1, Math.min(255, m.assigned));
+        if (m.formation == 6) { // SQUARE box around the point
+            double half = Math.max(1.5, Math.ceil(n / 4.0) * 0.7);
+            for (int s = 0; s < n; s++) {
+                double t = (double) s / n * 4.0;
+                int side = (int) t;
+                double f = t - side;
+                double lx, lz;
+                switch (side) {
+                    case 0: lx = -half + f * 2 * half; lz = -half; break;
+                    case 1: lx = half; lz = -half + f * 2 * half; break;
+                    case 2: lx = half - f * 2 * half; lz = half; break;
+                    default: lx = -half; lz = half - f * 2 * half; break;
+                }
+                slots.add(new BlockPos((int) Math.round(c.getX() + lx), 0, (int) Math.round(c.getZ() + lz)));
+            }
+            return;
+        }
+        double spacing = (m.formation == 2) ? 1.8 : (m.formation == 3) ? 0.7 : 0.9; // spread/wall/auto
         slots.add(c);
         for (int k = 1; k < n; k++) {
             double a = k * 2.399963; // golden-angle spiral: even cluster, no overlaps
-            double r = 1.5 + 0.9 * Math.sqrt(k);
+            double r = 1.5 + spacing * Math.sqrt(k);
             slots.add(new BlockPos((int) Math.round(c.getX() + Math.cos(a) * r), 0,
                     (int) Math.round(c.getZ() + Math.sin(a) * r)));
         }

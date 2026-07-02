@@ -94,6 +94,17 @@ public final class WarLevelsConfig {
     public static int recruitArrivalDistance() {
         return (data != null && data.recruit != null) ? data.recruit.arrivalDistanceBlocks : 350;
     }
+    /** Cost of a PERMANENT VEHICLE contract for a Flan vehicle ShortName (config map, else default). */
+    public static int recruitVehicleCost(String shortName) {
+        RecruitTuning r = (data != null) ? data.recruit : null;
+        if (r == null) return 250;
+        if (shortName != null && r.vehicleCostsCB != null) {
+            for (java.util.Map.Entry<String, Integer> e : r.vehicleCostsCB.entrySet()) {
+                if (e.getKey() != null && e.getKey().equalsIgnoreCase(shortName)) return Math.max(0, e.getValue());
+            }
+        }
+        return Math.max(0, r.vehicleDefaultCostCB);
+    }
 
     /**
      * Legacy hook: older code called this during init to ensure
@@ -339,6 +350,19 @@ public final class WarLevelsConfig {
         public int mercenaryDays = 3;
         /** How far away the recruits START their march to your rally (the arrival you can watch). */
         public int arrivalDistanceBlocks = 350;
+        /** PERMANENT VEHICLE contract: per-ShortName Command-Buck costs (case-insensitive) + default. */
+        public int vehicleDefaultCostCB = 250;
+        public java.util.Map<String, Integer> vehicleCostsCB = defaultVehicleCosts();
+
+        private static java.util.Map<String, Integer> defaultVehicleCosts() {
+            java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+            m.put("jeep", 120);
+            m.put("Tiger", 320);
+            m.put("Sherman", 280);
+            m.put("abrams", 450);
+            m.put("s100", 300);
+            return m;
+        }
 
         public void sanitize() {
             if (permanentCostCB < 0) permanentCostCB = 150;
@@ -346,6 +370,8 @@ public final class WarLevelsConfig {
             if (mercenaryDays < 1) mercenaryDays = 3;
             if (arrivalDistanceBlocks < 60) arrivalDistanceBlocks = 60;
             if (arrivalDistanceBlocks > 2000) arrivalDistanceBlocks = 2000;
+            if (vehicleDefaultCostCB < 0) vehicleDefaultCostCB = 250;
+            if (vehicleCostsCB == null) vehicleCostsCB = defaultVehicleCosts();
         }
     }
 

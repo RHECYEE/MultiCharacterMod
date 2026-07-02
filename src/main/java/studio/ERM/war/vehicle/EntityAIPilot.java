@@ -699,6 +699,7 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         }
 
         if (!this.world.isRemote && !this.isPassenger) {
+            boolean militia = "militia".equalsIgnoreCase(this.getMcmTeam());
             // NERF "the tank wrecks the player the instant any pixel is visible": acquire targets SLOWER
             // and at shorter range, and periodically DROP the lock so it re-acquires (gives the player a
             // window to break contact / makes it switch targets) instead of being relentlessly glued on.
@@ -706,11 +707,37 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                 this.setAttackTarget(null);
                 this.lockedTarget = null;
             }
-            if (this.ticksExisted % 90 == 0 && this.getAttackTarget() == null) {
+            if (!militia && this.ticksExisted % 90 == 0 && this.getAttackTarget() == null) {
                 EntityPlayer nearest = this.world.getClosestPlayerToEntity(this, 55.0D);
                 if (nearest != null) {
                     this.setAttackTarget(nearest);
                     this.lockedTarget = nearest;
+                }
+            }
+            // MILITIA vehicles fight FOR the player: never target players; hunt the besieging army
+            // (empire-team soldiers/pilots) instead.
+            if (militia && this.ticksExisted % 60 == 0 && this.getAttackTarget() == null) {
+                net.minecraft.entity.EntityLivingBase best = null;
+                double bd = 70.0 * 70.0;
+                for (net.minecraft.entity.EntityLivingBase e : this.world.getEntitiesWithinAABB(
+                        net.minecraft.entity.EntityLivingBase.class, this.getEntityBoundingBox().grow(70))) {
+                    if (e == null || e.isDead) continue;
+                    boolean hostile = false;
+                    if (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) {
+                        try { hostile = "empire".equalsIgnoreCase(
+                                ((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).getTeam_()); }
+                        catch (Throwable ignored) {}
+                    } else if (e instanceof EntityAIPilot) {
+                        try { hostile = "empire".equalsIgnoreCase(((EntityAIPilot) e).getMcmTeam()); }
+                        catch (Throwable ignored) {}
+                    }
+                    if (!hostile) continue;
+                    double d = this.getDistanceSq(e);
+                    if (d < bd) { bd = d; best = e; }
+                }
+                if (best != null) {
+                    this.setAttackTarget(best);
+                    this.lockedTarget = best;
                 }
             }
         }
