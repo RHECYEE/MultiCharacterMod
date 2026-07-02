@@ -52,51 +52,62 @@ public final class FlanGhostModel {
         try {
             ModelPlane mp = (ModelPlane) type.model;
             // One constant spin angle for ALL props/rotors, advanced by entity age + partial tick.
-            // NOTE: ModelRendererTurbo.render multiplies each rotateAngle by 57.29578 (rad->deg) before
-            // GlStateManager.rotate, so these angle fields are RADIANS. 0.6 rad/tick (~34 deg/tick) is a
-            // fast, clearly visible spin -- tune this single constant to taste, same value = same speed.
+            // ModelRendererTurbo.render multiplies each rotateAngle by 57.29578 (rad->deg) before
+            // GlStateManager.rotate, so these fields are RADIANS. ~0.6 rad/tick is a fast, visible spin.
             float spin = ((float) ghost.ticksExisted + pt) * 0.6F;
-            // ROTORS: render(DriveableType) draws heli rotor parts via renderPart WITHOUT setting any angle,
-            // so pre-setting their rotateAngle survives and each part spins about its own rotationPoint.
-            // Main rotor spins about Y (vertical); tail rotor about Z (lateral) -- axes per RenderPlane.
-            if (mp.heliMainRotorModels != null) {
-                for (com.flansmod.client.tmt.ModelRendererTurbo[] arr : mp.heliMainRotorModels) {
-                    if (arr == null) continue;
-                    for (com.flansmod.client.tmt.ModelRendererTurbo part : arr) {
-                        if (part != null) part.rotateAngleY = spin;
-                    }
-                }
-            }
-            if (mp.heliTailRotorModels != null) {
-                for (com.flansmod.client.tmt.ModelRendererTurbo[] arr : mp.heliTailRotorModels) {
-                    if (arr == null) continue;
-                    for (com.flansmod.client.tmt.ModelRendererTurbo part : arr) {
-                        if (part != null) part.rotateAngleZ = spin;
-                    }
-                }
-            }
-            // Static model render -- no EntityPlane needed, nothing spawned. (PlaneType is a DriveableType,
-            // so this resolves to ModelPlane.render(DriveableType): the entity-free model pass.) This pass
-            // OVERWRITES every propellerModels part's rotateAngleX with a static fan-spread, so props are
-            // re-spun in a second pass below.
+            boolean heli = isHeliName(ghost.getAircraftType());
+
+            // Draw the STATIC model FIRST. render(type) sets every prop/rotor part's angle to a fixed
+            // fan-spread internally, so setting our spin BEFORE it gets overwritten -- THAT is why the
+            // Apache/EC665 main rotors weren't moving (the heli pass used to run before this). Spin AFTER,
+            // then redraw just the spinning parts on top.
             mp.render(type);
-            // PROPELLERS: render(type) just overwrote rotateAngleX with a fan-spread, so set our spin (X axis)
-            // and redraw ONLY the propeller blades over the top via the public renderPart pass.
-            if (mp.propellerModels != null) {
-                for (com.flansmod.client.tmt.ModelRendererTurbo[] arr : mp.propellerModels) {
-                    if (arr == null || arr.length == 0) continue;
-                    for (com.flansmod.client.tmt.ModelRendererTurbo part : arr) {
-                        if (part != null) part.rotateAngleX = spin;
-                    }
-                    mp.renderPart(arr);
-                }
-            }
+
+            // Main rotor about Y (vertical), tail rotor about Z. Some heli models (Apache/EC665) store the
+            // MAIN rotor in propellerModels, so spin those about Y on a heli (about X on a fixed-wing prop).
+            // Multi-part blades are fanned evenly so 3-4 distinct blades show.
+            spinParts(mp, mp.heliMainRotorModels, 'Y', spin);
+            spinParts(mp, mp.heliTailRotorModels, 'Z', spin);
+            spinParts(mp, mp.propellerModels, heli ? 'Y' : 'X', spin);
         } catch (Throwable t) {
             GlStateManager.popMatrix();
             return false;
         }
         GlStateManager.popMatrix();
         return true;
+    }
+
+    /**
+     * Spin a set of rotor/prop part GROUPS about an axis and redraw them on top of the static model so the
+     * blades visibly turn (the static {@code ModelPlane.render} freezes them). Each group's parts are fanned
+     * evenly (j*2PI/len) so a multi-part rotor shows its distinct blades. {@code rotateAngle*} are RADIANS
+     * (TMT multiplies by 57.29578 before the GL rotate). Null-safe; per-part failures are swallowed.
+     */
+    private static void spinParts(ModelPlane mp, com.flansmod.client.tmt.ModelRendererTurbo[][] groups,
+                                  char axis, float spin) {
+        if (groups == null) return;
+        for (com.flansmod.client.tmt.ModelRendererTurbo[] group : groups) {
+            if (group == null) continue;
+            int n = group.length;
+            for (int j = 0; j < n; j++) {
+                com.flansmod.client.tmt.ModelRendererTurbo part = group[j];
+                if (part == null) continue;
+                float a = spin + (n > 1 ? (float) (j * 2.0 * Math.PI / n) : 0F); // fan distinct blades
+                if (axis == 'X') part.rotateAngleX = a;
+                else if (axis == 'Z') part.rotateAngleZ = a;
+                else part.rotateAngleY = a;
+                try { part.render(0.0625F); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    /** True if the aircraft ShortName is a HELICOPTER (rotor model), per the same set WarAirstrikeHelper uses. */
+    private static boolean isHeliName(String name) {
+        if (name == null) return false;
+        String n = name.toLowerCase();
+        return n.contains("apache") || n.contains("cobra") || n.contains("tiger") || n.contains("ec665")
+                || n.contains("hind") || n.contains("blackhawk") || n.contains("chinook")
+                || n.contains("littlebird");
     }
 
     private static PlaneType resolve(EntityGhostAircraft ghost) {
