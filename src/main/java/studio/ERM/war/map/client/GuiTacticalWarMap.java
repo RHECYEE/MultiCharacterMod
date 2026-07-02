@@ -68,6 +68,23 @@ public class GuiTacticalWarMap extends GuiScreen {
     // ==================== Context Menu ====================
     private final GuiBattleDeployMenu deployMenu = new GuiBattleDeployMenu();
 
+    // ==================== PHASE 2: Defensive Planning (Military overlay) ====================
+    // planMode: -1 = off, else the DefenseMarker type being placed. P cycles modes. In plan mode,
+    // left-click places (point markers commit instantly; polylines accumulate clicks), right-click
+    // commits a >=2-point polyline / discards a 1-point one / removes the nearest marker.
+    private int planMode = -1;
+    private final List<net.minecraft.util.math.BlockPos> planPending = new ArrayList<>();
+    private static final int[] PLAN_COLORS = {
+            0xFF00E5FF, // LINE cyan
+            0xFFFFC400, // STRONGPOINT gold
+            0xFF8D9DB6, // VEHICLE steel blue
+            0xFFB750FF, // AA purple
+            0xFFFFFFFF, // RALLY white
+            0xFF2E7D32, // RESERVE dark green
+            0xFFFF6D00, // FALLBACK orange
+            0xFF76FF03  // PATROL light green
+    };
+
     // ==================== Status Messages ====================
     private String statusMessage = "";
     private long statusExpiry = 0;
@@ -140,6 +157,8 @@ public class GuiTacticalWarMap extends GuiScreen {
 
             // Request territory sync from server
             TacticalWarMapNetwork.sendToServer(new C2SRequestTerritorySync());
+            // ...and the defensive plan for the Military overlay.
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.requestSync());
             // Real-logger trace: confirms the GUI constructed + sent its sync request. If we see
             // this but never see the server-side "C2SRequestTerritorySync received", the C2S packet
             // is not reaching the server (channel/registration), which would also explain why
@@ -197,8 +216,48 @@ public class GuiTacticalWarMap extends GuiScreen {
             deployMenu.close();
         }
 
+        // THE FALL BACK BUTTON (top-left of the canvas): one easy-to-hit toggle that swings every
+        // defender from the primary lines to the fallback lines (and back).
+        if (mouseButton == 0 && isOnFallbackButton(mouseX, mouseY)) {
+            boolean now = !studio.ERM.war.map.client.ClientDefensePlanCache.isFallbackActive();
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.setFallback(now));
+            setStatus(now ? TextFormatting.RED + "FALL BACK! Defenders withdrawing to fallback lines."
+                          : TextFormatting.GREEN + "Stand fast — defenders returning to primary lines.");
+            return;
+        }
+
         if (!isOnCanvas(mouseX, mouseY)) {
             super.mouseClicked(mouseX, mouseY, mouseButton);
+            return;
+        }
+
+        // DEFENSIVE PLANNING placement (P-key mode). Left-click places; point markers commit instantly,
+        // polylines accumulate. Right-click commits a >=2-point polyline, discards a fragment, or
+        // removes the marker nearest the click.
+        if (planMode >= 0) {
+            int[] w = screenToWorld(mouseX, mouseY);
+            if (mouseButton == 0) {
+                studio.ERM.strategic.defense.DefenseMarker probe = new studio.ERM.strategic.defense.DefenseMarker();
+                probe.type = planMode;
+                if (probe.isPolyline()) {
+                    planPending.add(new net.minecraft.util.math.BlockPos(w[0], 0, w[1]));
+                } else {
+                    probe.points.add(new net.minecraft.util.math.BlockPos(w[0], 0, w[1]));
+                    TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.add(probe));
+                    setStatus(TextFormatting.GREEN + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode) + " placed.");
+                }
+            } else if (mouseButton == 1) {
+                if (planPending.size() >= 2) {
+                    commitPendingPolyline();
+                } else if (!planPending.isEmpty()) {
+                    planPending.clear();
+                    setStatus(TextFormatting.GRAY + "Pending line discarded.");
+                } else {
+                    TacticalWarMapNetwork.sendToServer(
+                            studio.ERM.war.map.net.C2SDefensePlanEdit.removeNearest(w[0], w[1]));
+                    setStatus(TextFormatting.YELLOW + "Removed nearest marker.");
+                }
+            }
             return;
         }
 
@@ -347,6 +406,28 @@ public class GuiTacticalWarMap extends GuiScreen {
                 viewCenterZ = (int) mc.player.posZ;
             }
         }
+        // 'P' cycles the defensive-PLANNING mode: off -> Line -> Strongpoint -> Vehicle -> AA -> Rally
+        // -> Reserve -> Fallback Line -> Patrol Route -> off. Cycling commits any pending polyline.
+        if (typedChar == 'p' || typedChar == 'P') {
+            commitPendingPolyline();
+            planMode = (planMode >= studio.ERM.strategic.defense.DefenseMarker.NAMES.length - 1) ? -1 : planMode + 1;
+            setStatus(planMode < 0
+                    ? TextFormatting.GRAY + "Planning OFF"
+                    : TextFormatting.AQUA + "PLAN: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
+                      + TextFormatting.GRAY + "  (click to place, right-click removes/commits, P = next)");
+        }
+    }
+
+    /** Send an accumulated polyline (>=2 points) to the server as a plan marker; discard fragments. */
+    private void commitPendingPolyline() {
+        if (planPending.size() >= 2 && planMode >= 0) {
+            studio.ERM.strategic.defense.DefenseMarker m = new studio.ERM.strategic.defense.DefenseMarker();
+            m.type = planMode;
+            m.points.addAll(planPending);
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.add(m));
+            setStatus(TextFormatting.GREEN + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode) + " placed.");
+        }
+        planPending.clear();
     }
 
     // ==================== Selection Preview ====================
@@ -415,11 +496,17 @@ public class GuiTacticalWarMap extends GuiScreen {
             drawSelectionRectangle();
         }
 
+        // Draw the DEFENSIVE PLAN (Military overlay) under the traffic + player markers.
+        drawDefensePlan();
+
         // Draw the STRATEGIC TRAFFIC overlay (patrols/traders moving on the map) under the player marker.
         drawStrategicMarkers();
 
         // Draw player marker
         drawPlayerMarker();
+
+        // The FALL BACK toggle + planning-mode readout (top-left of the canvas).
+        drawFallbackButton();
 
         disableCanvasScissor();
 
@@ -700,6 +787,95 @@ public class GuiTacticalWarMap extends GuiScreen {
             label += " (" + cost + " CP)";
         }
         fontRenderer.drawStringWithShadow(label, x1 + 2, y1 - 10, claimDragging ? 0xFF00FF00 : 0xFFFF4444);
+    }
+
+    // ==================== PHASE 2: defensive-plan drawing ====================
+
+    /** Draw every plan marker: polylines as coloured lines with endpoint dots, points as coloured
+     *  squares with the marker's initial. The pending (uncommitted) polyline draws semi-transparent. */
+    private void drawDefensePlan() {
+        java.util.List<studio.ERM.strategic.defense.DefenseMarker> markers =
+                studio.ERM.war.map.client.ClientDefensePlanCache.markers();
+        for (studio.ERM.strategic.defense.DefenseMarker m : markers) {
+            int color = PLAN_COLORS[Math.max(0, Math.min(m.type, PLAN_COLORS.length - 1))];
+            drawPlanPolyline(m.points, color, false);
+            if (!m.isPolyline() && !m.points.isEmpty()) {
+                int[] scr = worldToScreen(m.points.get(0).getX(), m.points.get(0).getZ());
+                if (scr != null && onCanvasPoint(scr)) {
+                    Gui.drawRect(scr[0] - 3, scr[1] - 3, scr[0] + 4, scr[1] + 4, color);
+                    fontRenderer.drawStringWithShadow(
+                            studio.ERM.strategic.defense.DefenseMarker.nameOf(m.type).substring(0, 1),
+                            scr[0] + 5, scr[1] - 3, color);
+                }
+            }
+        }
+        // Pending polyline preview (what you're mid-drawing).
+        if (planMode >= 0 && !planPending.isEmpty()) {
+            int color = (PLAN_COLORS[Math.max(0, Math.min(planMode, PLAN_COLORS.length - 1))] & 0x00FFFFFF) | 0x88000000;
+            drawPlanPolyline(planPending, color, true);
+        }
+    }
+
+    private boolean onCanvasPoint(int[] scr) {
+        return scr[0] >= canvasLeft && scr[0] < canvasLeft + canvasSize
+                && scr[1] >= canvasTop && scr[1] < canvasTop + canvasSize;
+    }
+
+    private void drawPlanPolyline(java.util.List<net.minecraft.util.math.BlockPos> pts, int color, boolean pending) {
+        int[] prev = null;
+        for (net.minecraft.util.math.BlockPos p : pts) {
+            int[] scr = worldToScreen(p.getX(), p.getZ());
+            if (scr == null) { prev = null; continue; }
+            if (onCanvasPoint(scr)) Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 2, scr[1] + 2, color);
+            if (prev != null) drawMapLine(prev[0], prev[1], scr[0], scr[1], color);
+            prev = scr;
+        }
+    }
+
+    /** GL line between two screen points (the map's polylines are diagonal; drawRect can't do that). */
+    private void drawMapLine(int x1, int y1, int x2, int y2, int argb) {
+        float a = (argb >>> 24) / 255F, r = ((argb >> 16) & 0xFF) / 255F,
+                g = ((argb >> 8) & 0xFF) / 255F, b = (argb & 0xFF) / 255F;
+        GlStateManager.disableTexture2D();
+        GlStateManager.enableBlend();
+        GlStateManager.glLineWidth(2.0F);
+        net.minecraft.client.renderer.Tessellator tess = net.minecraft.client.renderer.Tessellator.getInstance();
+        net.minecraft.client.renderer.BufferBuilder buf = tess.getBuffer();
+        buf.begin(org.lwjgl.opengl.GL11.GL_LINES,
+                net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_COLOR);
+        buf.pos(x1, y1, 0).color(r, g, b, a).endVertex();
+        buf.pos(x2, y2, 0).color(r, g, b, a).endVertex();
+        tess.draw();
+        GlStateManager.disableBlend();
+        GlStateManager.enableTexture2D();
+        GlStateManager.color(1F, 1F, 1F, 1F);
+    }
+
+    private int[] fallbackButtonBounds() {
+        return new int[]{canvasLeft + 4, canvasTop + 4, canvasLeft + 4 + 78, canvasTop + 4 + 14};
+    }
+
+    private boolean isOnFallbackButton(int mx, int my) {
+        int[] b = fallbackButtonBounds();
+        return mx >= b[0] && mx < b[2] && my >= b[1] && my < b[3];
+    }
+
+    /** The one-click FALL BACK toggle + the current planning-mode readout. */
+    private void drawFallbackButton() {
+        boolean fb = studio.ERM.war.map.client.ClientDefensePlanCache.isFallbackActive();
+        int[] b = fallbackButtonBounds();
+        Gui.drawRect(b[0], b[1], b[2], b[3], fb ? 0xEEB71C1C : 0xEE263238);
+        Gui.drawRect(b[0], b[1], b[2], b[1] + 1, 0xFFFFFFFF);
+        Gui.drawRect(b[0], b[3] - 1, b[2], b[3], 0xFF000000);
+        String label = fb ? "FALLING BACK!" : "FALL BACK";
+        int tw = fontRenderer.getStringWidth(label);
+        fontRenderer.drawStringWithShadow(label, b[0] + (b[2] - b[0] - tw) / 2f, b[1] + 3, fb ? 0xFFFFCDD2 : 0xFFFF5252);
+        if (planMode >= 0) {
+            fontRenderer.drawStringWithShadow(
+                    "PLAN: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
+                            + (planPending.isEmpty() ? "" : " (" + planPending.size() + " pts)"),
+                    b[0], b[3] + 3, 0xFF00E5FF);
+        }
     }
 
     // PHASE 2 traffic-overlay icons -- REAL AW2 art (AW2 is a hard dependency, its assets are loadable):

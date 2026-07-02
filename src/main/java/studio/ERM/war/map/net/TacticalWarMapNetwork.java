@@ -25,6 +25,8 @@ public final class TacticalWarMapNetwork {
                 C2SPacketBatchClaim.Handler.class, C2SPacketBatchClaim.class, nextId++, Side.SERVER);
         EpochRunnerMod.network.registerMessage(
                 C2SRequestTerritorySync.Handler.class, C2SRequestTerritorySync.class, nextId++, Side.SERVER);
+        EpochRunnerMod.network.registerMessage(
+                C2SDefensePlanEdit.Handler.class, C2SDefensePlanEdit.class, nextId++, Side.SERVER);
 
         // Server -> Client
         EpochRunnerMod.network.registerMessage(
@@ -33,6 +35,8 @@ public final class TacticalWarMapNetwork {
                 S2CTerritorySync.Handler.class, S2CTerritorySync.class, nextId++, Side.CLIENT);
         EpochRunnerMod.network.registerMessage(
                 S2CStrategicSync.Handler.class, S2CStrategicSync.class, nextId++, Side.CLIENT);
+        EpochRunnerMod.network.registerMessage(
+                S2CDefensePlanSync.Handler.class, S2CDefensePlanSync.class, nextId++, Side.CLIENT);
     }
 
     public static void sendToServer(IMessage msg) {

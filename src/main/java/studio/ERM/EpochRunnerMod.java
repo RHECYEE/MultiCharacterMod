@@ -199,6 +199,11 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.StrategicSimulator.class);
             logger.info("[Strategic] simulator registered (strategic map is LIVE)");
 
+            // PHASE 2 -- the defensive-plan Military AI (staffs the player's map-drawn plan with the
+            // available guards: strongpoints/lines/reserves in war, patrol routes in peace).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.defense.DefensePlanExecutor.class);
+            logger.info("[Strategic] defense-plan executor registered");
+
             // CRITICAL FIX: populate the battle-director registry. It was never initialized, so the
             // map's "Deploy Battle" menu listed ZERO battle types (empty dropdown) and any registry
             // lookup returned nothing. init() is idempotent and self-guards on `initialized`.
