@@ -33,7 +33,20 @@ public final class DefensePlanExecutor {
     private static final double GATHER_RANGE = 200.0; // how far from a marker we recruit defenders
     private static final double LINE_SPACING = 3.0;   // blocks between infantry slots on a line
 
+    // The live ORDER BOOK: entity UUID -> the surface-resolved position it must hold. Written by the
+    // executor every pass; read EVERY TICK by the injected EntityAIDefendPlanOrder task inside each
+    // npc's own AI list (the actual hijack -- see that class). Transient by design.
+    private static final java.util.Map<java.util.UUID, BlockPos> ORDERS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static int passCounter = 0;
+
     private DefensePlanExecutor() {}
+
+    /** The standing order for an npc, or null when the plan has nothing for it (read by the AI task). */
+    public static BlockPos orderFor(EntityCreature npc) {
+        return npc == null ? null : ORDERS.get(npc.getUniqueID());
+    }
 
     @SubscribeEvent
     public static void onWorldTick(TickEvent.WorldTickEvent e) {
@@ -43,7 +56,7 @@ public final class DefensePlanExecutor {
         if (world.getTotalWorldTime() % 60 != 0) return; // 3s cadence
 
         DefensePlanData plan = DefensePlanData.get(world);
-        if (plan.markers.isEmpty()) return;
+        if (plan.markers.isEmpty()) { ORDERS.clear(); return; }
 
         boolean siege = false;
         try {
@@ -52,7 +65,10 @@ public final class DefensePlanExecutor {
         } catch (Throwable ignored) {}
 
         List<EntityCreature> defenders = gatherDefenders(world, plan);
-        if (defenders.isEmpty()) return;
+        if (defenders.isEmpty()) { ORDERS.clear(); return; }
+
+        // Fresh order book each pass: dead/ungathered npcs drop off, live ones are re-ordered below.
+        ORDERS.clear();
 
         // Build the slot list in PRIORITY ORDER: strongpoints first, then the active lines (war only),
         // so an under-staffed plan fills what matters most.
@@ -101,6 +117,13 @@ public final class DefensePlanExecutor {
                     tickPatrol(world, d, patrols.get(i++ % patrols.size()), plan);
                 }
             }
+        }
+
+        // Heartbeat (every ~30s) so "the plan is/isn't commanding anyone" is visible in the log.
+        if (++passCounter % 10 == 0) {
+            studio.ERM.EpochRunnerMod.logger.info("[Defense] pass: " + defenders.size() + " defender(s), "
+                    + slots.size() + " priority slot(s), orders=" + ORDERS.size()
+                    + (siege ? (plan.fallbackActive ? " [SIEGE/FALLBACK]" : " [SIEGE]") : " [peace]"));
         }
     }
 
@@ -173,27 +196,33 @@ public final class DefensePlanExecutor {
     }
 
     /**
-     * FINAL SAY movement. The Military AI owns what every defender is doing at all times — this is the
-     * player's means of controlling their army. A defender may finish an ADJACENT fight (target within
-     * 8 blocks); a distant chase is CANCELLED and the plan's order reasserted. A defender that cannot
-     * close on its slot across several passes (unpathable line / destroyed position) REGROUPS at the
-     * rally point instead of wandering, and gets reassigned from there.
+     * FINAL SAY orders. The Military AI owns what every defender is doing at all times — this is the
+     * player's means of controlling their army. This does NOT push a one-shot navigator call (AW2's own
+     * AI overwrote that within a tick — the "they don't care about orders" failure); instead it (1)
+     * injects our {@link EntityAIDefendPlanOrder} task INTO the npc's AI list once, where the vanilla
+     * mutex system suspends AW2's movement tasks, and (2) writes the standing order the task reads
+     * every tick. A defender may finish an ADJACENT fight (8 blocks); a distant chase is CANCELLED. A
+     * defender making no progress across ~4 passes (unpathable line / destroyed position) is re-ordered
+     * to the RALLY point to regroup, then reassigned.
      */
     private static void driveTo(WorldServer world, EntityCreature d, BlockPos slot, DefensePlanData plan) {
         if (d == null || slot == null) return;
         try {
-            // Combat override: allow the close fight, cancel the distant chase.
+            ensureOrderTask(d);
+
+            // Combat override: allow the close fight, cancel the distant chase (re-arms our AI task).
             net.minecraft.entity.EntityLivingBase tgt = d.getAttackTarget();
-            if (tgt != null && !tgt.isDead) {
-                if (d.getDistanceSq(tgt) < 64.0) return; // finish the adjacent fight
-                d.setAttackTarget(null);                  // the plan overrides the chase
+            if (tgt != null && !tgt.isDead && d.getDistanceSq(tgt) >= 64.0) {
+                d.setAttackTarget(null);
                 d.getNavigator().clearPath();
             }
 
             BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos(slot.getX(), 64, slot.getZ()));
-            double dd = d.getDistanceSq(slot.getX() + 0.5, g.getY(), slot.getZ() + 0.5);
+            BlockPos resolved = new BlockPos(slot.getX(), g.getY(), slot.getZ());
+            double dd = d.getDistanceSq(resolved.getX() + 0.5, resolved.getY(), resolved.getZ() + 0.5);
             if (dd <= 6.25) {
-                d.getEntityData().setInteger("erm_def_stuck", 0); // on station
+                d.getEntityData().setInteger("erm_def_stuck", 0); // on station; the task holds it here
+                ORDERS.put(d.getUniqueID(), resolved);
                 return;
             }
 
@@ -207,9 +236,9 @@ public final class DefensePlanExecutor {
                 BlockPos rally = regroupPoint(plan);
                 if (rally != null) {
                     BlockPos rg = world.getTopSolidOrLiquidBlock(new BlockPos(rally.getX(), 64, rally.getZ()));
-                    d.getNavigator().tryMoveToXYZ(rally.getX() + 0.5, rg.getY(), rally.getZ() + 0.5, 1.05D);
-                    // Reaching the regroup point clears the counter so reassignment can retry the line.
-                    if (d.getDistanceSq(rally.getX() + 0.5, rg.getY(), rally.getZ() + 0.5) < 25.0) {
+                    BlockPos rr = new BlockPos(rally.getX(), rg.getY(), rally.getZ());
+                    ORDERS.put(d.getUniqueID(), rr); // regroup order instead of grinding the wall
+                    if (d.getDistanceSq(rr.getX() + 0.5, rr.getY(), rr.getZ() + 0.5) < 25.0) {
                         d.getEntityData().setInteger("erm_def_stuck", 0);
                         d.getEntityData().setDouble("erm_def_lastd", 0);
                     }
@@ -217,8 +246,19 @@ public final class DefensePlanExecutor {
                 }
             }
 
-            d.getNavigator().tryMoveToXYZ(slot.getX() + 0.5, g.getY(), slot.getZ() + 0.5, 1.05D);
+            ORDERS.put(d.getUniqueID(), resolved);
         } catch (Throwable ignored) {}
+    }
+
+    /** Inject our order-following AI task ONCE into the npc's own task list (priority 0, movement
+     *  mutex) -- the actual hijack point. Scanned (not flagged) so it survives entity reloads. */
+    private static void ensureOrderTask(EntityCreature d) {
+        for (net.minecraft.entity.ai.EntityAITasks.EntityAITaskEntry e : d.tasks.taskEntries) {
+            if (e.action instanceof EntityAIDefendPlanOrder) return;
+        }
+        d.tasks.addTask(0, new EntityAIDefendPlanOrder(d));
+        studio.ERM.EpochRunnerMod.logger.info("[Defense] took command of " + d.getName()
+                + " (" + Aw2Npc.fullType(d) + ")");
     }
 
     /** Where broken/unpathable units regroup: the first RALLY marker, else the plan's centroid. */
