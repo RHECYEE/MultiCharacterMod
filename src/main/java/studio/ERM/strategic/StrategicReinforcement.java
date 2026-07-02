@@ -156,9 +156,11 @@ public class StrategicReinforcement extends StrategicObject {
             x = lead.posX;
             z = lead.posZ;
             double vdx = (goal.getX() + 0.5) - lead.posX, vdz = (goal.getZ() + 0.5) - lead.posZ;
-            if (vdx * vdx + vdz * vdz < 100.0 && routeIndex >= route.size() - 1) {
+            // Generous 16-block arrival: Flan hull driving is imprecise; the delivery PARKS nearby
+            // rather than fussing at the exact block (the "takes forever to show up" feel).
+            if (vdx * vdx + vdz * vdz < 256.0 && routeIndex >= route.size() - 1) {
                 finalizeArrival(world);
-            } else if (vdx * vdx + vdz * vdz < 100.0) {
+            } else if (vdx * vdx + vdz * vdz < 256.0) {
                 advanceWaypoint();
             } else {
                 facing = Math.atan2(vdz, vdx);

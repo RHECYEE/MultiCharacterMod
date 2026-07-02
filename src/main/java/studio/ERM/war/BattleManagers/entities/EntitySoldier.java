@@ -301,10 +301,24 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
             }
         }
 
-        // DOWNED: immobile casualty waiting for rescue -- no marching, no fighting.
+        // DOWNED: immobile casualty waiting for rescue -- no marching, no fighting. Bleed-out is
+        // SELF-managed (a world with no defense plan must never leave immortal casualties); being
+        // carried extends the clock, and the hospital heal timer suspends it.
         if (isDowned()) {
             try { getNavigator().clearPath(); setAttackTarget(null); } catch (Throwable ignored) {}
             if (!isRiding()) setSneaking(true);
+            long now = world.getTotalWorldTime();
+            long heal = getEntityData().getLong("erm_heal_at");
+            long bleed = getEntityData().getLong("erm_bleedout");
+            if (heal == 0 && bleed > 0) {
+                if (isRiding()) {
+                    getEntityData().setLong("erm_bleedout", now + 20 * 120); // being carried buys time
+                } else if (now >= bleed) {
+                    setDowned(false);
+                    this.attackEntityFrom(DamageSource.OUT_OF_WORLD, 10000F); // bled out
+                    return;
+                }
+            }
             return;
         }
 
@@ -403,25 +417,21 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     public boolean attackEntityFrom(DamageSource source, float amount) {
         // Ignore friendly blast splash while shielded (allied tank/airstrike detonations).
         if (explosionShield && source.isExplosion()) return false;
-        // MILITIA go DOWN instead of dying when a hospital point exists (the casualty rescue loop).
-        // A downed soldier can still be finished off by further hits.
+        // MILITIA go DOWN instead of dying -- ALWAYS (friendly fire included). With a hospital point
+        // they get rescued + healed; without one they bleed out in ~4 minutes. A downed soldier can
+        // still be finished off by further hits.
         if (!world.isRemote && isPlayerAligned() && !isDowned()
                 && amount >= this.getHealth() && !source.canHarmInCreative()) {
-            boolean hospital = false;
-            try {
-                studio.ERM.strategic.defense.DefensePlanData plan =
-                        studio.ERM.strategic.defense.DefensePlanData.get(world);
-                for (studio.ERM.strategic.defense.DefenseMarker m : plan.markers) {
-                    if (m.type == studio.ERM.strategic.defense.DefenseMarker.MEDICAL
-                            && !m.points.isEmpty()) { hospital = true; break; }
-                }
-            } catch (Throwable ignored) {}
-            if (hospital) {
-                setDowned(true);
-                setHealth(6.0F);
-                getEntityData().setLong("erm_bleedout", world.getTotalWorldTime() + 20 * 240); // 4 min max wait
-                return false;
+            setDowned(true);
+            setHealth(6.0F);
+            getEntityData().setLong("erm_bleedout", world.getTotalWorldTime() + 20 * 240);
+            if (source.getTrueSource() instanceof EntityPlayer) {
+                ((EntityPlayer) source.getTrueSource()).sendMessage(
+                        new net.minecraft.util.text.TextComponentString(
+                                net.minecraft.util.text.TextFormatting.YELLOW
+                                        + "One of your soldiers is DOWN — get them to a Medical Point!"));
             }
+            return false;
         }
         return super.attackEntityFrom(source, amount);
     }
@@ -650,8 +660,12 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     @Override
     public void onDeath(net.minecraft.util.DamageSource cause) {
         if (!this.world.isRemote && cause.getTrueSource() instanceof EntityPlayer) {
-            ((EntityPlayer) cause.getTrueSource()).sendMessage(new net.minecraft.util.text.TextComponentString(
-                    net.minecraft.util.text.TextFormatting.RED + "You killed an enemy soldier"));
+            // Friendly fire on your OWN militia must never read as an enemy kill.
+            String msg = isPlayerAligned()
+                    ? net.minecraft.util.text.TextFormatting.YELLOW + "You killed one of your OWN soldiers!"
+                    : net.minecraft.util.text.TextFormatting.RED + "You killed an enemy soldier";
+            ((EntityPlayer) cause.getTrueSource()).sendMessage(
+                    new net.minecraft.util.text.TextComponentString(msg));
         }
         super.onDeath(cause);
     }

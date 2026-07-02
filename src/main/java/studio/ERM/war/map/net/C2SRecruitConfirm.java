@@ -138,7 +138,7 @@ public class C2SRecruitConfirm implements IMessage {
             r.gear = gear;
             r.strength = squad;
             r.vehicleShortName = vehicleShortName;
-            if (kind == 2) r.speed = 5.5; // vehicles drive in faster than boots march
+            if (kind == 2) r.speed = 9.0; // vehicles DRIVE in fast -- a delivery should feel imminent
             r.route.add(origin);
             r.route.add(new BlockPos(rally.getX(), 0, rally.getZ()));
             r.routeIndex = 1; // marching leg: origin -> rally

@@ -158,12 +158,19 @@ public final class StrategicSimulator {
             }
         }
 
-        // SIEGE ALERT: the active battle's site ("enemy camp gathering here").
+        // SIEGE ALERT: mark the enemy's ACTUAL CAMP (the staging platform) when the director exposes
+        // it -- the battle site is the TARGET (usually the player's own base), which was imprecise.
         boolean siege = false; int sx = 0, sz = 0;
         try {
             studio.ERM.war.BattleManagers.core.BattleEngine engine =
                     studio.ERM.war.BattleManagers.core.BattleEngine.get(world);
             net.minecraft.util.math.BlockPos site = (engine != null) ? engine.getActiveSite() : null;
+            if (engine != null && engine.getActiveDirector()
+                    instanceof studio.ERM.war.BattleManagers.directors.SiegeDirector) {
+                net.minecraft.util.math.BlockPos camp = ((studio.ERM.war.BattleManagers.directors.SiegeDirector)
+                        engine.getActiveDirector()).getStagingCenter();
+                if (camp != null) site = camp;
+            }
             if (site != null) { siege = true; sx = site.getX(); sz = site.getZ(); }
         } catch (Throwable ignored) {}
 

@@ -39,8 +39,9 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int viewCenterX; // world X at center of canvas
     private int viewCenterZ; // world Z at center of canvas
 
-    private static final int[] ZOOM_LEVELS = {2, 4, 8, 16, 32}; // blocks per pixel
-    private int zoomIndex = 2; // default 8 bpp
+    // 1 bpp added so planning can zoom in to BLOCK precision (placing markers accurately).
+    private static final int[] ZOOM_LEVELS = {1, 2, 4, 8, 16, 32}; // blocks per pixel
+    private int zoomIndex = 3; // default 8 bpp
 
     private int canvasSize = 512;
     private int canvasLeft, canvasTop;
@@ -982,21 +983,32 @@ public class GuiTacticalWarMap extends GuiScreen {
         }
     }
 
-    /** The "enemy camp gathering here" siege alert: a pulsing red beacon + label at the battle site. */
+    /** The siege alert: a small pulsing red-outlined BANNER icon at the ENEMY CAMP itself (the army's
+     *  staging platform, not the target) -- the full label only appears on hover, so it's precise
+     *  without shouting over the whole map. */
     private void drawSiegeAlert() {
         if (!studio.ERM.war.map.client.ClientStrategicCache.siegeActive()) return;
+        initIconStacks();
         int[] scr = worldToScreen(studio.ERM.war.map.client.ClientStrategicCache.siegeX(),
                 studio.ERM.war.map.client.ClientStrategicCache.siegeZ());
         if (scr == null || !onCanvasPoint(scr)) return;
-        // Pulse so the eye is drawn to it.
-        int pulse = (int) ((System.currentTimeMillis() / 90) % 8);
-        int s = 4 + (pulse < 4 ? pulse : 8 - pulse);
-        Gui.drawRect(scr[0] - s, scr[1] - s, scr[0] + s + 1, scr[1] + s + 1, 0x66FF1744);
-        Gui.drawRect(scr[0] - 2, scr[1] - 2, scr[0] + 3, scr[1] + 3, 0xFFFF1744);
-        String label = "ENEMY CAMP GATHERING HERE";
-        int tw = fontRenderer.getStringWidth(label);
-        Gui.drawRect(scr[0] - tw / 2 - 2, scr[1] - 22, scr[0] + tw / 2 + 2, scr[1] - 11, 0xCC330000);
-        fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] - 20, 0xFFFF5252);
+        // Small pulsing ring so the eye finds it without it dominating the map.
+        int pulse = (int) ((System.currentTimeMillis() / 120) % 6);
+        int s = 7 + (pulse < 3 ? pulse : 6 - pulse);
+        Gui.drawRect(scr[0] - s, scr[1] - s, scr[0] + s + 1, scr[1] - s + 1, 0x88FF1744);
+        Gui.drawRect(scr[0] - s, scr[1] + s, scr[0] + s + 1, scr[1] + s + 1, 0x88FF1744);
+        Gui.drawRect(scr[0] - s, scr[1] - s, scr[0] - s + 1, scr[1] + s + 1, 0x88FF1744);
+        Gui.drawRect(scr[0] + s, scr[1] - s, scr[0] + s + 1, scr[1] + s + 1, 0x88FF1744);
+        drawItemIcon(icEnemyCamp, scr[0], scr[1], OUTLINE_RIVAL);
+        // Hover: the precise readout.
+        int dx = uiMouseX - scr[0], dy = uiMouseY - scr[1];
+        if (dx * dx + dy * dy <= 144) {
+            String label = "Enemy camp: " + studio.ERM.war.map.client.ClientStrategicCache.siegeX()
+                    + ", " + studio.ERM.war.map.client.ClientStrategicCache.siegeZ();
+            int tw = fontRenderer.getStringWidth(label);
+            Gui.drawRect(scr[0] - tw / 2 - 2, scr[1] - 22, scr[0] + tw / 2 + 2, scr[1] - 11, 0xCC330000);
+            fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] - 20, 0xFFFF5252);
+        }
     }
 
     /** Military side panel: units assigned X/Y + control reminders. Drawn in the SIDEBAR column
@@ -1280,7 +1292,7 @@ public class GuiTacticalWarMap extends GuiScreen {
     private static final int OUTLINE_NEUTRAL = 0xAAFFEB3B;
 
     private static net.minecraft.item.ItemStack[] markerIconStacks;
-    private static net.minecraft.item.ItemStack icTrader, icPatrol, icSquad, icVehicle;
+    private static net.minecraft.item.ItemStack icTrader, icPatrol, icSquad, icVehicle, icEnemyCamp;
 
     private static void initIconStacks() {
         if (markerIconStacks != null) return;
@@ -1303,6 +1315,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         icPatrol = new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD);
         icSquad = new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD);
         icVehicle = new net.minecraft.item.ItemStack(net.minecraft.init.Items.MINECART);
+        icEnemyCamp = new net.minecraft.item.ItemStack(net.minecraft.init.Items.BANNER);
     }
 
     /** Draw a real ITEM icon (10x10) centred at (cx,cy) with an optional allegiance outline. */

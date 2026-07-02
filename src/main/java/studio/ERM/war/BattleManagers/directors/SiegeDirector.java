@@ -4159,6 +4159,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
     @Override
     public BattleOutcome getOutcome() { return outcome; }
+    /** The army's actual CAMP (staging platform) -- what the map's "enemy camp" icon should mark. */
+    public BlockPos getStagingCenter() { return stagingCenter != null ? stagingCenter : site; }
+
     public int getCurrentPhase() { return phase; }
     public int getTotalPhases() { return TOTAL_PHASES; }
     public int getTickAge() { return tickAge; }
