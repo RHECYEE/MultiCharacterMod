@@ -79,7 +79,7 @@ public class CommandWar extends CommandBase {
             return getListOfStringsMatchingLastWord(args, "guards", "city", "status");
         }
         if (args.length == 2 && "strat".equalsIgnoreCase(args[0])) {
-            return getListOfStringsMatchingLastWord(args, "patrol", "trader", "list", "clear");
+            return getListOfStringsMatchingLastWord(args, "patrol", "trader", "list", "clear", "test", "testclear");
         }
         return java.util.Collections.emptyList();
     }
@@ -427,6 +427,43 @@ public class CommandWar extends CommandBase {
                         + (t.escorts > 0 ? ", 2 escorts" : "") + ") — trade route ping-ponging past you.");
                 msg(sender, TextFormatting.GRAY + "Merchant + chest cart (config traffic.cartEntityId to swap "
                         + "the cart entity). Kill the merchant and the route dies.");
+                break;
+            }
+            case "test": {
+                // MINIMAL FORCED-MOVEMENT PROBE (debug protocol): nearest AW2 npc within 30 blocks gets
+                // the order task injected + a locked order to walk to a point ~6 blocks ahead of you,
+                // bypassing the whole plan pipeline. If it walks, the hijack core works and the bug is
+                // in slots/assignment/cleanup; if not, injection/uuid/mutex/navigator is broken.
+                if (!(world instanceof net.minecraft.world.WorldServer)) break;
+                net.minecraft.world.WorldServer ws = (net.minecraft.world.WorldServer) world;
+                net.minecraft.entity.EntityCreature nearest = null;
+                double bd = 30 * 30;
+                for (net.minecraft.entity.EntityCreature c : world.getEntitiesWithinAABB(
+                        net.minecraft.entity.EntityCreature.class,
+                        player.getEntityBoundingBox().grow(30))) {
+                    if (c == null || c.isDead) continue;
+                    boolean aw2 = studio.ERM.strategic.defense.Aw2Npc.isAw2Npc(c)
+                            || String.valueOf(net.minecraft.entity.EntityList.getKey(c)).contains("ancientwarfare");
+                    if (!aw2) continue;
+                    double d = player.getDistanceSq(c);
+                    if (d < bd) { bd = d; nearest = c; }
+                }
+                if (nearest == null) {
+                    msg(sender, TextFormatting.RED + "No AW2 npc within 30 blocks. "
+                            + "Classifier: " + (studio.ERM.strategic.defense.Aw2Npc.isAw2Npc(player) ? "?" : "loaded (see log)"));
+                    break;
+                }
+                Vec3d look = player.getLookVec();
+                BlockPos dest = new BlockPos(player.posX + look.x * 6.0, player.posY, player.posZ + look.z * 6.0);
+                studio.ERM.strategic.defense.DefensePlanExecutor.debugOrder(ws, nearest, dest);
+                msg(sender, TextFormatting.GREEN + "Forced-movement probe: " + nearest.getName()
+                        + " ordered to " + posStr(dest) + ". Watch it walk + the [DefenseAI] log.");
+                msg(sender, TextFormatting.GRAY + studio.ERM.strategic.defense.Aw2Npc.describe(nearest));
+                break;
+            }
+            case "testclear": {
+                int n = studio.ERM.strategic.defense.DefensePlanExecutor.clearDebugOrders();
+                msg(sender, TextFormatting.GREEN + "Cleared " + n + " debug order(s).");
                 break;
             }
             case "clear": {

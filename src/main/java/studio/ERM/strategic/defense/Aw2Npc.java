@@ -42,9 +42,35 @@ public final class Aw2Npc {
             mOwnerName = owner.getMethod("getName");
             mOwnerUuid = owner.getMethod("getUUID");
             available = true;
+            studio.ERM.EpochRunnerMod.logger.info("[DefenseAI] Aw2Npc classifier RESOLVED (NpcBase/"
+                    + "NpcPlayerOwned/NpcFaction reachable)");
         } catch (Throwable t) {
             available = false;
+            // If this ever logs, EVERY classification silently degrades to NONE -- the #1 suspect when
+            // "no defenders are ever found". The exact failure is printed so it's diagnosable.
+            studio.ERM.EpochRunnerMod.logger.error("[DefenseAI] Aw2Npc classifier FAILED to resolve: "
+                    + t.getClass().getName() + ": " + t.getMessage());
         }
+    }
+
+    /** Full instanceof/identity breakdown for one entity (debug protocol check L). */
+    public static String describe(Entity e) {
+        resolve();
+        if (e == null) return "entity=null";
+        StringBuilder sb = new StringBuilder();
+        sb.append("class=").append(e.getClass().getName());
+        sb.append(" available=").append(available);
+        if (available) {
+            sb.append(" isNpcBase=").append(npcBase.isInstance(e));
+            sb.append(" isPlayerOwned=").append(npcPlayerOwned.isInstance(e));
+            sb.append(" isFaction=").append(npcFaction.isInstance(e));
+        }
+        sb.append(" allegiance=").append(allegiance(e));
+        sb.append(" type=").append(type(e));
+        sb.append(" subType=").append(subType(e));
+        sb.append(" fullType=").append(fullType(e));
+        sb.append(" owner=").append(ownerName(e));
+        return sb.toString();
     }
 
     /** Is this entity an AW2 NPC at all (NpcBase)? */

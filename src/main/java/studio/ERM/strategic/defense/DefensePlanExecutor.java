@@ -39,6 +39,11 @@ public final class DefensePlanExecutor {
     private static final java.util.Map<java.util.UUID, BlockPos> ORDERS =
             new java.util.concurrent.ConcurrentHashMap<>();
 
+    // Debug-locked orders (the /war strat test forced-movement probe): never cleared or overwritten by
+    // the plan pass, so the minimal test is isolated from assignment/cleanup bugs (protocol check J).
+    private static final java.util.Set<java.util.UUID> DEBUG_LOCK =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+
     private static int passCounter = 0;
 
     private DefensePlanExecutor() {}
@@ -48,6 +53,64 @@ public final class DefensePlanExecutor {
         return npc == null ? null : ORDERS.get(npc.getUniqueID());
     }
 
+    /** MINIMAL FORCED-MOVEMENT TEST: inject the task + write a locked order, bypassing the whole plan
+     *  pipeline. If the npc walks, injection/task/uuid/mutex/navigator are fine and the bug is in
+     *  slots/assignment/cleanup; if not, the core hijack is broken. */
+    public static void debugOrder(WorldServer world, EntityCreature npc, BlockPos pos) {
+        if (npc == null || pos == null) return;
+        ensureOrderTask(npc);
+        BlockPos g = sanitizeSlot(world, pos);
+        ORDERS.put(npc.getUniqueID(), g);
+        DEBUG_LOCK.add(npc.getUniqueID());
+        studio.ERM.EpochRunnerMod.logger.info("[DefenseAI] DEBUG ORDER entity=" + npc.getUniqueID()
+                + " -> " + g.getX() + " " + g.getY() + " " + g.getZ()
+                + " dim(order)=" + world.provider.getDimension()
+                + " dim(entity)=" + npc.world.provider.getDimension()
+                + " | " + Aw2Npc.describe(npc));
+    }
+
+    public static int clearDebugOrders() {
+        int n = DEBUG_LOCK.size();
+        for (java.util.UUID u : DEBUG_LOCK) ORDERS.remove(u);
+        DEBUG_LOCK.clear();
+        return n;
+    }
+
+    /** Clear plan-issued orders but never the debug-locked probes. */
+    private static void clearUnlocked() {
+        ORDERS.keySet().removeIf(u -> !DEBUG_LOCK.contains(u));
+    }
+
+    /**
+     * Slot sanitizer (protocol check H): a map-drawn slot can be inside a wall / on a fence / in liquid.
+     * Resolve the surface, require a solid floor + 2 air blocks, and spiral-search up to 4 blocks for
+     * the nearest valid stand if the exact slot is bad.
+     */
+    private static BlockPos sanitizeSlot(WorldServer world, BlockPos slot) {
+        BlockPos best = null;
+        outer:
+        for (int r = 0; r <= 4; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) continue; // ring only
+                    int x = slot.getX() + dx, z = slot.getZ() + dz;
+                    BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos(x, 64, z));
+                    try {
+                        if (world.getBlockState(g.down()).getMaterial().isLiquid()) continue;
+                        if (!world.getBlockState(g.down()).getMaterial().isSolid()) continue;
+                        if (world.getBlockState(g).getMaterial().isSolid()) continue;
+                        if (world.getBlockState(g.up()).getMaterial().isSolid()) continue;
+                        best = new BlockPos(x, g.getY(), z);
+                        break outer;
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+        if (best != null) return best;
+        BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos(slot.getX(), 64, slot.getZ()));
+        return new BlockPos(slot.getX(), g.getY(), slot.getZ());
+    }
+
     @SubscribeEvent
     public static void onWorldTick(TickEvent.WorldTickEvent e) {
         if (e.phase != TickEvent.Phase.END) return;
@@ -55,8 +118,20 @@ public final class DefensePlanExecutor {
         WorldServer world = (WorldServer) e.world;
         if (world.getTotalWorldTime() % 60 != 0) return; // 3s cadence
 
+        passCounter++;
         DefensePlanData plan = DefensePlanData.get(world);
-        if (plan.markers.isEmpty()) { ORDERS.clear(); return; }
+        if (plan.markers.isEmpty()) {
+            clearUnlocked();
+            // Log this state UNCONDITIONALLY (throttled): "zero logs" must be impossible. If this line
+            // prints while the player HAS drawn markers, the GUI -> C2SDefensePlanEdit -> DefensePlanData
+            // pipeline is the broken stage, not the AI.
+            if (passCounter % 10 == 0) {
+                studio.ERM.EpochRunnerMod.logger.info("[Defense] executor alive; NO plan markers "
+                        + "server-side (dim " + world.provider.getDimension() + ")"
+                        + (DEBUG_LOCK.isEmpty() ? "" : "; " + DEBUG_LOCK.size() + " debug order(s) live"));
+            }
+            return;
+        }
 
         boolean siege = false;
         try {
@@ -65,26 +140,31 @@ public final class DefensePlanExecutor {
         } catch (Throwable ignored) {}
 
         List<EntityCreature> defenders = gatherDefenders(world, plan);
-        if (defenders.isEmpty()) { ORDERS.clear(); return; }
+        if (defenders.isEmpty()) {
+            clearUnlocked();
+            if (passCounter % 10 == 0) logGatherDiagnostics(world, plan); // WHY is nobody conscripted?
+            return;
+        }
 
-        // Fresh order book each pass: dead/ungathered npcs drop off, live ones are re-ordered below.
-        ORDERS.clear();
+        // Fresh order book each pass (debug-locked probes excepted): dead/ungathered npcs drop off.
+        clearUnlocked();
 
-        // Build the slot list in PRIORITY ORDER: strongpoints first, then the active lines (war only),
-        // so an under-staffed plan fills what matters most.
+        // Build the slot list in PRIORITY ORDER: strongpoints first, then the ACTIVE lines, so an
+        // under-staffed plan fills what matters most. Lines are staffed in PEACETIME too (a standing
+        // garrison on the wall reads right and makes the plan visibly testable without a siege);
+        // the FALL BACK toggle picks which line family is active.
         List<BlockPos> slots = new ArrayList<>();
         for (DefenseMarker m : plan.markers) {
             if (m.type == DefenseMarker.STRONGPOINT && !m.points.isEmpty()) slots.add(m.points.get(0));
         }
-        if (siege) {
-            int lineType = plan.fallbackActive ? DefenseMarker.FALLBACK_LINE : DefenseMarker.LINE;
-            for (DefenseMarker m : plan.markers) {
-                if (m.type == lineType) addLineSlots(m, slots);
-            }
+        int lineType = plan.fallbackActive ? DefenseMarker.FALLBACK_LINE : DefenseMarker.LINE;
+        for (DefenseMarker m : plan.markers) {
+            if (m.type == lineType) addLineSlots(m, slots);
         }
 
-        // GREEDY ASSIGNMENT: each slot takes the nearest unassigned defender.
+        // GREEDY ASSIGNMENT: each slot takes the nearest unassigned defender (debug-locked npcs skipped).
         List<EntityCreature> pool = new ArrayList<>(defenders);
+        pool.removeIf(d -> DEBUG_LOCK.contains(d.getUniqueID()));
         for (BlockPos slot : slots) {
             if (pool.isEmpty()) break;
             EntityCreature best = null;
@@ -119,12 +199,47 @@ public final class DefensePlanExecutor {
             }
         }
 
-        // Heartbeat (every ~30s) so "the plan is/isn't commanding anyone" is visible in the log.
-        if (++passCounter % 10 == 0) {
+        // Heartbeat (every ~15s) so "the plan is/isn't commanding anyone" is visible in the log.
+        if (passCounter % 5 == 0) {
             studio.ERM.EpochRunnerMod.logger.info("[Defense] pass: " + defenders.size() + " defender(s), "
                     + slots.size() + " priority slot(s), orders=" + ORDERS.size()
                     + (siege ? (plan.fallbackActive ? " [SIEGE/FALLBACK]" : " [SIEGE]") : " [peace]"));
         }
+    }
+
+    /**
+     * WHY-EMPTY diagnostics (runs when a plan exists but ZERO defenders were conscripted): counts what
+     * the sweep actually saw and prints a full classifier breakdown for up to 3 AW2 npcs, so the failed
+     * stage (classifier resolution / instanceof / type string / range) is provable from the log alone.
+     */
+    private static void logGatherDiagnostics(WorldServer world, DefensePlanData plan) {
+        int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        for (DefenseMarker m : plan.markers) {
+            for (BlockPos p : m.points) {
+                minX = Math.min(minX, p.getX()); maxX = Math.max(maxX, p.getX());
+                minZ = Math.min(minZ, p.getZ()); maxZ = Math.max(maxZ, p.getZ());
+            }
+        }
+        AxisAlignedBB box = new AxisAlignedBB(minX - GATHER_RANGE, 0, minZ - GATHER_RANGE,
+                maxX + GATHER_RANGE, 255, maxZ + GATHER_RANGE);
+        List<EntityCreature> all = world.getEntitiesWithinAABB(EntityCreature.class, box);
+        int aw2 = 0, owned = 0, samples = 0;
+        StringBuilder sb = new StringBuilder();
+        for (EntityCreature c : all) {
+            if (c == null || c.isDead) continue;
+            boolean isAw2 = Aw2Npc.isAw2Npc(c)
+                    || String.valueOf(EntityList.getKey(c)).contains("ancientwarfare");
+            if (!isAw2) continue;
+            aw2++;
+            if (Aw2Npc.isPlayerOwnedCombat(c)) owned++;
+            if (samples < 3) {
+                samples++;
+                sb.append("\n[Defense]   sample: ").append(Aw2Npc.describe(c));
+            }
+        }
+        studio.ERM.EpochRunnerMod.logger.info("[Defense] 0 defenders conscripted: creaturesInBox="
+                + all.size() + " aw2Npcs=" + aw2 + " playerOwnedCombat=" + owned
+                + " markers=" + plan.markers.size() + sb);
     }
 
     /**
@@ -217,8 +332,7 @@ public final class DefensePlanExecutor {
                 d.getNavigator().clearPath();
             }
 
-            BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos(slot.getX(), 64, slot.getZ()));
-            BlockPos resolved = new BlockPos(slot.getX(), g.getY(), slot.getZ());
+            BlockPos resolved = sanitizeSlot(world, slot); // check H: never order into a wall/fence/liquid
             double dd = d.getDistanceSq(resolved.getX() + 0.5, resolved.getY(), resolved.getZ() + 0.5);
             if (dd <= 6.25) {
                 d.getEntityData().setInteger("erm_def_stuck", 0); // on station; the task holds it here
