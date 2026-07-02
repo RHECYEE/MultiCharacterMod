@@ -68,6 +68,13 @@ public class GuiTacticalWarMap extends GuiScreen {
     // ==================== Context Menu ====================
     private final GuiBattleDeployMenu deployMenu = new GuiBattleDeployMenu();
 
+    // ==================== Map TABS: Claims / Civilian / Military ====================
+    // The war features (defense planning, FALL BACK, battle deployment, military traffic) live on
+    // their own MILITARY tab so the base map stays clean. CLAIMS = territory + claiming; CIVILIAN =
+    // the civilian economy in motion (traders/carts/couriers). Selection persists across opens.
+    private static final String[] TABS = {"CLAIMS", "CIVILIAN", "MILITARY"};
+    private static int activeTab = 0;
+
     // ==================== PHASE 2: Defensive Planning (Military overlay) ====================
     // planMode: -1 = off, else the DefenseMarker type being placed. P cycles modes. In plan mode,
     // left-click places (point markers commit instantly; polylines accumulate clicks), right-click
@@ -216,9 +223,23 @@ public class GuiTacticalWarMap extends GuiScreen {
             deployMenu.close();
         }
 
-        // THE FALL BACK BUTTON (top-left of the canvas): one easy-to-hit toggle that swings every
+        // TAB BAR (top-centre of the canvas): Claims / Civilian / Military.
+        if (mouseButton == 0) {
+            for (int i = 0; i < TABS.length; i++) {
+                int[] b = tabBounds(i);
+                if (mouseX >= b[0] && mouseX < b[2] && mouseY >= b[1] && mouseY < b[3]) {
+                    if (activeTab != i && i != 2) { commitPendingPolyline(); planMode = -1; }
+                    activeTab = i;
+                    setStatus(TextFormatting.AQUA + TABS[i] + " tab"
+                            + (i == 2 ? TextFormatting.GRAY + "  (P = plan markers, right-click = deploy)" : ""));
+                    return;
+                }
+            }
+        }
+
+        // THE FALL BACK BUTTON (Military tab, top-left): one easy-to-hit toggle that swings every
         // defender from the primary lines to the fallback lines (and back).
-        if (mouseButton == 0 && isOnFallbackButton(mouseX, mouseY)) {
+        if (activeTab == 2 && mouseButton == 0 && isOnFallbackButton(mouseX, mouseY)) {
             boolean now = !studio.ERM.war.map.client.ClientDefensePlanCache.isFallbackActive();
             TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.setFallback(now));
             setStatus(now ? TextFormatting.RED + "FALL BACK! Defenders withdrawing to fallback lines."
@@ -231,10 +252,10 @@ public class GuiTacticalWarMap extends GuiScreen {
             return;
         }
 
-        // DEFENSIVE PLANNING placement (P-key mode). Left-click places; point markers commit instantly,
-        // polylines accumulate. Right-click commits a >=2-point polyline, discards a fragment, or
-        // removes the marker nearest the click.
-        if (planMode >= 0) {
+        // DEFENSIVE PLANNING placement (Military tab, P-key mode). Left-click places; point markers
+        // commit instantly, polylines accumulate. Right-click commits a >=2-point polyline, discards a
+        // fragment, or removes the marker nearest the click.
+        if (activeTab == 2 && planMode >= 0) {
             int[] w = screenToWorld(mouseX, mouseY);
             if (mouseButton == 0) {
                 studio.ERM.strategic.defense.DefenseMarker probe = new studio.ERM.strategic.defense.DefenseMarker();
@@ -261,7 +282,7 @@ public class GuiTacticalWarMap extends GuiScreen {
             return;
         }
 
-        if (GuiScreen.isShiftKeyDown()) {
+        if (GuiScreen.isShiftKeyDown() && activeTab == 0) { // claiming lives on the CLAIMS tab
             // Shift + left-click: start claim selection
             if (mouseButton == 0) {
                 claimDragging = true;
@@ -298,8 +319,8 @@ public class GuiTacticalWarMap extends GuiScreen {
             return;
         }
 
-        // Right-click: context menu
-        if (mouseButton == 1) {
+        // Right-click: battle-deploy context menu (a WAR feature -> Military tab only)
+        if (mouseButton == 1 && activeTab == 2) {
             int[] world = screenToWorld(mouseX, mouseY);
             int cp = WarMapClientStats.getCommandPoints();
             int era = WarMapClientStats.getEra();
@@ -408,7 +429,13 @@ public class GuiTacticalWarMap extends GuiScreen {
         }
         // 'P' cycles the defensive-PLANNING mode: off -> Line -> Strongpoint -> Vehicle -> AA -> Rally
         // -> Reserve -> Fallback Line -> Patrol Route -> off. Cycling commits any pending polyline.
+        // Planning is a MILITARY-tab feature: pressing P elsewhere jumps to that tab first.
         if (typedChar == 'p' || typedChar == 'P') {
+            if (activeTab != 2) {
+                activeTab = 2;
+                setStatus(TextFormatting.AQUA + "MILITARY tab" + TextFormatting.GRAY + " — press P again to start planning.");
+                return;
+            }
             commitPendingPolyline();
             planMode = (planMode >= studio.ERM.strategic.defense.DefenseMarker.NAMES.length - 1) ? -1 : planMode + 1;
             setStatus(planMode < 0
@@ -496,17 +523,20 @@ public class GuiTacticalWarMap extends GuiScreen {
             drawSelectionRectangle();
         }
 
-        // Draw the DEFENSIVE PLAN (Military overlay) under the traffic + player markers.
-        drawDefensePlan();
+        // Draw the DEFENSIVE PLAN (Military tab only) under the traffic + player markers.
+        if (activeTab == 2) drawDefensePlan();
 
-        // Draw the STRATEGIC TRAFFIC overlay (patrols/traders moving on the map) under the player marker.
-        drawStrategicMarkers();
+        // Strategic traffic (filtered per tab: civilian on CIVILIAN, military on MILITARY).
+        if (activeTab != 0) drawStrategicMarkers();
 
         // Draw player marker
         drawPlayerMarker();
 
-        // The FALL BACK toggle + planning-mode readout (top-left of the canvas).
-        drawFallbackButton();
+        // The FALL BACK toggle + planning-mode readout (Military tab only).
+        if (activeTab == 2) drawFallbackButton();
+
+        // The Claims / Civilian / Military tab bar (always).
+        drawTabs();
 
         disableCanvasScissor();
 
@@ -851,8 +881,31 @@ public class GuiTacticalWarMap extends GuiScreen {
         GlStateManager.color(1F, 1F, 1F, 1F);
     }
 
+    private int[] tabBounds(int i) {
+        int w = 58, h = 12, gap = 2;
+        int total = TABS.length * w + (TABS.length - 1) * gap;
+        int x0 = canvasLeft + (canvasSize - total) / 2 + i * (w + gap);
+        int y0 = canvasTop + 3;
+        return new int[]{x0, y0, x0 + w, y0 + h};
+    }
+
+    /** The Claims / Civilian / Military tab bar (top-centre of the canvas). */
+    private void drawTabs() {
+        for (int i = 0; i < TABS.length; i++) {
+            int[] b = tabBounds(i);
+            boolean act = (i == activeTab);
+            Gui.drawRect(b[0], b[1], b[2], b[3], act ? 0xEE1565C0 : 0xAA10101E);
+            Gui.drawRect(b[0], b[3] - 1, b[2], b[3], act ? 0xFFFFFFFF : 0xFF000000);
+            String t = TABS[i];
+            int tw = fontRenderer.getStringWidth(t);
+            fontRenderer.drawStringWithShadow(t, b[0] + (b[2] - b[0] - tw) / 2f, b[1] + 2,
+                    act ? 0xFFFFFFFF : 0xFF9E9E9E);
+        }
+    }
+
     private int[] fallbackButtonBounds() {
-        return new int[]{canvasLeft + 4, canvasTop + 4, canvasLeft + 4 + 78, canvasTop + 4 + 14};
+        // Below the tab bar on the left so the two never overlap.
+        return new int[]{canvasLeft + 4, canvasTop + 18, canvasLeft + 4 + 78, canvasTop + 18 + 14};
     }
 
     private boolean isOnFallbackButton(int mx, int my) {
@@ -896,6 +949,11 @@ public class GuiTacticalWarMap extends GuiScreen {
                 studio.ERM.war.map.client.ClientStrategicCache.snapshot();
         if (objs.isEmpty()) return;
         for (studio.ERM.war.map.net.S2CStrategicSync.Data d : objs) {
+            // Tab filter: the CIVILIAN tab shows the economy (traders/carts/couriers); the MILITARY tab
+            // shows military traffic (patrols/convoys). New archetypes default to military.
+            boolean civilian = "trader".equals(d.type);
+            if (activeTab == 1 && !civilian) continue;
+            if (activeTab == 2 && civilian) continue;
             int[] scr = worldToScreen(d.x, d.z);
             if (scr == null) continue;
             int sx = scr[0], sy = scr[1];

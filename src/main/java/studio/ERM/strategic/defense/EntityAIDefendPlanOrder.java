@@ -19,8 +19,11 @@ import studio.ERM.EpochRunnerMod;
  */
 public class EntityAIDefendPlanOrder extends EntityAIBase {
 
-    /** Diagnosis switch (user protocol check D): true = ignore fights, force movement. */
-    public static boolean DEBUG_FORCE_MOVEMENT = true;
+    /** Diagnosis switch (user protocol check D): true = ignore fights, force movement.
+     *  PROVEN 2026-07-02 (probe walked, plan staffed 14 guards) -> yield contract restored. */
+    public static boolean DEBUG_FORCE_MOVEMENT = false;
+    /** Per-stage logging (injection + failed PATHs always log; the rest only when verbose). */
+    public static boolean VERBOSE = false;
 
     private final EntityCreature npc;
     private int repathCooldown;
@@ -62,7 +65,7 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
         boolean run = o != null && !npc.isDead && !fight && distSqToOrder(o) > 6.25;
 
         long now = npc.world.getTotalWorldTime();
-        if (now - lastShouldLog >= 40) { // once per 2s per npc
+        if (VERBOSE && now - lastShouldLog >= 40) { // once per 2s per npc
             lastShouldLog = now;
             String yield = (o == null) ? "no-order" : fight ? "adjacent-fight"
                     : (distSqToOrder(o) <= 6.25) ? "on-station" : "none";
@@ -86,9 +89,11 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
     @Override
     public void startExecuting() {
         repathCooldown = 0;
-        BlockPos o = order();
-        EpochRunnerMod.logger.info("[DefenseAI] START entity=" + npc.getUniqueID()
-                + " target=" + (o == null ? "null" : (o.getX() + " " + o.getY() + " " + o.getZ())));
+        if (VERBOSE) {
+            BlockPos o = order();
+            EpochRunnerMod.logger.info("[DefenseAI] START entity=" + npc.getUniqueID()
+                    + " target=" + (o == null ? "null" : (o.getX() + " " + o.getY() + " " + o.getZ())));
+        }
     }
 
     @Override
@@ -97,7 +102,7 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
         if (o == null) return;
 
         long now = npc.world.getTotalWorldTime();
-        if (now - lastTickLog >= 40) { // once per 2s
+        if (VERBOSE && now - lastTickLog >= 40) { // once per 2s
             lastTickLog = now;
             EpochRunnerMod.logger.info("[DefenseAI] TICK entity=" + npc.getUniqueID()
                     + " distSq=" + (int) distSqToOrder(o)
@@ -110,18 +115,36 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
 
         if (--repathCooldown > 0 && !npc.getNavigator().noPath()) return;
         repathCooldown = 10; // keep repathing every 10t while off-station (check I)
-        boolean ok = npc.getNavigator().tryMoveToXYZ(o.getX() + 0.5, o.getY(), o.getZ() + 0.5, 1.15D);
-        EpochRunnerMod.logger.info("[DefenseAI] PATH entity=" + npc.getUniqueID()
-                + " target=" + o.getX() + " " + o.getY() + " " + o.getZ() + " result=" + ok);
+
+        // FAR ORDER -> CLAMPED MARCH. The vanilla navigator can't solve 75-110-block paths (the log
+        // showed PATH result=false exactly on the distant slots), so march via a ~12-block waypoint the
+        // local A* can genuinely path -- same discipline as the siege soldiers.
+        double gx = o.getX() + 0.5, gz = o.getZ() + 0.5;
+        double dx = gx - npc.posX, dz = gz - npc.posZ;
+        double dH = Math.sqrt(dx * dx + dz * dz);
+        boolean ok;
+        if (dH > 14.0) {
+            double ux = dx / dH, uz = dz / dH;
+            ok = npc.getNavigator().tryMoveToXYZ(npc.posX + ux * 12.0, npc.posY, npc.posZ + uz * 12.0, 1.15D);
+        } else {
+            ok = npc.getNavigator().tryMoveToXYZ(gx, o.getY(), gz, 1.15D);
+        }
+        if (VERBOSE || !ok) {
+            EpochRunnerMod.logger.info("[DefenseAI] PATH entity=" + npc.getUniqueID()
+                    + " target=" + o.getX() + " " + o.getY() + " " + o.getZ()
+                    + " dist=" + (int) dH + " result=" + ok);
+        }
     }
 
     @Override
     public void resetTask() {
         BlockPos o = order();
-        String reason = (o == null) ? "order-removed"
-                : adjacentFight() ? "adjacent-fight"
-                : (distSqToOrder(o) <= 4.0) ? "arrived" : "other";
-        EpochRunnerMod.logger.info("[DefenseAI] RESET entity=" + npc.getUniqueID() + " reason=" + reason);
+        if (VERBOSE) {
+            String reason = (o == null) ? "order-removed"
+                    : adjacentFight() ? "adjacent-fight"
+                    : (distSqToOrder(o) <= 4.0) ? "arrived" : "other";
+            EpochRunnerMod.logger.info("[DefenseAI] RESET entity=" + npc.getUniqueID() + " reason=" + reason);
+        }
         // Check I: do NOT clearPath unless the order is actually gone — a cleared path on a combat
         // yield handed control straight back to AW2.
         if (o == null) {
