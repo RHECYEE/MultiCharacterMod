@@ -204,6 +204,11 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.defense.DefensePlanExecutor.class);
             logger.info("[Strategic] defense-plan executor registered");
 
+            // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
+            net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(
+                    instance, new studio.ERM.strategic.defense.ErmGuiHandler());
+            logger.info("[Strategic] gui handler registered (recruit screen)");
+
             // CRITICAL FIX: populate the battle-director registry. It was never initialized, so the
             // map's "Deploy Battle" menu listed ZERO battle types (empty dropdown) and any registry
             // lookup returned nothing. init() is idempotent and self-guards on `initialized`.

@@ -81,6 +81,20 @@ public final class WarLevelsConfig {
                 ? data.traffic.cartEntityId : "";
     }
 
+    // ── PHASE 2: recruitment knobs ──
+    public static int recruitPermanentCost() {
+        return (data != null && data.recruit != null) ? data.recruit.permanentCostCB : 150;
+    }
+    public static int recruitMercCost() {
+        return (data != null && data.recruit != null) ? data.recruit.mercenaryCostCB : 50;
+    }
+    public static int recruitMercDays() {
+        return (data != null && data.recruit != null) ? data.recruit.mercenaryDays : 3;
+    }
+    public static int recruitArrivalDistance() {
+        return (data != null && data.recruit != null) ? data.recruit.arrivalDistanceBlocks : 350;
+    }
+
     /**
      * Legacy hook: older code called this during init to ensure
      * server/client had their config loaded.
@@ -296,6 +310,7 @@ public final class WarLevelsConfig {
         public LevelData[] levels = createDefaultLevels();
         public SiegeTuning siege = new SiegeTuning();
         public TrafficTuning traffic = new TrafficTuning();
+        public RecruitTuning recruit = new RecruitTuning();
 
         private void sanitize() {
             if (levels == null || levels.length == 0) {
@@ -310,6 +325,27 @@ public final class WarLevelsConfig {
             siege.sanitize();
             if (traffic == null) traffic = new TrafficTuning();
             traffic.sanitize();
+            if (recruit == null) recruit = new RecruitTuning();
+            recruit.sanitize();
+        }
+    }
+
+    /** PHASE 2 recruitment costs (a flat Command-Buck constant for now; later scales with gear value). */
+    public static final class RecruitTuning {
+        /** Permanent recruitment: joins your standing army forever. */
+        public int permanentCostCB = 150;
+        /** Mercenary contract: cheaper upfront, departs after mercenaryDays (or when dismissed). */
+        public int mercenaryCostCB = 50;
+        public int mercenaryDays = 3;
+        /** How far away the recruits START their march to your rally (the arrival you can watch). */
+        public int arrivalDistanceBlocks = 350;
+
+        public void sanitize() {
+            if (permanentCostCB < 0) permanentCostCB = 150;
+            if (mercenaryCostCB < 0) mercenaryCostCB = 50;
+            if (mercenaryDays < 1) mercenaryDays = 3;
+            if (arrivalDistanceBlocks < 60) arrivalDistanceBlocks = 60;
+            if (arrivalDistanceBlocks > 2000) arrivalDistanceBlocks = 2000;
         }
     }
 

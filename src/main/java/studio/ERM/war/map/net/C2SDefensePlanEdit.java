@@ -22,13 +22,18 @@ public class C2SDefensePlanEdit implements IMessage {
     public static final int OP_SET_FALLBACK = 3;
     public static final int OP_REQUEST_SYNC = 4;
     public static final int OP_ADJUST = 5;      // +-1 troops on the marker nearest (x,z)
-    public static final int OP_ASSIGN_ALL = 6;  // assign all unassigned defenders to the marker nearest (x,z)
+    public static final int OP_ASSIGN_ALL = 6;  // assign all unassigned defenders to the marker at uid
+    public static final int OP_UPDATE = 7;      // properties panel: assigned/priority/formation/flags by uid
+    public static final int OP_DELETE_UID = 8;  // delete a marker by uid
 
     private int op = OP_REQUEST_SYNC;
     private DefenseMarker marker = null; // ADD
-    private int x, z;                    // REMOVE_NEAREST / ADJUST / ASSIGN_ALL
+    private int x, z;                    // REMOVE_NEAREST / ADJUST
     private int delta;                   // ADJUST
     private boolean flag;                // SET_FALLBACK
+    private int uid;                     // UPDATE / DELETE_UID / ASSIGN_ALL
+    private int assigned, priority, formation;  // UPDATE
+    private boolean allowVehicles, reservePos;  // UPDATE
 
     public C2SDefensePlanEdit() {}
 
@@ -61,9 +66,21 @@ public class C2SDefensePlanEdit implements IMessage {
         p.op = OP_ADJUST; p.x = x; p.z = z; p.delta = delta; return p;
     }
 
-    public static C2SDefensePlanEdit assignAll(int x, int z) {
+    public static C2SDefensePlanEdit assignAll(int uid) {
         C2SDefensePlanEdit p = new C2SDefensePlanEdit();
-        p.op = OP_ASSIGN_ALL; p.x = x; p.z = z; return p;
+        p.op = OP_ASSIGN_ALL; p.uid = uid; return p;
+    }
+
+    public static C2SDefensePlanEdit update(DefenseMarker m) {
+        C2SDefensePlanEdit p = new C2SDefensePlanEdit();
+        p.op = OP_UPDATE; p.uid = m.uid; p.assigned = m.assigned; p.priority = m.priority;
+        p.formation = m.formation; p.allowVehicles = m.allowVehicles; p.reservePos = m.reservePosition;
+        return p;
+    }
+
+    public static C2SDefensePlanEdit deleteUid(int uid) {
+        C2SDefensePlanEdit p = new C2SDefensePlanEdit();
+        p.op = OP_DELETE_UID; p.uid = uid; return p;
     }
 
     @Override
@@ -74,7 +91,12 @@ public class C2SDefensePlanEdit implements IMessage {
             case OP_REMOVE_NEAREST: x = buf.readInt(); z = buf.readInt(); break;
             case OP_SET_FALLBACK:   flag = buf.readBoolean(); break;
             case OP_ADJUST:         x = buf.readInt(); z = buf.readInt(); delta = buf.readInt(); break;
-            case OP_ASSIGN_ALL:     x = buf.readInt(); z = buf.readInt(); break;
+            case OP_ASSIGN_ALL:     uid = buf.readInt(); break;
+            case OP_UPDATE:
+                uid = buf.readInt(); assigned = buf.readInt(); priority = buf.readInt();
+                formation = buf.readInt(); allowVehicles = buf.readBoolean(); reservePos = buf.readBoolean();
+                break;
+            case OP_DELETE_UID:     uid = buf.readInt(); break;
             default: break;
         }
     }
@@ -87,7 +109,12 @@ public class C2SDefensePlanEdit implements IMessage {
             case OP_REMOVE_NEAREST: buf.writeInt(x); buf.writeInt(z); break;
             case OP_SET_FALLBACK:   buf.writeBoolean(flag); break;
             case OP_ADJUST:         buf.writeInt(x); buf.writeInt(z); buf.writeInt(delta); break;
-            case OP_ASSIGN_ALL:     buf.writeInt(x); buf.writeInt(z); break;
+            case OP_ASSIGN_ALL:     buf.writeInt(uid); break;
+            case OP_UPDATE:
+                buf.writeInt(uid); buf.writeInt(assigned); buf.writeInt(priority);
+                buf.writeInt(formation); buf.writeBoolean(allowVehicles); buf.writeBoolean(reservePos);
+                break;
+            case OP_DELETE_UID:     buf.writeInt(uid); break;
             default: break;
         }
     }
@@ -127,8 +154,8 @@ public class C2SDefensePlanEdit implements IMessage {
                         break;
                     }
                     case OP_ASSIGN_ALL: {
-                        DefenseMarker m = nearestAssignable(plan, msg.x, msg.z);
-                        if (m != null) {
+                        DefenseMarker m = byUid(plan, msg.uid);
+                        if (m != null && m.isAssignable()) {
                             int total = 0;
                             for (DefenseMarker o : plan.markers) if (o.isAssignable()) total += o.assigned;
                             int defenders = studio.ERM.strategic.defense.DefensePlanExecutor
@@ -139,11 +166,33 @@ public class C2SDefensePlanEdit implements IMessage {
                         }
                         break;
                     }
+                    case OP_UPDATE: {
+                        DefenseMarker m = byUid(plan, msg.uid);
+                        if (m != null) {
+                            m.assigned = Math.max(1, Math.min(255, msg.assigned));
+                            m.priority = Math.max(0, Math.min(100, msg.priority));
+                            m.formation = Math.max(0, Math.min(DefenseMarker.FORMATIONS.length - 1, msg.formation));
+                            m.allowVehicles = msg.allowVehicles;
+                            m.reservePosition = msg.reservePos;
+                            plan.markDirty();
+                        }
+                        break;
+                    }
+                    case OP_DELETE_UID: {
+                        DefenseMarker m = byUid(plan, msg.uid);
+                        if (m != null) { plan.markers.remove(m); plan.markDirty(); }
+                        break;
+                    }
                     default:
                         break;
                 }
                 TacticalWarMapNetwork.sendTo(new S2CDefensePlanSync(plan.markers, plan.fallbackActive), player);
             });
+            return null;
+        }
+
+        private static DefenseMarker byUid(DefensePlanData plan, int uid) {
+            for (DefenseMarker m : plan.markers) if (m.uid == uid) return m;
             return null;
         }
 

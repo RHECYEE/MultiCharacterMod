@@ -27,6 +27,8 @@ public final class TacticalWarMapNetwork {
                 C2SRequestTerritorySync.Handler.class, C2SRequestTerritorySync.class, nextId++, Side.SERVER);
         EpochRunnerMod.network.registerMessage(
                 C2SDefensePlanEdit.Handler.class, C2SDefensePlanEdit.class, nextId++, Side.SERVER);
+        EpochRunnerMod.network.registerMessage(
+                C2SRecruitConfirm.Handler.class, C2SRecruitConfirm.class, nextId++, Side.SERVER);
 
         // Server -> Client
         EpochRunnerMod.network.registerMessage(

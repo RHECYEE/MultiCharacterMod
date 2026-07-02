@@ -109,6 +109,16 @@ public class CommandWar extends CommandBase {
             case "heat":    heat(sender, args);        break;
             case "chinook": insertion(sender, "chinook");   break;
             case "strat":   strat(sender, args);            break;
+            case "dismiss": {
+                EntityPlayerMP p = getCommandSenderAsPlayer(sender);
+                if (p.world instanceof net.minecraft.world.WorldServer) {
+                    int n = studio.ERM.strategic.defense.DefensePlanExecutor
+                            .dismissMercs((net.minecraft.world.WorldServer) p.world);
+                    msg(sender, n > 0 ? TextFormatting.YELLOW + "Dismissed " + n + " mercenary(ies)."
+                                      : TextFormatting.GRAY + "No mercenaries under contract.");
+                }
+                break;
+            }
             case "fastrope":
             case "heli":
             case "insertion": insertion(sender, args.length >= 2 ? args[1] : "littlebird"); break;

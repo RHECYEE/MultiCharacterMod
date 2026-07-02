@@ -119,6 +119,11 @@ public final class DefensePlanExecutor {
         if (world.getTotalWorldTime() % 60 != 0) return; // 3s cadence
 
         passCounter++;
+
+        // MERCENARY CONTRACT EXPIRY (runs plan or no plan): when a merc's contract time is up, the
+        // company departs -- message + removal. ("One siege" duration + marching-home visual later.)
+        if (world.getTotalWorldTime() % 1200 == 0) sweepMercExpiry(world);
+
         DefensePlanData plan = DefensePlanData.get(world);
         if (plan.markers.isEmpty()) {
             clearUnlocked();
@@ -154,11 +159,13 @@ public final class DefensePlanExecutor {
         // evenly along the polyline; the FALL BACK toggle picks primary vs fallback). Lines staff in
         // peacetime too (standing garrison).
         List<BlockPos> slots = new ArrayList<>();
-        for (DefenseMarker m : plan.markers) {
+        List<DefenseMarker> ordered = new ArrayList<>(plan.markers);
+        ordered.sort((a, b) -> b.priority - a.priority); // higher priority staffs first within its class
+        for (DefenseMarker m : ordered) {
             if (m.type == DefenseMarker.STRONGPOINT && !m.points.isEmpty()) addPointSlots(m, slots);
         }
         int lineType = plan.fallbackActive ? DefenseMarker.FALLBACK_LINE : DefenseMarker.LINE;
-        for (DefenseMarker m : plan.markers) {
+        for (DefenseMarker m : ordered) {
             if (m.type == lineType) addLineSlots(m, slots);
         }
 
@@ -270,6 +277,16 @@ public final class DefensePlanExecutor {
         for (EntityCreature c : world.getEntitiesWithinAABB(EntityCreature.class, box)) {
             if (c == null || c.isDead) continue;
             if (c.getEntityData().hasKey("erm_strategic")) continue; // strategic-map units are not ours
+            // Recruited MILITIA (permanent recruits + mercenaries under contract) serve the plan too.
+            if (c instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) {
+                try {
+                    if ("militia".equalsIgnoreCase(
+                            ((studio.ERM.war.BattleManagers.entities.EntitySoldier) c).getTeam_())) {
+                        out.add(c);
+                    }
+                } catch (Throwable ignored) {}
+                continue;
+            }
             if (Aw2Npc.isPlayerOwnedCombat(c)) { out.add(c); continue; }
             // Fallback only when the classifier can't see AW2 at all (reflection failed): the old
             // registry-name heuristic, explicitly excluding anything the classifier DID identify.
@@ -444,6 +461,38 @@ public final class DefensePlanExecutor {
         d.tasks.addTask(0, new EntityAIDefendPlanOrder(d));
         studio.ERM.EpochRunnerMod.logger.info("[Defense] took command of " + d.getName()
                 + " (" + Aw2Npc.fullType(d) + ")");
+    }
+
+    /** Expire mercenary contracts: the company thanks you for the work and departs. */
+    private static void sweepMercExpiry(WorldServer world) {
+        long now = world.getTotalWorldTime();
+        int gone = 0;
+        for (net.minecraft.entity.Entity e : new ArrayList<>(world.loadedEntityList)) {
+            if (!(e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) || e.isDead) continue;
+            long expiry = e.getEntityData().getLong("erm_merc_expiry");
+            if (expiry > 0 && now >= expiry) {
+                e.setDead();
+                gone++;
+            }
+        }
+        if (gone > 0) {
+            studio.ERM.EpochRunnerMod.logger.info("[Recruit] mercenary contract ended: " + gone + " departed");
+            for (net.minecraft.entity.player.EntityPlayer p : world.playerEntities) {
+                p.sendMessage(new net.minecraft.util.text.TextComponentString(
+                        net.minecraft.util.text.TextFormatting.YELLOW
+                                + "Your mercenary contract has ended — " + gone + " soldier(s) departed for home."));
+            }
+        }
+    }
+
+    /** Dismiss all mercenaries immediately (the "until dismissed" contract clause). */
+    public static int dismissMercs(WorldServer world) {
+        int gone = 0;
+        for (net.minecraft.entity.Entity e : new ArrayList<>(world.loadedEntityList)) {
+            if (!(e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) || e.isDead) continue;
+            if (e.getEntityData().getLong("erm_merc_expiry") > 0) { e.setDead(); gone++; }
+        }
+        return gone;
     }
 
     /** Where broken/unpathable units regroup: the first RALLY marker, else the plan's centroid. */

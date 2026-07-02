@@ -97,6 +97,13 @@ public class GuiTacticalWarMap extends GuiScreen {
     // Mouse position captured each frame for marker hover readouts.
     private int uiMouseX, uiMouseY;
 
+    // ==================== Marker PROPERTIES PANEL ====================
+    // Clicking a marker (Military tab, planning off) opens this panel: units / priority / formation /
+    // flags / assign-all / delete. Tracked by uid so server syncs never leave it pointing at a stale
+    // object. This replaces raw click-counting as the primary editing surface.
+    private int panelUid = -1;
+    private int panelX, panelY;
+
     // ==================== Status Messages ====================
     private String statusMessage = "";
     private long statusExpiry = 0;
@@ -255,8 +262,22 @@ public class GuiTacticalWarMap extends GuiScreen {
         // CLEAR ALL (Military tab, beside FALL BACK): wipe the whole defensive plan.
         if (activeTab == 2 && mouseButton == 0 && isOnClearAllButton(mouseX, mouseY)) {
             planPending.clear();
+            panelUid = -1;
             TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.clearAll());
             setStatus(TextFormatting.YELLOW + "Defensive plan cleared.");
+            return;
+        }
+
+        // RECRUIT (Military tab): open the loadout/contract screen (server opens the container GUI).
+        if (activeTab == 2 && mouseButton == 0 && isOnRecruitButton(mouseX, mouseY)) {
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SRecruitConfirm.openRequest());
+            return;
+        }
+
+        // MARKER PROPERTIES PANEL: while open it eats clicks; clicking outside closes it.
+        if (activeTab == 2 && panelUid != -1) {
+            if (handlePanelClick(mouseX, mouseY)) return;
+            panelUid = -1;
             return;
         }
 
@@ -300,25 +321,15 @@ public class GuiTacticalWarMap extends GuiScreen {
             return;
         }
 
-        // TROOP ASSIGNMENT on existing markers (Military tab, planning off): left-click a node/line +1,
-        // right-click -1, SHIFT+left-click assigns all unassigned units. Falls through to pan / deploy
-        // when no marker is under the cursor.
-        if (activeTab == 2 && planMode < 0) {
+        // MARKER CLICK -> PROPERTIES PANEL (Military tab, planning off): units / priority / formation /
+        // flags / assign-all / delete live in the panel. Falls through to pan / deploy when no marker
+        // is under the cursor.
+        if (activeTab == 2 && planMode < 0 && mouseButton == 0) {
             studio.ERM.strategic.defense.DefenseMarker hit = markerAt(mouseX, mouseY);
-            if (hit != null && hit.isAssignable()) {
-                net.minecraft.util.math.BlockPos c = hit.center();
-                if (mouseButton == 0 && GuiScreen.isShiftKeyDown()) {
-                    TacticalWarMapNetwork.sendToServer(
-                            studio.ERM.war.map.net.C2SDefensePlanEdit.assignAll(c.getX(), c.getZ()));
-                    setStatus(TextFormatting.GREEN + "All unassigned units -> "
-                            + studio.ERM.strategic.defense.DefenseMarker.nameOf(hit.type) + ".");
-                } else if (mouseButton == 0) {
-                    TacticalWarMapNetwork.sendToServer(
-                            studio.ERM.war.map.net.C2SDefensePlanEdit.adjust(c.getX(), c.getZ(), +1));
-                } else if (mouseButton == 1) {
-                    TacticalWarMapNetwork.sendToServer(
-                            studio.ERM.war.map.net.C2SDefensePlanEdit.adjust(c.getX(), c.getZ(), -1));
-                }
+            if (hit != null) {
+                panelUid = hit.uid;
+                panelX = Math.min(mouseX, canvasLeft + canvasSize - 124);
+                panelY = Math.min(mouseY, canvasTop + canvasSize - 104);
                 return;
             }
         }
@@ -598,6 +609,9 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // Draw deploy menu
         deployMenu.draw(mouseX, mouseY, fontRenderer);
+
+        // Marker properties panel (drawn on top of everything on the Military tab).
+        if (activeTab == 2 && panelUid != -1) drawMarkerPanel();
 
         // Draw status message
         drawStatusMessage();
@@ -1089,6 +1103,140 @@ public class GuiTacticalWarMap extends GuiScreen {
         return mx >= b[0] && mx < b[2] && my >= b[1] && my < b[3];
     }
 
+    private int[] recruitButtonBounds() {
+        int[] c = clearAllButtonBounds();
+        return new int[]{c[2] + 4, c[1], c[2] + 4 + 54, c[3]};
+    }
+
+    private boolean isOnRecruitButton(int mx, int my) {
+        int[] b = recruitButtonBounds();
+        return mx >= b[0] && mx < b[2] && my >= b[1] && my < b[3];
+    }
+
+    // ==================== Marker properties panel ====================
+
+    private studio.ERM.strategic.defense.DefenseMarker panelMarker() {
+        if (panelUid == -1) return null;
+        for (studio.ERM.strategic.defense.DefenseMarker m
+                : studio.ERM.war.map.client.ClientDefensePlanCache.markers()) {
+            if (m.uid == panelUid) return m;
+        }
+        return null;
+    }
+
+    /** Panel geometry: {x0, y0} with fixed 122x102 body; row i at y0 + 14 + i*14. */
+    private int[] panelOrigin() {
+        return new int[]{panelX, panelY};
+    }
+
+    private static boolean in(int mx, int my, int x0, int y0, int x1, int y1) {
+        return mx >= x0 && mx < x1 && my >= y0 && my < y1;
+    }
+
+    /** Handle a click inside the properties panel. Returns false when the click was outside it. */
+    private boolean handlePanelClick(int mx, int my) {
+        studio.ERM.strategic.defense.DefenseMarker m = panelMarker();
+        if (m == null) { panelUid = -1; return true; }
+        int[] o = panelOrigin();
+        int x0 = o[0], y0 = o[1];
+        if (!in(mx, my, x0, y0, x0 + 122, y0 + 104)) return false; // outside -> caller closes
+
+        int step = GuiScreen.isShiftKeyDown() ? 10 : 1;
+        // Close X
+        if (in(mx, my, x0 + 110, y0 + 2, x0 + 120, y0 + 12)) { panelUid = -1; return true; }
+        // Units - / +
+        if (m.isAssignable() && in(mx, my, x0 + 52, y0 + 16, x0 + 64, y0 + 26)) {
+            m.assigned = Math.max(1, m.assigned - step); sendUpdate(m); return true;
+        }
+        if (m.isAssignable() && in(mx, my, x0 + 92, y0 + 16, x0 + 104, y0 + 26)) {
+            m.assigned = Math.min(255, m.assigned + step); sendUpdate(m); return true;
+        }
+        // Priority - / +
+        if (in(mx, my, x0 + 52, y0 + 30, x0 + 64, y0 + 40)) {
+            m.priority = Math.max(0, m.priority - step * 5); sendUpdate(m); return true;
+        }
+        if (in(mx, my, x0 + 92, y0 + 30, x0 + 104, y0 + 40)) {
+            m.priority = Math.min(100, m.priority + step * 5); sendUpdate(m); return true;
+        }
+        // Formation < / >
+        int nF = studio.ERM.strategic.defense.DefenseMarker.FORMATIONS.length;
+        if (in(mx, my, x0 + 34, y0 + 44, x0 + 46, y0 + 54)) {
+            m.formation = (m.formation + nF - 1) % nF; sendUpdate(m); return true;
+        }
+        if (in(mx, my, x0 + 106, y0 + 44, x0 + 118, y0 + 54)) {
+            m.formation = (m.formation + 1) % nF; sendUpdate(m); return true;
+        }
+        // Toggles
+        if (in(mx, my, x0 + 4, y0 + 58, x0 + 60, y0 + 68)) {
+            m.allowVehicles = !m.allowVehicles; sendUpdate(m); return true;
+        }
+        if (in(mx, my, x0 + 64, y0 + 58, x0 + 118, y0 + 68)) {
+            m.reservePosition = !m.reservePosition; sendUpdate(m); return true;
+        }
+        // Assign all
+        if (m.isAssignable() && in(mx, my, x0 + 4, y0 + 72, x0 + 118, y0 + 82)) {
+            TacticalWarMapNetwork.sendToServer(
+                    studio.ERM.war.map.net.C2SDefensePlanEdit.assignAll(m.uid));
+            setStatus(TextFormatting.GREEN + "All unassigned units assigned.");
+            return true;
+        }
+        // Delete
+        if (in(mx, my, x0 + 4, y0 + 86, x0 + 118, y0 + 96)) {
+            TacticalWarMapNetwork.sendToServer(
+                    studio.ERM.war.map.net.C2SDefensePlanEdit.deleteUid(m.uid));
+            panelUid = -1;
+            setStatus(TextFormatting.YELLOW + "Marker deleted.");
+            return true;
+        }
+        return true; // click inside the panel body: consume
+    }
+
+    private void sendUpdate(studio.ERM.strategic.defense.DefenseMarker m) {
+        TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.update(m));
+    }
+
+    private void drawMarkerPanel() {
+        studio.ERM.strategic.defense.DefenseMarker m = panelMarker();
+        if (m == null) { panelUid = -1; return; }
+        int[] o = panelOrigin();
+        int x0 = o[0], y0 = o[1];
+        int color = PLAN_COLORS[Math.max(0, Math.min(m.type, PLAN_COLORS.length - 1))];
+
+        Gui.drawRect(x0, y0, x0 + 122, y0 + 104, 0xF2101018);
+        Gui.drawRect(x0, y0, x0 + 122, y0 + 13, 0xFF1F1F2E);
+        Gui.drawRect(x0, y0, x0 + 122, y0 + 1, color);
+        fontRenderer.drawStringWithShadow(
+                studio.ERM.strategic.defense.DefenseMarker.nameOf(m.type), x0 + 4, y0 + 3, color);
+        fontRenderer.drawStringWithShadow("x", x0 + 112, y0 + 3, 0xFFFF5252);
+
+        if (m.isAssignable()) {
+            fontRenderer.drawStringWithShadow("Units:", x0 + 4, y0 + 17, 0xFFCCCCCC);
+            fontRenderer.drawStringWithShadow("-", x0 + 56, y0 + 17, 0xFFFF8A80);
+            fontRenderer.drawStringWithShadow(String.valueOf(m.assigned), x0 + 72, y0 + 17, 0xFFFFD54F);
+            fontRenderer.drawStringWithShadow("+", x0 + 95, y0 + 17, 0xFF69F0AE);
+        } else {
+            fontRenderer.drawStringWithShadow("(not staffable)", x0 + 4, y0 + 17, 0xFF777777);
+        }
+        fontRenderer.drawStringWithShadow("Prio:", x0 + 4, y0 + 31, 0xFFCCCCCC);
+        fontRenderer.drawStringWithShadow("-", x0 + 56, y0 + 31, 0xFFFF8A80);
+        fontRenderer.drawStringWithShadow(String.valueOf(m.priority), x0 + 70, y0 + 31, 0xFFFFD54F);
+        fontRenderer.drawStringWithShadow("+", x0 + 95, y0 + 31, 0xFF69F0AE);
+        fontRenderer.drawStringWithShadow("Form:", x0 + 4, y0 + 45, 0xFFCCCCCC);
+        fontRenderer.drawStringWithShadow("<", x0 + 37, y0 + 45, 0xFFFF8A80);
+        String fName = studio.ERM.strategic.defense.DefenseMarker.FORMATIONS[
+                Math.max(0, Math.min(m.formation, studio.ERM.strategic.defense.DefenseMarker.FORMATIONS.length - 1))];
+        fontRenderer.drawStringWithShadow(fName, x0 + 50, y0 + 45, 0xFFFFD54F);
+        fontRenderer.drawStringWithShadow(">", x0 + 109, y0 + 45, 0xFF69F0AE);
+        fontRenderer.drawStringWithShadow((m.allowVehicles ? "[x] " : "[ ] ") + "Vehicles",
+                x0 + 4, y0 + 59, m.allowVehicles ? 0xFF69F0AE : 0xFF888888);
+        fontRenderer.drawStringWithShadow((m.reservePosition ? "[x] " : "[ ] ") + "Reserve",
+                x0 + 64, y0 + 59, m.reservePosition ? 0xFF69F0AE : 0xFF888888);
+        Gui.drawRect(x0 + 4, y0 + 72, x0 + 118, y0 + 82, 0xFF263238);
+        fontRenderer.drawStringWithShadow("ASSIGN ALL UNASSIGNED", x0 + 8, y0 + 73, 0xFF80D8FF);
+        Gui.drawRect(x0 + 4, y0 + 86, x0 + 118, y0 + 96, 0xFF3E1010);
+        fontRenderer.drawStringWithShadow("DELETE MARKER", x0 + 27, y0 + 87, 0xFFFF5252);
+    }
+
     /** The one-click FALL BACK toggle, the CLEAR ALL button, and the planning-mode readout. */
     private void drawFallbackButton() {
         boolean fb = studio.ERM.war.map.client.ClientDefensePlanCache.isFallbackActive();
@@ -1107,6 +1255,14 @@ public class GuiTacticalWarMap extends GuiScreen {
         String cl = "CLEAR ALL";
         int ctw = fontRenderer.getStringWidth(cl);
         fontRenderer.drawStringWithShadow(cl, cb[0] + (cb[2] - cb[0] - ctw) / 2f, cb[1] + 3, 0xFFFFC107);
+
+        int[] rb = recruitButtonBounds();
+        Gui.drawRect(rb[0], rb[1], rb[2], rb[3], 0xEE1B3A1B);
+        Gui.drawRect(rb[0], rb[1], rb[2], rb[1] + 1, 0xFFFFFFFF);
+        Gui.drawRect(rb[0], rb[3] - 1, rb[2], rb[3], 0xFF000000);
+        String rl = "RECRUIT";
+        int rtw = fontRenderer.getStringWidth(rl);
+        fontRenderer.drawStringWithShadow(rl, rb[0] + (rb[2] - rb[0] - rtw) / 2f, rb[1] + 3, 0xFF69F0AE);
 
         if (planMode >= 0) {
             fontRenderer.drawStringWithShadow(

@@ -126,9 +126,14 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
      * Target filter: attack anything that is NOT on our team.
      * This prevents empire soldiers from attacking empire patrols, garrisons, and other soldiers.
      */
+    /** Recruited soldiers on team "militia" are PLAYER-ALIGNED: they defend the player, never hunt them. */
+    public boolean isPlayerAligned() {
+        return "militia".equalsIgnoreCase(team);
+    }
+
     private boolean shouldAttackEntity(EntityLivingBase target) {
         if (target == null || !target.isEntityAlive()) return false;
-        if (target instanceof EntityPlayer) return true; // always attack players
+        if (target instanceof EntityPlayer) return !isPlayerAligned(); // militia never attacks players
 
         // Don't attack other EntitySoldiers on same team
         if (target instanceof EntitySoldier) {
@@ -157,9 +162,15 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         studio.ERM.strategic.defense.Aw2Npc.Allegiance al =
                 studio.ERM.strategic.defense.Aw2Npc.allegiance(target);
         if (al == studio.ERM.strategic.defense.Aw2Npc.Allegiance.AW2_FACTION) {
-            return !"empire".equalsIgnoreCase(studio.ERM.strategic.defense.Aw2Npc.faction(target));
+            boolean isEmpireFaction = "empire".equalsIgnoreCase(
+                    studio.ERM.strategic.defense.Aw2Npc.faction(target));
+            // Militia fights FOR the player: empire-faction npcs are its enemy; the siege ("empire" team)
+            // spares empire-faction npcs and attacks everyone else.
+            return isPlayerAligned() ? isEmpireFaction : !isEmpireFaction;
         }
-        if (al == studio.ERM.strategic.defense.Aw2Npc.Allegiance.PLAYER_OWNED) return true;
+        if (al == studio.ERM.strategic.defense.Aw2Npc.Allegiance.PLAYER_OWNED) {
+            return !isPlayerAligned(); // militia never attacks the player's own guards
+        }
 
         // Don't attack AW2 empire faction NPCs (string-based fallback for when the classifier can't load)
         if (isAW2EmpireNPC(target)) return false;
@@ -345,6 +356,9 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
 
     @Override
     public void setAttackTarget(EntityLivingBase target) {
+        // PLAYER-ALIGNED militia can never acquire a player target (the unconditional player target
+        // task routes through here, so this guard covers it).
+        if (target instanceof EntityPlayer && isPlayerAligned()) return;
         // DIRECTOR CONTROL: a marching siege soldier does not break off to chase a distant player -- the
         // director sends it to an objective; it only engages a player that is right on top of it.
         if (marchObjective != null && target instanceof EntityPlayer
