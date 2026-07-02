@@ -48,6 +48,10 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
 
     private boolean adjacentFight() {
         if (DEBUG_FORCE_MOVEMENT) return false; // check D: no combat yield in diagnosis mode
+        // UNDER FIRE: recently shot -> pause the order and SHOOT BACK from here for a while (orders
+        // resume once the heat dies down). This is what makes defenders actually return fire instead
+        // of marching silently into the bullets.
+        if (npc.getRevengeTarget() != null && npc.ticksExisted - npc.getRevengeTimer() < 160) return true;
         EntityLivingBase t = npc.getAttackTarget();
         if (t == null || t.isDead) return false;
         // Engage while adhering to navigation: RANGED units yield within ~24 (they stand where they are

@@ -51,6 +51,9 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     // DataWatcher key — synced automatically to all clients.
     private static final DataParameter<String> DW_SKIN_KEY =
             EntityDataManager.createKey(EntitySoldier.class, DataSerializers.STRING);
+    // DOWNED (militia casualty system): not dead — waiting to be carried to the hospital point.
+    private static final DataParameter<Boolean> DW_DOWNED =
+            EntityDataManager.createKey(EntitySoldier.class, DataSerializers.BOOLEAN);
 
     // ── Team / Faction ──
     private String team = "empire";
@@ -99,6 +102,26 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     protected void entityInit() {
         super.entityInit();
         this.dataManager.register(DW_SKIN_KEY, "");
+        this.dataManager.register(DW_DOWNED, false);
+    }
+
+    // ── DOWNED / CASUALTY STATE (player-aligned militia) ──
+    // A militia soldier that "dies" while a MEDICAL point exists goes DOWN instead: immobile (kneeling)
+    // until a comrade carries it to the hospital, where a heal cooldown returns it to battle. It can
+    // still be finished off by further damage; with no hospital it bleeds out.
+    public boolean isDowned() { return this.dataManager.get(DW_DOWNED); }
+
+    public void setDowned(boolean downed) {
+        this.dataManager.set(DW_DOWNED, downed);
+        this.setSneaking(downed); // kneeling wounded pose (full lie-down pose = later render pass)
+        if (downed) {
+            try { setAttackTarget(null); getNavigator().clearPath(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** Recently shot at: pause marching and SHOOT BACK for a while (orders resume after). */
+    public boolean isUnderFire() {
+        return getRevengeTarget() != null && this.ticksExisted - this.getRevengeTimer() < 160;
     }
 
     // ══════════════════════════════════════
@@ -278,12 +301,20 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
             }
         }
 
-        // DIRECTOR MARCH: walk to the assigned objective unless we're in an adjacent fight. This is what
-        // makes a released siege soldier SEEK ITS OBJECTIVE (room-to-room) instead of standing around or
-        // chasing the player -- the director directs it.
+        // DOWNED: immobile casualty waiting for rescue -- no marching, no fighting.
+        if (isDowned()) {
+            try { getNavigator().clearPath(); setAttackTarget(null); } catch (Throwable ignored) {}
+            if (!isRiding()) setSneaking(true);
+            return;
+        }
+
+        // DIRECTOR MARCH: walk to the assigned objective unless we're in an adjacent fight OR under
+        // fire -- soldiers being shot at PAUSE their orders and shoot back for a while ("fight back,
+        // don't just march into the bullets"), then resume.
         if (marchObjective != null) {
             EntityLivingBase mtgt = getAttackTarget();
             boolean adjacentFight = mtgt != null && !mtgt.isDead && this.getDistanceSq(mtgt) < 9.0;
+            if (isUnderFire()) adjacentFight = true; // return fire from where we stand
             if (!adjacentFight) {
                 double dObj = this.getDistanceSq(marchObjective.getX() + 0.5, marchObjective.getY(),
                         marchObjective.getZ() + 0.5);
@@ -372,6 +403,26 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
     public boolean attackEntityFrom(DamageSource source, float amount) {
         // Ignore friendly blast splash while shielded (allied tank/airstrike detonations).
         if (explosionShield && source.isExplosion()) return false;
+        // MILITIA go DOWN instead of dying when a hospital point exists (the casualty rescue loop).
+        // A downed soldier can still be finished off by further hits.
+        if (!world.isRemote && isPlayerAligned() && !isDowned()
+                && amount >= this.getHealth() && !source.canHarmInCreative()) {
+            boolean hospital = false;
+            try {
+                studio.ERM.strategic.defense.DefensePlanData plan =
+                        studio.ERM.strategic.defense.DefensePlanData.get(world);
+                for (studio.ERM.strategic.defense.DefenseMarker m : plan.markers) {
+                    if (m.type == studio.ERM.strategic.defense.DefenseMarker.MEDICAL
+                            && !m.points.isEmpty()) { hospital = true; break; }
+                }
+            } catch (Throwable ignored) {}
+            if (hospital) {
+                setDowned(true);
+                setHealth(6.0F);
+                getEntityData().setLong("erm_bleedout", world.getTotalWorldTime() + 20 * 240); // 4 min max wait
+                return false;
+            }
+        }
         return super.attackEntityFrom(source, amount);
     }
 
@@ -489,6 +540,11 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         applyLevelScaling();
         this.setHealth(this.getMaxHealth());
         SoldierLoadout.equip(this, this.warLevel, this.unitRole);
+        // NEVER drop equipment: EntityLiving drops gear via per-slot dropChances (separate from
+        // dropLoot!) -- recruited soldiers' kit drops were a free-item DUPLICATION glitch.
+        for (EntityEquipmentSlot slot : EntityEquipmentSlot.values()) {
+            this.setDropChance(slot, 0.0F);
+        }
     }
 
     public void setTeam_(String team) { this.team = team != null ? team : "empire"; }

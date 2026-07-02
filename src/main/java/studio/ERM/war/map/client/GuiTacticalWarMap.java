@@ -597,13 +597,14 @@ public class GuiTacticalWarMap extends GuiScreen {
         // The FALL BACK + CLEAR ALL buttons and planning-mode readout (Military tab only).
         if (activeTab == 2) drawFallbackButton();
 
-        // The military side panel: units assigned X/Y + control reminders (Military tab only).
-        if (activeTab == 2) drawMilitaryPanel();
-
         // The Claims / Civilian / Military tab bar (always).
         drawTabs();
 
         disableCanvasScissor();
+
+        // The military side panel: units assigned X/Y + control reminders. Lives OUTSIDE the canvas in
+        // the sidebar column (below the stats), so the map itself stays clear.
+        if (activeTab == 2) drawMilitaryPanel();
 
         // Draw UI chrome (borders, labels, stats)
         drawUIChrome(mouseX, mouseY);
@@ -892,6 +893,7 @@ public class GuiTacticalWarMap extends GuiScreen {
     /** Draw every plan marker: polylines as coloured lines with endpoint dots, points as coloured
      *  squares with the marker's initial. The pending (uncommitted) polyline draws semi-transparent. */
     private void drawDefensePlan() {
+        initIconStacks();
         java.util.List<studio.ERM.strategic.defense.DefenseMarker> markers =
                 studio.ERM.war.map.client.ClientDefensePlanCache.markers();
         for (studio.ERM.strategic.defense.DefenseMarker m : markers) {
@@ -901,14 +903,12 @@ public class GuiTacticalWarMap extends GuiScreen {
             } else {
                 drawPlanPolyline(m.points, color, false);
             }
-            if (!m.isPolyline() && !m.points.isEmpty()) {
-                int[] scr = worldToScreen(m.points.get(0).getX(), m.points.get(0).getZ());
-                if (scr != null && onCanvasPoint(scr)) {
-                    Gui.drawRect(scr[0] - 3, scr[1] - 3, scr[0] + 4, scr[1] + 4, color);
-                    fontRenderer.drawStringWithShadow(
-                            studio.ERM.strategic.defense.DefenseMarker.nameOf(m.type).substring(0, 1),
-                            scr[0] + 5, scr[1] - 3, color);
-                }
+            // Every marker gets its ITEM icon (the icon table): points at the point, polylines at centre.
+            net.minecraft.util.math.BlockPos ic = m.center();
+            int[] iscr = worldToScreen(ic.getX(), ic.getZ());
+            if (iscr != null && onCanvasPoint(iscr)) {
+                drawItemIcon(markerIconStacks[Math.max(0, Math.min(m.type, markerIconStacks.length - 1))],
+                        iscr[0], iscr[1], OUTLINE_FRIENDLY);
             }
             // HOVER READOUT: troops assigned to this marker (adjust with L/R/Shift+L click).
             if (m.isAssignable()) {
@@ -963,7 +963,6 @@ public class GuiTacticalWarMap extends GuiScreen {
         int[] cs = worldToScreen(c.getX(), c.getZ());
         if (cs != null && onCanvasPoint(cs)) {
             Gui.drawRect(cs[0] - 1, cs[1] - 1, cs[0] + 2, cs[1] + 2, color);
-            fontRenderer.drawStringWithShadow("KZ", cs[0] + 4, cs[1] - 3, color);
         }
     }
 
@@ -1000,10 +999,9 @@ public class GuiTacticalWarMap extends GuiScreen {
         fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] - 20, 0xFFFF5252);
     }
 
-    /** Military side panel (right-inside the canvas): units assigned X/Y + the control reminders. */
+    /** Military side panel: units assigned X/Y + control reminders. Drawn in the SIDEBAR column
+     *  (bottom-anchored, right of the map) so the canvas itself stays clean. */
     private void drawMilitaryPanel() {
-        int x0 = canvasLeft + canvasSize - 96;
-        int y0 = canvasTop + 18;
         int assigned = 0;
         for (studio.ERM.strategic.defense.DefenseMarker m
                 : studio.ERM.war.map.client.ClientDefensePlanCache.markers()) {
@@ -1011,17 +1009,18 @@ public class GuiTacticalWarMap extends GuiScreen {
         }
         int have = studio.ERM.war.map.client.ClientStrategicCache.friendlyCount();
         String[] lines = {
-                TextFormatting.GOLD + "Units assigned: " + assigned + "/" + have,
-                TextFormatting.GRAY + "P: cycle marker type",
-                TextFormatting.GRAY + "Click node: +1 troop",
-                TextFormatting.GRAY + "R-click node: -1 troop",
-                TextFormatting.GRAY + "Shift+Click: assign all",
-                TextFormatting.GRAY + "R-click line: finish it",
+                TextFormatting.GOLD + "Military",
+                TextFormatting.YELLOW + "Assigned: " + assigned + "/" + have,
+                TextFormatting.GRAY + "P: cycle tool",
+                TextFormatting.GRAY + "Click marker: edit",
+                TextFormatting.GRAY + "R-click line: finish",
                 TextFormatting.GRAY + "R-click map: deploy",
-                TextFormatting.GRAY + "Zone: centre, then edge",
+                TextFormatting.GRAY + "Zone: centre+edge",
         };
-        int h = lines.length * 10 + 6;
-        Gui.drawRect(x0 - 3, y0 - 3, x0 + 95, y0 + h - 3, 0x99000000);
+        int h = lines.length * 10 + 8;
+        int x0 = canvasLeft + canvasSize + 8;                  // the sidebar column
+        int y0 = canvasTop + canvasSize - h;                   // bottom-anchored under the legend
+        Gui.drawRect(x0 - 3, y0 - 3, x0 + SIDEBAR_WIDTH - 6, y0 + h - 3, 0x99000000);
         for (int i = 0; i < lines.length; i++) {
             fontRenderer.drawStringWithShadow(lines[i], x0, y0 + i * 10, 0xFFFFFFFF);
         }
@@ -1274,26 +1273,71 @@ public class GuiTacticalWarMap extends GuiScreen {
         fontRenderer.drawStringWithShadow(tool, b[0], b[3] + 3, planMode < 0 ? 0xFFFFD54F : 0xFF00E5FF);
     }
 
-    // PHASE 2 traffic-overlay icons -- REAL AW2 art (AW2 is a hard dependency, its assets are loadable):
-    // a coin for trader caravans, a combat order for military patrols.
-    private static final net.minecraft.util.ResourceLocation ICON_STRAT_TRADER =
-            new net.minecraft.util.ResourceLocation("ancientwarfare", "textures/items/npc/coin.png");
-    private static final net.minecraft.util.ResourceLocation ICON_STRAT_PATROL =
-            new net.minecraft.util.ResourceLocation("ancientwarfare", "textures/items/npc/combat_order.png");
+    // ==================== ITEM-BASED map icons (the icon table) ====================
+    // Allegiance colours: green = yours, red = rival, yellow = neutral trade, blue = allied (later).
+    private static final int OUTLINE_FRIENDLY = 0xAA00E676;
+    private static final int OUTLINE_RIVAL = 0xAAFF1744;
+    private static final int OUTLINE_NEUTRAL = 0xAAFFEB3B;
+
+    private static net.minecraft.item.ItemStack[] markerIconStacks;
+    private static net.minecraft.item.ItemStack icTrader, icPatrol, icSquad, icVehicle;
+
+    private static void initIconStacks() {
+        if (markerIconStacks != null) return;
+        markerIconStacks = new net.minecraft.item.ItemStack[]{
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD),      // LINE
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.SHIELD),          // STRONGPOINT
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.MINECART),        // VEHICLE
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BOW),             // AA
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BANNER),          // RALLY
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BED),             // RESERVE
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.ARROW),           // FALLBACK
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.LEATHER_BOOTS),   // PATROL ROUTE
+                new net.minecraft.item.ItemStack(
+                        net.minecraft.item.Item.getItemFromBlock(net.minecraft.init.Blocks.SLIME_BLOCK)), // LZ
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.POTIONITEM),      // MEDICAL
+                new net.minecraft.item.ItemStack(
+                        net.minecraft.item.Item.getItemFromBlock(net.minecraft.init.Blocks.TNT))          // ZONE
+        };
+        icTrader = new net.minecraft.item.ItemStack(net.minecraft.init.Items.EMERALD);
+        icPatrol = new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD);
+        icSquad = new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD);
+        icVehicle = new net.minecraft.item.ItemStack(net.minecraft.init.Items.MINECART);
+    }
+
+    /** Draw a real ITEM icon (10x10) centred at (cx,cy) with an optional allegiance outline. */
+    private void drawItemIcon(net.minecraft.item.ItemStack stack, int cx, int cy, int outline) {
+        if (stack == null || stack.isEmpty()) return;
+        if (outline != 0) {
+            Gui.drawRect(cx - 6, cy - 6, cx + 7, cy - 5, outline);
+            Gui.drawRect(cx - 6, cy + 6, cx + 7, cy + 7, outline);
+            Gui.drawRect(cx - 6, cy - 6, cx - 5, cy + 7, outline);
+            Gui.drawRect(cx + 6, cy - 6, cx + 7, cy + 7, outline);
+        }
+        GlStateManager.pushMatrix();
+        GlStateManager.translate(cx - 5, cy - 5, 0);
+        GlStateManager.scale(0.625F, 0.625F, 1F);
+        net.minecraft.client.renderer.RenderHelper.enableGUIStandardItemLighting();
+        mc.getRenderItem().renderItemAndEffectIntoGUI(stack, 0, 0);
+        net.minecraft.client.renderer.RenderHelper.disableStandardItemLighting();
+        GlStateManager.popMatrix();
+        GlStateManager.disableLighting();
+        GlStateManager.color(1F, 1F, 1F, 1F);
+    }
 
     /**
-     * Draw every strategic object (patrols, trader caravans...) as a live icon on the map -- the
-     * "watch the civilization operating" overlay. Positions stream from the server every 2s
-     * ({@link studio.ERM.war.map.net.S2CStrategicSync}); a green corner dot marks objects that are
-     * MATERIALIZED (physically in the world) right now, and squads show their remaining strength.
+     * Draw every strategic object as a live ITEM icon: emerald = trader caravan (neutral yellow),
+     * iron sword = patrol (rival red), sword/minecart = your incoming reinforcements (green). A green
+     * corner dot marks objects physically materialized right now; squads show remaining strength.
      */
     private void drawStrategicMarkers() {
+        initIconStacks();
         java.util.List<studio.ERM.war.map.net.S2CStrategicSync.Data> objs =
                 studio.ERM.war.map.client.ClientStrategicCache.snapshot();
         if (objs.isEmpty()) return;
         for (studio.ERM.war.map.net.S2CStrategicSync.Data d : objs) {
-            // Tab filter: the CIVILIAN tab shows the economy (traders/carts/couriers); the MILITARY tab
-            // shows military traffic (patrols/convoys). New archetypes default to military.
+            // Tab filter: CIVILIAN = the economy (traders/carts); MILITARY = military traffic +
+            // reinforcement deliveries. New archetypes default to military.
             boolean civilian = "trader".equals(d.type);
             if (activeTab == 1 && !civilian) continue;
             if (activeTab == 2 && civilian) continue;
@@ -1303,17 +1347,21 @@ public class GuiTacticalWarMap extends GuiScreen {
             if (sx < canvasLeft || sx >= canvasLeft + canvasSize) continue;
             if (sy < canvasTop || sy >= canvasTop + canvasSize) continue;
 
-            net.minecraft.util.ResourceLocation icon =
-                    "trader".equals(d.type) ? ICON_STRAT_TRADER : ICON_STRAT_PATROL;
-            GlStateManager.color(1F, 1F, 1F, 1F);
-            GlStateManager.enableBlend();
-            mc.getTextureManager().bindTexture(icon);
-            Gui.drawScaledCustomSizeModalRect(sx - 5, sy - 5, 0, 0, 16, 16, 10, 10, 16F, 16F);
-            GlStateManager.disableBlend();
+            net.minecraft.item.ItemStack icon;
+            int outline;
+            if ("trader".equals(d.type)) {
+                icon = icTrader; outline = OUTLINE_NEUTRAL;
+            } else if ("reinforcement".equals(d.type)) {
+                icon = (d.label != null && d.label.startsWith("Vehicle")) ? icVehicle : icSquad;
+                outline = OUTLINE_FRIENDLY;
+            } else {
+                icon = icPatrol; outline = OUTLINE_RIVAL;
+            }
+            drawItemIcon(icon, sx, sy, outline);
 
-            if (d.live) Gui.drawRect(sx + 3, sy - 6, sx + 6, sy - 3, 0xFF00FF55); // green = physically live
+            if (d.live) Gui.drawRect(sx + 4, sy - 7, sx + 7, sy - 4, 0xFF00FF55); // green = physically live
             if (d.strength > 1) {
-                fontRenderer.drawStringWithShadow(String.valueOf(d.strength), sx + 6, sy, 0xFFFFFFFF);
+                fontRenderer.drawStringWithShadow(String.valueOf(d.strength), sx + 7, sy + 1, 0xFFFFFFFF);
             }
         }
         GlStateManager.color(1F, 1F, 1F, 1F);

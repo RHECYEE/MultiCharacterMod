@@ -107,12 +107,17 @@ public class C2SRecruitConfirm implements IMessage {
             }
             if (!player.isCreative()) { stats.commandPoints -= cost; data.markDirty(); }
 
-            // CONSUME the loadout (it IS the recruit's kit / the vehicle being delivered).
+            // The loadout is the KIT PATTERN: the Command Bucks pay for soldier + gear copies, and the
+            // original items STAY in the slots so the player can hammer CONFIRM repeatedly for more
+            // squads (they get everything back on close). Recruited copies NEVER drop on death, so
+            // there is no duplication economy. The one exception: a VEHICLE contract consumes the
+            // actual vehicle item -- that specific vehicle is what gets delivered.
             NBTTagList gear = new NBTTagList();
             for (int i = 0; i < c.loadout.getSizeInventory(); i++) {
-                ItemStack st = c.loadout.removeStackFromSlot(i);
+                ItemStack st = c.loadout.getStackInSlot(i);
                 gear.appendTag(st.isEmpty() ? new NBTTagCompound() : st.writeToNBT(new NBTTagCompound()));
             }
+            if (kind == 2) c.loadout.decrStackSize(0, 1);
 
             // Rally = the plan's RALLY marker if present, else where the player stands.
             DefensePlanData plan = DefensePlanData.get(world);
@@ -142,7 +147,7 @@ public class C2SRecruitConfirm implements IMessage {
             StrategicMapData.get(world).add(r);
 
             int etaMin = Math.max(1, (int) Math.ceil(dist / r.speed / 60.0));
-            player.closeContainer();
+            // Screen stays OPEN: hammer CONFIRM for more squads (each confirm = a new contract).
             String what = (kind == 2) ? ("Vehicle delivery (" + vehicleShortName + ")")
                     : (kind == 0 ? "Recruit column" : "Mercenary convoy") + (squad > 1 ? " x" + squad : "");
             player.sendMessage(new TextComponentString(TextFormatting.GOLD + "Contract accepted. "

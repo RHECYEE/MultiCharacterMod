@@ -1,5 +1,6 @@
 package studio.ERM.strategic.defense;
 
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityCreature;
 import net.minecraft.entity.EntityList;
 import net.minecraft.util.ResourceLocation;
@@ -212,6 +213,10 @@ public final class DefensePlanExecutor {
             }
         }
 
+        // CASUALTY RESCUE: carriers haul downed militia to the hospital point; the heal cooldown
+        // returns them to battle. Runs after assignment so carrier orders override slot orders.
+        try { handleCasualties(world, plan, defenders); } catch (Throwable ignored) {}
+
         // Heartbeat (every ~15s) so "the plan is/isn't commanding anyone" is visible in the log.
         if (passCounter % 5 == 0) {
             studio.ERM.EpochRunnerMod.logger.info("[Defense] pass: " + defenders.size() + " defender(s), "
@@ -278,10 +283,12 @@ public final class DefensePlanExecutor {
             if (c == null || c.isDead) continue;
             if (c.getEntityData().hasKey("erm_strategic")) continue; // strategic-map units are not ours
             // Recruited MILITIA (permanent recruits + mercenaries under contract) serve the plan too.
+            // Downed casualties are NOT conscriptable -- they're waiting for the rescue sweep.
             if (c instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier) {
                 try {
-                    if ("militia".equalsIgnoreCase(
-                            ((studio.ERM.war.BattleManagers.entities.EntitySoldier) c).getTeam_())) {
+                    studio.ERM.war.BattleManagers.entities.EntitySoldier s =
+                            (studio.ERM.war.BattleManagers.entities.EntitySoldier) c;
+                    if ("militia".equalsIgnoreCase(s.getTeam_()) && !s.isDowned()) {
                         out.add(c);
                     }
                 } catch (Throwable ignored) {}
@@ -503,11 +510,14 @@ public final class DefensePlanExecutor {
 
             // Combat override: engage while adhering to navigation. RANGED defenders may hold and shoot
             // anything within ~28; MELEE may pursue a good bit (~18) before being recalled. A target
-            // standing inside an ENGAGEMENT ZONE is always fair game at any range ("open up together").
+            // standing inside an ENGAGEMENT ZONE is always fair game at any range ("open up together"),
+            // and a defender UNDER FIRE keeps its target regardless -- it's shooting back right now.
             net.minecraft.entity.EntityLivingBase tgt = d.getAttackTarget();
             if (tgt != null && !tgt.isDead) {
+                boolean underFire = d.getRevengeTarget() != null
+                        && d.ticksExisted - d.getRevengeTimer() < 160;
                 double lim = isRanged(d) ? 28.0 * 28.0 : 18.0 * 18.0;
-                if (d.getDistanceSq(tgt) >= lim && !insideEngagementZone(plan, tgt)) {
+                if (!underFire && d.getDistanceSq(tgt) >= lim && !insideEngagementZone(plan, tgt)) {
                     d.setAttackTarget(null);
                     d.getNavigator().clearPath();
                 }
@@ -554,6 +564,109 @@ public final class DefensePlanExecutor {
         d.tasks.addTask(0, new EntityAIDefendPlanOrder(d));
         studio.ERM.EpochRunnerMod.logger.info("[Defense] took command of " + d.getName()
                 + " (" + Aw2Npc.fullType(d) + ")");
+    }
+
+    // Live carry assignments (carrier uuid -> downed uuid), transient.
+    private static final java.util.Map<java.util.UUID, java.util.UUID> CARRY =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long HOSPITAL_HEAL_TICKS = 1200; // 60s at the hospital -> back to battle
+
+    /**
+     * THE CASUALTY LOOP. Downed militia are picked up by the nearest healthy comrade (they ride the
+     * carrier -- the "carried" look), hauled to the MEDICAL point, set down, and after the heal
+     * cooldown they stand back up at full health and rejoin the plan. No hospital = they bleed out.
+     */
+    private static void handleCasualties(WorldServer world, DefensePlanData plan, List<EntityCreature> defenders) {
+        List<BlockPos> medical = pointsOf(plan, DefenseMarker.MEDICAL);
+
+        // Find downed militia near the plan.
+        int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        for (DefenseMarker m : plan.markers) {
+            for (BlockPos p : m.points) {
+                minX = Math.min(minX, p.getX()); maxX = Math.max(maxX, p.getX());
+                minZ = Math.min(minZ, p.getZ()); maxZ = Math.max(maxZ, p.getZ());
+            }
+        }
+        AxisAlignedBB box = new AxisAlignedBB(minX - GATHER_RANGE, 0, minZ - GATHER_RANGE,
+                maxX + GATHER_RANGE, 255, maxZ + GATHER_RANGE);
+        long now = world.getTotalWorldTime();
+
+        // Clean dead carry pairs.
+        CARRY.entrySet().removeIf(e2 -> {
+            Entity carrier = world.getEntityFromUuid(e2.getKey());
+            Entity downed = world.getEntityFromUuid(e2.getValue());
+            return carrier == null || carrier.isDead || downed == null || downed.isDead;
+        });
+
+        for (studio.ERM.war.BattleManagers.entities.EntitySoldier down
+                : world.getEntitiesWithinAABB(studio.ERM.war.BattleManagers.entities.EntitySoldier.class, box)) {
+            if (down == null || down.isDead || !down.isDowned()) continue;
+
+            // Healing at the hospital?
+            long healAt = down.getEntityData().getLong("erm_heal_at");
+            if (healAt > 0) {
+                if (now >= healAt) {
+                    down.setDowned(false);
+                    down.setHealth(down.getMaxHealth());
+                    down.getEntityData().removeTag("erm_heal_at");
+                    down.getEntityData().removeTag("erm_bleedout");
+                    studio.ERM.EpochRunnerMod.logger.info("[Defense] casualty RETURNED TO BATTLE");
+                }
+                continue;
+            }
+
+            // Being carried right now?
+            if (down.isRiding()) {
+                Entity carrier = down.getRidingEntity();
+                if (!medical.isEmpty() && carrier instanceof EntityCreature) {
+                    BlockPos med = medical.get(0);
+                    ORDERS.put(carrier.getUniqueID(), sanitizeSlot(world, med)); // carrier hauls to hospital
+                    if (carrier.getDistanceSq(med.getX() + 0.5, carrier.posY, med.getZ() + 0.5) < 25.0) {
+                        down.dismountRidingEntity();
+                        down.getEntityData().setLong("erm_heal_at", now + HOSPITAL_HEAL_TICKS);
+                        CARRY.remove(carrier.getUniqueID());
+                    }
+                }
+                continue;
+            }
+
+            // No hospital -> bleed out.
+            if (medical.isEmpty()) {
+                long bleed = down.getEntityData().getLong("erm_bleedout");
+                if (bleed > 0 && now >= bleed) {
+                    down.setDowned(false);
+                    down.attackEntityFrom(net.minecraft.util.DamageSource.OUT_OF_WORLD, 10000F);
+                }
+                continue;
+            }
+
+            // Assign a rescuer: the nearest healthy MILITIA defender not already carrying someone.
+            if (CARRY.containsValue(down.getUniqueID())) {
+                // A carrier is en route: when it reaches the casualty, pick it up (ride = carried).
+                for (java.util.Map.Entry<java.util.UUID, java.util.UUID> e2 : CARRY.entrySet()) {
+                    if (!e2.getValue().equals(down.getUniqueID())) continue;
+                    Entity carrier = world.getEntityFromUuid(e2.getKey());
+                    if (carrier == null) break;
+                    ORDERS.put(carrier.getUniqueID(), down.getPosition());
+                    if (carrier.getDistanceSq(down) < 6.25) down.startRiding(carrier, true);
+                    break;
+                }
+                continue;
+            }
+            EntityCreature rescuer = null;
+            double bd = Double.MAX_VALUE;
+            for (EntityCreature d : defenders) {
+                if (!(d instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier)) continue;
+                if (CARRY.containsKey(d.getUniqueID())) continue;
+                double dd = d.getDistanceSq(down);
+                if (dd < bd) { bd = dd; rescuer = d; }
+            }
+            if (rescuer != null) {
+                CARRY.put(rescuer.getUniqueID(), down.getUniqueID());
+                ORDERS.put(rescuer.getUniqueID(), down.getPosition());
+                studio.ERM.EpochRunnerMod.logger.info("[Defense] rescuer dispatched to a downed soldier");
+            }
+        }
     }
 
     /** Expire mercenary contracts: the company thanks you for the work and departs. */
