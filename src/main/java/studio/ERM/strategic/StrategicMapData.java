@@ -28,6 +28,7 @@ public class StrategicMapData extends WorldSavedData {
     public static final Map<String, Supplier<StrategicObject>> FACTORIES = new LinkedHashMap<>();
     static {
         FACTORIES.put("patrol", StrategicPatrol::new);
+        FACTORIES.put("trader", StrategicTrader::new);
     }
 
     public final Map<UUID, StrategicObject> objects = new LinkedHashMap<>();

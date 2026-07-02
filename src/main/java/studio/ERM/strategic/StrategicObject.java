@@ -43,6 +43,10 @@ public abstract class StrategicObject {
     // Members remaining (soldiers in the patrol / crew in the convoy). 0 => the object is destroyed.
     public int strength = 4;
 
+    // Which anchor generated this object (e.g. "city:12,-40") -- the traffic generator counts per-anchor
+    // quotas by this key. Empty for hand-registered debug objects.
+    public String homeKey = "";
+
     // Loaded-state: true while represented by live entities; their UUIDs for capture/cleanup.
     public boolean materialized = false;
     public final List<UUID> entityIds = new ArrayList<>();
@@ -124,6 +128,39 @@ public abstract class StrategicObject {
         }
     }
 
+    /**
+     * Shared ground navigation for any driven EntityLiving (trader/cart/crew): march via a CLAMPED
+     * ~12-block waypoint when the goal is far (the 1.12 navigator's search box can't solve long paths),
+     * SLIDING the waypoint sideways off a wall face to the nearest walkable column -- same discipline
+     * as the siege march AI, so strategic actors flow around obstacles instead of grinding into them.
+     */
+    protected static void navToward(net.minecraft.entity.EntityLiving e, WorldServer world,
+                                    BlockPos goal, double speedMult) {
+        if (e == null || goal == null) return;
+        double gx = goal.getX() + 0.5, gz = goal.getZ() + 0.5;
+        double dx = gx - e.posX, dz = gz - e.posZ;
+        double dH = Math.sqrt(dx * dx + dz * dz);
+        if (dH < 2.0) return;
+        if (dH > 14.0) {
+            double ux = dx / dH, uz = dz / dH, px = -uz, pz = ux;
+            double wx = e.posX + ux * 12.0, wz = e.posZ + uz * 12.0;
+            int allowY = (int) Math.max(e.posY, goal.getY()) + 3;
+            double bx = wx, bz = wz;
+            for (int off : new int[]{0, 2, -2, 4, -4, 6, -6, 9, -9}) {
+                int sxi = net.minecraft.util.math.MathHelper.floor(wx + px * off);
+                int szi = net.minecraft.util.math.MathHelper.floor(wz + pz * off);
+                try {
+                    if (world.getTopSolidOrLiquidBlock(new BlockPos(sxi, 64, szi)).getY() <= allowY) {
+                        bx = wx + px * off; bz = wz + pz * off; break;
+                    }
+                } catch (Throwable ignored) {}
+            }
+            try { e.getNavigator().tryMoveToXYZ(bx, e.posY, bz, speedMult); } catch (Throwable ignored) {}
+        } else {
+            try { e.getNavigator().tryMoveToXYZ(gx, goal.getY(), gz, speedMult); } catch (Throwable ignored) {}
+        }
+    }
+
     // ── PERSISTENCE ─────────────────────────────────────────────────────────────────────────────
 
     public NBTTagCompound writeToNBT(NBTTagCompound tag) {
@@ -135,6 +172,7 @@ public abstract class StrategicObject {
         tag.setDouble("facing", facing);
         tag.setDouble("speed", speed);
         tag.setInteger("strength", strength);
+        tag.setString("homeKey", homeKey == null ? "" : homeKey);
         tag.setInteger("routeIndex", routeIndex);
         tag.setBoolean("loop", loopRoute);
         int[] flat = new int[route.size() * 2];
@@ -158,6 +196,7 @@ public abstract class StrategicObject {
         facing = tag.getDouble("facing");
         speed = tag.getDouble("speed") > 0 ? tag.getDouble("speed") : 2.4;
         strength = Math.max(0, tag.getInteger("strength"));
+        homeKey = tag.getString("homeKey");
         routeIndex = Math.max(0, tag.getInteger("routeIndex"));
         loopRoute = !tag.hasKey("loop") || tag.getBoolean("loop");
         route.clear();

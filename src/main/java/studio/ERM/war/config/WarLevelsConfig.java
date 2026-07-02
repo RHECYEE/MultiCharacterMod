@@ -65,6 +65,22 @@ public final class WarLevelsConfig {
         return (data != null && data.siege != null) ? data.siege.mineSpeedMultiplier : 4.0;
     }
 
+    // ── PHASE 2: strategic traffic knobs ──
+    public static boolean trafficEnabled() {
+        return data == null || data.traffic == null || data.traffic.enabled;
+    }
+    public static int trafficIntervalSeconds() {
+        return (data != null && data.traffic != null) ? data.traffic.ensureIntervalSeconds : 60;
+    }
+    public static double trafficDensity() {
+        return (data != null && data.traffic != null) ? data.traffic.densityMultiplier : 1.0;
+    }
+    /** Comma-separated entity ids to use as the trader's CART (any mod's cart); empty = chest mule. */
+    public static String trafficCartId() {
+        return (data != null && data.traffic != null && data.traffic.cartEntityId != null)
+                ? data.traffic.cartEntityId : "";
+    }
+
     /**
      * Legacy hook: older code called this during init to ensure
      * server/client had their config loaded.
@@ -279,6 +295,7 @@ public final class WarLevelsConfig {
     public static final class ConfigData {
         public LevelData[] levels = createDefaultLevels();
         public SiegeTuning siege = new SiegeTuning();
+        public TrafficTuning traffic = new TrafficTuning();
 
         private void sanitize() {
             if (levels == null || levels.length == 0) {
@@ -291,6 +308,27 @@ public final class WarLevelsConfig {
             }
             if (siege == null) siege = new SiegeTuning();
             siege.sanitize();
+            if (traffic == null) traffic = new TrafficTuning();
+            traffic.sanitize();
+        }
+    }
+
+    /** PHASE 2 strategic-traffic knobs (patrols/traders each rival city keeps on the map). */
+    public static final class TrafficTuning {
+        /** Master switch for automatic city traffic generation. */
+        public boolean enabled = true;
+        /** Seconds between quota checks (each check tops up at most one patrol + one trader per city). */
+        public int ensureIntervalSeconds = 60;
+        /** Scales every city's traffic quota (patrols = (1+lvl/3)*d, traders = (1+lvl/4)*d). */
+        public double densityMultiplier = 1.0;
+        /** Comma-separated entity ids for the trader's CART (e.g. "astikorcarts:cargo_cart"); empty = chest mule. */
+        public String cartEntityId = "";
+
+        public void sanitize() {
+            if (ensureIntervalSeconds < 10) ensureIntervalSeconds = 10;
+            if (!(densityMultiplier >= 0)) densityMultiplier = 1.0; // catches NaN/negatives
+            if (densityMultiplier > 8.0) densityMultiplier = 8.0;
+            if (cartEntityId == null) cartEntityId = "";
         }
     }
 

@@ -49,6 +49,14 @@ public final class StrategicSimulator {
         WorldServer world = (WorldServer) e.world;
         if (world.getTotalWorldTime() % 20 != 0) return; // strategic tick = 1/second
 
+        // TRAFFIC GENERATION: keep each nearby rival city's level-scaled quota of patrols/traders topped
+        // up (gently, one per type per pass). Runs on its own slower cadence.
+        int interval = Math.max(10, studio.ERM.war.config.WarLevelsConfig.trafficIntervalSeconds());
+        if (world.getTotalWorldTime() % (interval * 20L) == 0) {
+            try { StrategicTrafficManager.ensure(world); }
+            catch (Throwable t) { EpochRunnerMod.logger.warn("[Strategic] traffic ensure failed: " + t); }
+        }
+
         StrategicMapData data = StrategicMapData.get(world);
         if (data.objects.isEmpty()) return;
 
@@ -98,8 +106,10 @@ public final class StrategicSimulator {
     @SubscribeEvent
     public static void onEntityJoin(EntityJoinWorldEvent e) {
         if (e.getWorld() == null || e.getWorld().isRemote) return;
-        if (!(e.getEntity() instanceof EntitySoldier)) return;
-        EntitySoldier s = (EntitySoldier) e.getEntity();
+        // ANY strategic-tagged living entity (soldier, trader, cart mule, AW2 npc) is subject to the
+        // sweep -- the map is the single source of truth for all of them.
+        if (!(e.getEntity() instanceof net.minecraft.entity.EntityLiving)) return;
+        net.minecraft.entity.EntityLiving s = (net.minecraft.entity.EntityLiving) e.getEntity();
         String tag = s.getEntityData().getString("erm_strategic");
         if (tag == null || tag.isEmpty()) return;
         try {

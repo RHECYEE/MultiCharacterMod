@@ -79,7 +79,7 @@ public class CommandWar extends CommandBase {
             return getListOfStringsMatchingLastWord(args, "guards", "city", "status");
         }
         if (args.length == 2 && "strat".equalsIgnoreCase(args[0])) {
-            return getListOfStringsMatchingLastWord(args, "patrol", "list", "clear");
+            return getListOfStringsMatchingLastWord(args, "patrol", "trader", "list", "clear");
         }
         return java.util.Collections.emptyList();
     }
@@ -404,6 +404,29 @@ public class CommandWar extends CommandBase {
                         + level + "), 8-point circuit r=" + r + " around you.");
                 msg(sender, TextFormatting.GRAY + "It materializes within ~100 blocks and dematerializes "
                         + "beyond ~140 — walk away and return to watch the loop. Watch [Strategic] chat lines.");
+                break;
+            }
+            case "trader": {
+                int level = (args.length >= 3) ? parseInt(args[2], 1, 10) : 3;
+                studio.ERM.strategic.StrategicTrader t = new studio.ERM.strategic.StrategicTrader();
+                t.level = level;
+                t.escorts = (level >= 3) ? 2 : 0;
+                // A trade route that passes RIGHT BY you: near point ~35 blocks one side, far point ~150
+                // the other -- so you can watch it materialize, walk past with the cart, and ping-pong.
+                double a = Math.toRadians(player.rotationYaw + 90.0);
+                BlockPos near = new BlockPos(player.getPosition().getX() + (int) Math.round(Math.cos(a) * 35), 0,
+                        player.getPosition().getZ() + (int) Math.round(Math.sin(a) * 35));
+                BlockPos far = new BlockPos(player.getPosition().getX() - (int) Math.round(Math.cos(a) * 150), 0,
+                        player.getPosition().getZ() - (int) Math.round(Math.sin(a) * 150));
+                t.route.add(near);
+                t.route.add(far);
+                t.x = near.getX() + 0.5;
+                t.z = near.getZ() + 0.5;
+                data.add(t);
+                msg(sender, TextFormatting.GREEN + "Strategic trader caravan registered (L" + level
+                        + (t.escorts > 0 ? ", 2 escorts" : "") + ") — trade route ping-ponging past you.");
+                msg(sender, TextFormatting.GRAY + "Merchant + chest cart (config traffic.cartEntityId to swap "
+                        + "the cart entity). Kill the merchant and the route dies.");
                 break;
             }
             case "clear": {
