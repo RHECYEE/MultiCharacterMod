@@ -1777,11 +1777,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
     /** Do ONE block of work on the crew's current task; when the task exhausts, complete + chain follow-ups. */
     private void doTaskWork(World world, EngCrew crew, EngTask t) {
-        // OPS PER SWING. Bulk terraform (bridge/ramp/clear/widen/corridor/tunnel) lays SEVERAL blocks per
-        // swing so a wide crossing/corridor finishes in reasonable time -- the "mine at a crawl" fix. The
-        // dramatic single-gap work (the breach carve, ladder rungs) stays one-per-swing so it still reads.
+        // OPS PER SWING (config-driven: WarLevelsConfig siege.mineSpeedMultiplier, default 4). Bulk terraform
+        // (bridge/ramp/clear/widen/corridor/tunnel) lays SEVERAL blocks per swing so a wide crossing/corridor
+        // finishes in reasonable time -- the "mine at a crawl" fix. The dramatic single-gap work (the breach
+        // carve, ladder rungs) stays one-per-swing so it still reads.
+        int bulkOps = Math.max(1, (int) Math.round(studio.ERM.war.config.WarLevelsConfig.mineSpeedMultiplier()));
         int opsPerSwing = (t.work == EngWork.BREACH || t.work == EngWork.LADDER
-                || t.work == EngWork.TRIPLE_LADDER) ? 1 : 4;
+                || t.work == EngWork.TRIPLE_LADDER) ? 1 : bulkOps;
         boolean exhausted = false;
         for (int i = 0; i < opsPerSwing; i++) {
             if (!pumpOneOp(world, t)) { exhausted = true; break; } // no ops left -> task is complete
@@ -2985,6 +2987,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
      */
     private void stepCarrierToward(EntityFormationCarrier c, BlockPos goal, double speed) {
         if (c == null || goal == null) return;
+        // WALK SPEED (config-driven: WarLevelsConfig siege.walkSpeedMultiplier, default 3x). All engineer
+        // marches + formation advances + firing-slot moves route through here. Capped so the ground
+        // navigator doesn't overshoot its waypoints at very high multipliers.
+        speed = Math.min(0.9, speed * studio.ERM.war.config.WarLevelsConfig.walkSpeedMultiplier());
         double dx = goal.getX() + 0.5 - c.posX, dz = goal.getZ() + 0.5 - c.posZ;
         double d = Math.sqrt(dx * dx + dz * dz);
         final double MAX = 14.0; // near enough for the ground navigator to always solve a path

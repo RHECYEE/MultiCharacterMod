@@ -256,8 +256,19 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
                 double dObj = this.getDistanceSq(marchObjective.getX() + 0.5, marchObjective.getY(),
                         marchObjective.getZ() + 0.5);
                 if (dObj > 6.25 && (this.getNavigator().noPath() || this.ticksExisted % 15 == 0)) {
+                    // March speed scales with the config walk multiplier (WarLevelsConfig siege.walkSpeedMultiplier),
+                    // capped so the navigator doesn't overshoot. Default 3x -> ~2.7x march.
+                    double marchMult = Math.max(1.0, Math.min(3.2,
+                            0.9 * studio.ERM.war.config.WarLevelsConfig.walkSpeedMultiplier()));
                     this.getNavigator().tryMoveToXYZ(marchObjective.getX() + 0.5, marchObjective.getY(),
-                            marchObjective.getZ() + 0.5, 1.1D);
+                            marchObjective.getZ() + 0.5, marchMult);
+                }
+                // LADDER CLIMB: the 1.12 ground navigator walks INTO a ladder column but never climbs it.
+                // While marching to an objective ABOVE us, actively climb any ladder we're standing in --
+                // this is what carries assault troops up the engineer-built ladder columns rung by rung
+                // instead of bumping forever at the base.
+                if (marchObjective.getY() > this.posY + 1.5 && this.isOnLadder()) {
+                    this.motionY = Math.max(this.motionY, 0.22);
                 }
             }
         }

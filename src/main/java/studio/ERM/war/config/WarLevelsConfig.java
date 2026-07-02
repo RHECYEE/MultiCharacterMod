@@ -55,6 +55,16 @@ public final class WarLevelsConfig {
         return data;
     }
 
+    /** Global troop/engineer WALK-speed multiplier (1.0 = base). Config-driven; default 3.0. */
+    public static double walkSpeedMultiplier() {
+        return (data != null && data.siege != null) ? data.siege.walkSpeedMultiplier : 3.0;
+    }
+
+    /** Global engineer MINE/build throughput multiplier (blocks per work-swing). Config-driven; default 4.0. */
+    public static double mineSpeedMultiplier() {
+        return (data != null && data.siege != null) ? data.siege.mineSpeedMultiplier : 4.0;
+    }
+
     /**
      * Legacy hook: older code called this during init to ensure
      * server/client had their config loaded.
@@ -192,6 +202,9 @@ public final class WarLevelsConfig {
             } else {
                 loaded.sanitize();
                 data = loaded;
+                // Migrate: re-save so any newly-added default fields (e.g. the siege walk/mine tuning block)
+                // are written into an older file, preserving the user's existing values.
+                save(configDir);
                 logInfo("[WAR-CONFIG] Loaded " + CONFIG_FILE);
             }
         } catch (Exception e) {
@@ -265,17 +278,34 @@ public final class WarLevelsConfig {
 
     public static final class ConfigData {
         public LevelData[] levels = createDefaultLevels();
+        public SiegeTuning siege = new SiegeTuning();
 
         private void sanitize() {
             if (levels == null || levels.length == 0) {
                 levels = createDefaultLevels();
-                return;
+            } else {
+                for (int i = 0; i < levels.length; i++) {
+                    if (levels[i] == null) levels[i] = new LevelData();
+                    levels[i].sanitize(i + 1);
+                }
             }
+            if (siege == null) siege = new SiegeTuning();
+            siege.sanitize();
+        }
+    }
 
-            for (int i = 0; i < levels.length; i++) {
-                if (levels[i] == null) levels[i] = new LevelData();
-                levels[i].sanitize(i + 1);
-            }
+    /** Global siege pacing modifiers (apply to every siege regardless of level). */
+    public static final class SiegeTuning {
+        /** Troop + engineer WALK speed multiplier (1.0 = base carrier/soldier speed). */
+        public double walkSpeedMultiplier = 3.0;
+        /** Engineer MINE/build throughput multiplier (blocks laid/mined per work-swing for bulk terraform). */
+        public double mineSpeedMultiplier = 4.0;
+
+        public void sanitize() {
+            if (!(walkSpeedMultiplier > 0.05)) walkSpeedMultiplier = 3.0; // also catches NaN
+            if (walkSpeedMultiplier > 12.0) walkSpeedMultiplier = 12.0;
+            if (!(mineSpeedMultiplier > 0.05)) mineSpeedMultiplier = 4.0;
+            if (mineSpeedMultiplier > 20.0) mineSpeedMultiplier = 20.0;
         }
     }
 
