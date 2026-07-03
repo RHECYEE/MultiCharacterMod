@@ -208,7 +208,8 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private static final int P_ENGINEER = 3;
     private static final int P_SURGE    = 4;
     private static final int P_ASSAULT  = 5;
-    private static final int TOTAL_PHASES = 5;
+    private static final int P_OCCUPY   = 6;
+    private static final int TOTAL_PHASES = 6;
 
     // Per-phase durations (ticks @ 20/s).
     private static final int PHASE_DEPLOY_TICKS   = 75  * 20;
@@ -216,6 +217,19 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private static final int PHASE_ENGINEER_TICKS = 110 * 20;
     private static final int PHASE_SURGE_TICKS    = 75  * 20;
     private static final int PHASE_ASSAULT_TICKS  = 180 * 20;
+
+    // OCCUPATION sub-stage caps: the loot sweep runs to COMPLETION (all objectives or full carts), with a
+    // hard failsafe so a pathological base can't hold the siege open forever; then rally home + departure.
+    private static final int OCC_LOOT_CAP_TICKS   = 240 * 20;
+    private static final int OCC_RALLY_CAP_TICKS  = 90  * 20;
+    private static final int OCC_DEPART_CAP_TICKS = 60  * 20;
+
+    // PHASE 6 — OCCUPATION state: 0 = finish the loot sweep, 1 = army rallies home to the platform,
+    // 2 = the column departs for the rival city (units despawn as they march out). Entered from the
+    // assault instead of the old instant VICTORY resolve.
+    private int occStage = 0;
+    private int occStageSince = 0;
+    private BlockPos departPoint = null;
 
     private static final int MIN_PHASE_DWELL = 30 * 20;
     private static final int MAX_DURATION_TICKS = 24 * 60 * 20;
@@ -1438,44 +1452,17 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
-    /** Collect the ops of an ACCESS stair (the old instant buildAccessRamp, hand-worked): one connected
-     *  3-wide staircase from the breach interior to a loot spot, plus the laddered column when the spot
-     *  is still above the final grade. */
+    /** Collect the ops of an ACCESS climb: LADDER PILLARS ONLY -- no more cobblestone staircases snaking
+     *  across the base. Vertical access to a loot spot is a hand-built triple pillar+ladder column in the
+     *  spot's own column (the proven raiseLadderColumn geometry, paced as ops); the horizontal approach
+     *  uses the base's real floors/corridors, which soldiers path fine -- HEIGHT was the only blocker. */
     private void collectAccessRampOps(World world, BlockPos spot, java.util.Collection<BlockOp> out) {
         BlockPos from = (interiorObjective != null) ? interiorObjective : breachCorridor;
         if (from == null || spot == null) return;
-        double dx = spot.getX() - from.getX(), dz = spot.getZ() - from.getZ();
-        double dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < 2.0) return;
-        double ux = dx / dist, uz = dz / dist;
-        double px = -uz, pz = ux;
-        int n = (int) Math.min(Math.ceil(dist), 80);
-        int gradeY = from.getY();
-        for (int s = 0; s <= n; s++) {
-            int bx = (int) Math.round(from.getX() + ux * s);
-            int bz = (int) Math.round(from.getZ() + uz * s);
-            int grnd = terrainGroundY(world, bx, bz);
-            if (grnd > gradeY + 1) gradeY++;
-            else if (grnd < gradeY - 1) gradeY--;
-            else gradeY = grnd;
-            for (int w = -1; w <= 1; w++) {
-                int x = bx + (int) Math.round(px * w);
-                int z = bz + (int) Math.round(pz * w);
-                try {
-                    BlockPos tread = new BlockPos(x, gradeY - 1, z);
-                    if (world.isAirBlock(tread) || world.getBlockState(tread).getMaterial().isLiquid())
-                        out.add(BlockOp.place(tread, Blocks.COBBLESTONE.getDefaultState()));
-                    for (int h = 0; h <= 2; h++) {
-                        Material m = world.getBlockState(new BlockPos(x, gradeY + h, z)).getMaterial();
-                        if (m.isSolid() || m.isLiquid()) out.add(BlockOp.mine(new BlockPos(x, gradeY + h, z)));
-                    }
-                } catch (Throwable ignored) {}
-            }
-        }
-        if (spot.getY() > gradeY + 1) {
-            for (int y = Math.min(gradeY, spot.getY()); y <= Math.max(gradeY, spot.getY()); y++)
-                collectLadderRowOps(world, spot, y, out);
-        }
+        int entryY = from.getY();
+        if (Math.abs(spot.getY() - entryY) <= 1) return; // walk-in level: nothing to build
+        for (int y = Math.min(entryY, spot.getY()); y <= Math.max(entryY, spot.getY()); y++)
+            collectLadderRowOps(world, spot, y, out);
     }
 
     /**
@@ -1873,28 +1860,68 @@ public class SiegeDirector implements IPhasedBattleDirector {
      * (director -> pilot), so there is no back-reference to clean up when the siege ends.
      */
     private void tickVehicleRouteSignals(World world) {
-        if (breachCorridor == null || vehicles.isEmpty()) return;
+        if (vehicles.isEmpty()) return;
         // Hold on the ARMY side of the FIRST unfinished piece of EXTERNAL route work (an unfinished
         // bridge / ramp / head-clear / the breach itself) -- "tanks wait while the engineers finish the
         // crossing" -- instead of blindly at the wall foot, which could be ACROSS the very moat the crews
         // are still bridging. Falls back to just outside the breach when no external work is pending.
-        BlockPos hold = outsidePoint(world, breachCorridor, 8.0);
-        int firstIdx = Integer.MAX_VALUE;
-        for (EngTask t : engQueue) {
-            if (t.done) continue;
-            if (t.work != EngWork.BRIDGE && t.work != EngWork.RAMP
-                    && t.work != EngWork.CLEAR && t.work != EngWork.BREACH) continue;
-            if (t.fromIdx < firstIdx) firstIdx = t.fromIdx;
-        }
-        if (firstIdx != Integer.MAX_VALUE && !route.isEmpty()) {
-            RouteNode n = route.get(Math.max(0, Math.min(route.size() - 1, firstIdx - 6)));
-            hold = new BlockPos(n.x, n.gradeY, n.z);
+        BlockPos hold = null;
+        if (breachCorridor != null) {
+            hold = outsidePoint(world, breachCorridor, 8.0);
+            int firstIdx = Integer.MAX_VALUE;
+            for (EngTask t : engQueue) {
+                if (t.done) continue;
+                if (t.work != EngWork.BRIDGE && t.work != EngWork.RAMP
+                        && t.work != EngWork.CLEAR && t.work != EngWork.BREACH) continue;
+                if (t.fromIdx < firstIdx) firstIdx = t.fromIdx;
+            }
+            if (firstIdx != Integer.MAX_VALUE && !route.isEmpty()) {
+                RouteNode n = route.get(Math.max(0, Math.min(route.size() - 1, firstIdx - 6)));
+                hold = new BlockPos(n.x, n.gradeY, n.z);
+            }
         }
         boolean push = (tickAge % 10 == 0);
+        // No-blast zones: the tanks' shells must never break the staging platform or the loot depot.
+        java.util.List<BlockPos> zones = null;
+        if (push) {
+            zones = new ArrayList<>(2);
+            if (stagingCenter != null) zones.add(stagingCenter);
+            if (lootDepot != null) zones.add(lootDepot);
+        }
         for (EntityAIPilot v : vehicles) {
             if (v == null || v.isDead) continue;
-            if (push) { v.setDirectorRouteStatus(routeStatus); v.setBreachHold(hold); }
+            if (push) {
+                v.setNoBlastZones(zones);
+                if (hold != null) { v.setDirectorRouteStatus(routeStatus); v.setBreachHold(hold); }
+            }
             if (v.isStuckBlocked()) { reportBlocked(v.getBlockedPos()); v.clearStuckBlocked(); }
+        }
+    }
+
+    /**
+     * SURGE ARMOUR PUSH (every 20t during surge/assault/occupation-loot): walk every ground vehicle off the
+     * staging platform, through the breach, and onto its own fanned interior lane -- the tanks JOIN the
+     * invasion and cover the looting instead of parking on the deck shelling from home. Far from the
+     * breach -> rally just outside the gap; near it -> a lateral lane point around the interior objective.
+     * Boats keep their water patrol (their rallyPoint means "patrol centre", never a land waypoint).
+     */
+    private void tickVehicleSurgePush(World world) {
+        if (breachCorridor == null || vehicles.isEmpty()) return;
+        BlockPos inner = (interiorObjective != null) ? interiorObjective : breachCorridor;
+        double ang = Math.atan2(breachCorridor.getZ() - site.getZ(), breachCorridor.getX() - site.getX());
+        double px = -Math.sin(ang), pz = Math.cos(ang);
+        int i = 0;
+        for (EntityAIPilot v : vehicles) {
+            if (v == null || v.isDead) continue;
+            if (v.isDrivingBoat()) { i++; continue; }
+            double lat = ((i % 5) - 2) * 4.0; // 5 interior lanes, 4 blocks apart, so hulls don't stack
+            double dx = breachCorridor.getX() + 0.5 - v.posX, dz = breachCorridor.getZ() + 0.5 - v.posZ;
+            BlockPos goal = (dx * dx + dz * dz > 14 * 14)
+                    ? outsidePoint(world, breachCorridor, 4.0)
+                    : new BlockPos(inner.getX() + (int) Math.round(px * lat), inner.getY(),
+                                   inner.getZ() + (int) Math.round(pz * lat));
+            v.setRallyPoint(goal);
+            i++;
         }
     }
 
@@ -2047,6 +2074,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
 
         // A fresh armoured push commits with the line.
         if (warLevel >= 6) spawnArmourColumn(world, ENCIRCLE_RING - 2.0); // from the staging zone, not the wall
+
+        // And EVERY ground vehicle gets its through-the-breach rally immediately -- the armour rolls off
+        // the platform with the infantry surge instead of parking on the deck shelling from home.
+        tickVehicleSurgePush(world);
     }
 
     /**
@@ -2179,7 +2210,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
         if (accessTasks > 0) {
             engQueue.sort((a, b) -> b.priority - a.priority);
-            EpochRunnerMod.logger.info("[Siege] queued " + accessTasks + " hand-cut ACCESS stair task(s)");
+            EpochRunnerMod.logger.info("[Siege] queued " + accessTasks + " hand-built ACCESS ladder task(s)");
         }
         buildObjectiveGraph(); // typed shadow of the final objective set (read-only; nothing decides off it yet)
         publishAssaultDebug(world);
@@ -2626,6 +2657,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
      */
     private void advanceAssaultColumn(World world) {
         if (!assaultPathBuilt) buildAssaultPath(world);
+        // FAN OUT AFTER THE PUSH-THROUGH: the moment the column front is PAST the breach-mouth node the army
+        // is inside -- hand every formation + soldier to the objective spread (40/25/25/10) immediately,
+        // instead of walking the whole remaining corridor to ONE heatspot ("most troops end at the breach
+        // point during surge and never try to go anywhere else").
+        if (assaultBreachIdx >= 0 && assaultFront > assaultBreachIdx) {
+            driveFormationsToObjectives(world);
+            driveSoldiersToObjectives(world);
+            return;
+        }
         if (assaultPath.isEmpty() || assaultFront >= assaultPath.size()) {
             driveFormationsToObjectives(world); // corridor walked -> spread to loot objectives
             driveSoldiersToObjectives(world);
@@ -2992,25 +3032,257 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // its assigned objective, and keep the released soldiers MARCHING to objectives (not chasing
                 // the player). Squads advance as units; by the assault they are well inside.
                 if (tickAge % 5 == 0) advanceAssaultColumn(world); // march the column along the engineer corridor
+                if (tickAge % 20 == 0) tickVehicleSurgePush(world); // armour rolls off the platform + through the gap
                 if (tsp >= PHASE_SURGE_TICKS || waveDefeated(tsp)) beginInteriorAssault(world);
                 break;
 
             case P_ASSAULT:
                 tickEngineers(world); // crews finish their remaining work, then form up at the breach
                 tickLooting(world, tsp);
+                if (tickAge % 20 == 0) tickVehicleSurgePush(world);
                 if (waveDefeated(tsp)) {
                     flushCouriers(world);                // deposit any loot still in transit
                     forceResolve(BattleOutcome.VICTORY); // the assault was fought off
                 } else if (capturedSpots.size() >= heatspots.size() || tsp >= PHASE_ASSAULT_TICKS) {
-                    flushCouriers(world);
-                    forceResolve(BattleOutcome.VICTORY); // every heatspot looted, or the window elapsed
+                    beginOccupation(world);              // NOT instant victory: complete the sweep, rally, depart
                 }
+                break;
+
+            case P_OCCUPY:
+                tickOccupation(world, tsp);
                 break;
 
             default:
                 forceResolve(BattleOutcome.VICTORY);
                 break;
         }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  PHASE 6 — OCCUPATION (complete the sweep, rally home, depart)
+    // ════════════════════════════════════════════════════════════
+
+    private void beginOccupation(World world) {
+        phase = P_OCCUPY;
+        lastPhaseChangeTick = tickAge;
+        occStage = 0;
+        occStageSince = tickAge;
+        EpochRunnerMod.logger.info("[Siege] -> OCCUPATION: formations spread out to COMPLETE the loot sweep ("
+                + capturedSpots.size() + "/" + heatspots.size() + " objectives so far), then rally home and depart");
+    }
+
+    /**
+     * The final act. Stage 0: the formations stay spread across the whole base and the loot sweep runs to
+     * COMPLETION -- every objective looted, or every depot chest ("chest cart") full, or the hard failsafe
+     * cap. Stage 1: every surviving element -- formations, loose soldiers, cavalry, armour -- rallies back
+     * to the staging platform. Stage 2: the column marches out toward the rival city and the units despawn
+     * as they reach the horizon point; then the siege resolves. Every stage has a time cap: never-stall.
+     */
+    private void tickOccupation(World world, int tsp) {
+        int stageT = tickAge - occStageSince;
+        switch (occStage) {
+            case 0: {
+                tickEngineers(world);        // crews finish any remaining ladders/corridor under the sweep
+                tickLooting(world, tsp);     // keeps formations spread + grabbing + hauling
+                if (tickAge % 20 == 0) tickVehicleSurgePush(world);
+                if (waveDefeated(tsp)) {     // the defenders wiped the army mid-sweep
+                    flushCouriers(world);
+                    forceResolve(BattleOutcome.VICTORY);
+                    return;
+                }
+                boolean allLooted = capturedSpots.size() >= heatspots.size() && couriers.isEmpty();
+                boolean cartsFull = (tickAge % 40 == 0) && depotFull(world);
+                if (allLooted || cartsFull || stageT >= OCC_LOOT_CAP_TICKS) {
+                    flushCouriers(world);
+                    occStage = 1;
+                    occStageSince = tickAge;
+                    EpochRunnerMod.logger.info("[Siege] occupation: loot sweep COMPLETE ("
+                            + (allLooted ? "all objectives looted" : cartsFull ? "chest carts full" : "sweep window elapsed")
+                            + ") -> the army rallies back to the platform");
+                    announceStageDebug(world, (stagingCenter != null) ? stagingCenter : site, "ARMY WITHDRAWING TO CAMP");
+                }
+                break;
+            }
+            case 1: {
+                BlockPos home = (stagingCenter != null) ? stagingCenter : (lootDepot != null ? lootDepot : site);
+                if (tickAge % 10 == 0) rallyArmyTo(world, home);
+                if (armyRallied(world, home, 16.0) || stageT >= OCC_RALLY_CAP_TICKS) {
+                    occStage = 2;
+                    occStageSince = tickAge;
+                    departPoint = computeDepartPoint(world);
+                    EpochRunnerMod.logger.info("[Siege] occupation: army rallied -> departing for the rival city via "
+                            + xyz(departPoint));
+                    announceStageDebug(world, departPoint, "ARMY DEPARTS FOR THE RIVAL CITY");
+                }
+                break;
+            }
+            case 2: {
+                if (departPoint == null) departPoint = computeDepartPoint(world);
+                if (tickAge % 10 == 0) rallyArmyTo(world, departPoint);
+                if (tickAge % 10 == 5) despawnDepartedUnits(world);
+                if (armyGone(world) || stageT >= OCC_DEPART_CAP_TICKS) {
+                    flushCouriers(world);
+                    forceResolve(BattleOutcome.VICTORY);
+                }
+                break;
+            }
+            default:
+                forceResolve(BattleOutcome.VICTORY);
+                break;
+        }
+    }
+
+    /** True when every depot chest is full -- "the chest carts are packed, time to go home". */
+    private boolean depotFull(World world) {
+        if (lootChests.isEmpty()) return false;
+        for (BlockPos cp : lootChests) {
+            net.minecraft.tileentity.TileEntity te = world.getTileEntity(cp);
+            if (!(te instanceof net.minecraft.inventory.IInventory)) continue; // a destroyed chest can't gate departure
+            net.minecraft.inventory.IInventory inv = (net.minecraft.inventory.IInventory) te;
+            for (int i = 0; i < inv.getSizeInventory(); i++) {
+                net.minecraft.item.ItemStack st = inv.getStackInSlot(i);
+                if (st.isEmpty() || st.getCount() < Math.min(st.getMaxStackSize(), inv.getInventoryStackLimit()))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    /** March EVERY surviving element -- formations (engineer crews included), loose soldiers, cavalry,
+     *  and land vehicles -- toward {@code goal}. Boats keep their water patrol. */
+    private void rallyArmyTo(World world, BlockPos goal) {
+        if (goal == null) return;
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead) continue;
+            c.setBattleContext(activator, goal);
+            stepCarrierToward(c, goal, 0.22);
+        }
+        if (site != null) {
+            double R = 200.0;
+            net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                    site.getX() - R, 0, site.getZ() - R, site.getX() + R, 255, site.getZ() + R);
+            for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
+                if (s == null || s.isDead) continue;
+                if (couriers.containsKey(s)) continue; // still hauling: it finishes its delivery first
+                if (s.getEntityData().hasKey("erm_strategic")) continue;
+                try { if (!"empire".equalsIgnoreCase(s.getTeam_())) continue; } catch (Throwable ignored) { continue; }
+                s.setMarchObjective(goal);
+            }
+        }
+        for (EntityAIPilot v : vehicles) {
+            if (v == null || v.isDead || v.isDrivingBoat()) continue;
+            v.setRallyPoint(goal);
+        }
+    }
+
+    /** True when >=70% of the surviving formations are within {@code R} of {@code goal} (carriers are the
+     *  column anchors; the loose infantry follows them; the stage timer is the straggler failsafe). */
+    private boolean armyRallied(World world, BlockPos goal, double R) {
+        int total = 0, near = 0;
+        for (EntityFormationCarrier c : carriers) {
+            if (c == null || c.isDead) continue;
+            total++;
+            if (c.getDistanceSq(goal.getX() + 0.5, goal.getY(), goal.getZ() + 0.5) <= R * R) near++;
+        }
+        return total == 0 || near >= Math.max(1, (int) (total * 0.7));
+    }
+
+    /** Where the column marches out: TOWARD the nearest rival city when one exists (the army returns home
+     *  with the spoils), else straight out the back of the camp. ~55 blocks past the staging ring. */
+    private BlockPos computeDepartPoint(World world) {
+        double ang = frontBearing;
+        try {
+            studio.ERM.war.rival.RivalCityState rc = RivalCityManager.getNearestCity(world, site);
+            if (rc != null && rc.center != null)
+                ang = Math.atan2(rc.center.getZ() - site.getZ(), rc.center.getX() - site.getX());
+        } catch (Throwable ignored) {}
+        int x = site.getX() + (int) Math.round(Math.cos(ang) * (ENCIRCLE_RING + 55));
+        int z = site.getZ() + (int) Math.round(Math.sin(ang) * (ENCIRCLE_RING + 55));
+        return new BlockPos(x, surfaceY(world, x, z), z);
+    }
+
+    /** Despawn each unit as it reaches the departure point -- the column visibly marches over the horizon
+     *  rather than blinking out. A puff of cloud marks each exit. */
+    private void despawnDepartedUnits(World world) {
+        if (departPoint == null) return;
+        double R2 = 8.0 * 8.0;
+        for (EntityFormationCarrier c : new ArrayList<>(carriers)) {
+            if (c == null || c.isDead) continue;
+            if (c.getDistanceSq(departPoint.getX() + 0.5, departPoint.getY(), departPoint.getZ() + 0.5) <= R2) {
+                departPuff(world, c.posX, c.posY, c.posZ);
+                c.setDead();
+            }
+        }
+        for (EntityAIPilot v : new ArrayList<>(vehicles)) {
+            if (v == null || v.isDead) continue;
+            if (v.getDistanceSq(departPoint.getX() + 0.5, departPoint.getY(), departPoint.getZ() + 0.5) <= 12.0 * 12.0) {
+                departPuff(world, v.posX, v.posY, v.posZ);
+                try {
+                    if (v.getRidingEntity() != null && !v.getRidingEntity().isDead) v.getRidingEntity().setDead();
+                } catch (Throwable ignored) {}
+                v.setDead();
+            }
+        }
+        if (site != null) {
+            double R = 200.0;
+            net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                    site.getX() - R, 0, site.getZ() - R, site.getX() + R, 255, site.getZ() + R);
+            for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
+                if (s == null || s.isDead) continue;
+                if (s.getEntityData().hasKey("erm_strategic")) continue;
+                try { if (!"empire".equalsIgnoreCase(s.getTeam_())) continue; } catch (Throwable ignored) { continue; }
+                if (s.getDistanceSq(departPoint.getX() + 0.5, departPoint.getY(), departPoint.getZ() + 0.5) <= R2) {
+                    departPuff(world, s.posX, s.posY, s.posZ);
+                    if (s.getRidingEntity() != null && !s.getRidingEntity().isDead) s.getRidingEntity().setDead();
+                    s.setDead();
+                }
+            }
+        }
+        for (net.minecraft.entity.Entity e : new ArrayList<>(looseUnits)) {
+            if (e == null || e.isDead) continue;
+            if (e.getDistanceSq(departPoint.getX() + 0.5, departPoint.getY(), departPoint.getZ() + 0.5) <= R2) {
+                departPuff(world, e.posX, e.posY, e.posZ);
+                e.setDead();
+            }
+        }
+    }
+
+    private void departPuff(World world, double x, double y, double z) {
+        try {
+            if (world instanceof net.minecraft.world.WorldServer)
+                ((net.minecraft.world.WorldServer) world).spawnParticle(
+                        net.minecraft.util.EnumParticleTypes.CLOUD, x, y + 1.0, z, 8, 0.4, 0.5, 0.4, 0.01);
+        } catch (Throwable ignored) {}
+    }
+
+    /** True when no combat element of the army survives near the site (the departure emptied the field). */
+    private boolean armyGone(World world) {
+        for (EntityFormationCarrier c : carriers) if (c != null && !c.isDead) return false;
+        for (EntityAIPilot v : vehicles) if (v != null && !v.isDead && !v.isDrivingBoat()) return false;
+        if (site != null) {
+            double R = 200.0;
+            net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                    site.getX() - R, 0, site.getZ() - R, site.getX() + R, 255, site.getZ() + R);
+            for (EntitySoldier s : world.getEntitiesWithinAABB(EntitySoldier.class, box)) {
+                if (s == null || s.isDead) continue;
+                if (s.getEntityData().hasKey("erm_strategic")) continue;
+                try { if ("empire".equalsIgnoreCase(s.getTeam_())) return false; } catch (Throwable ignored) {}
+            }
+        }
+        return true;
+    }
+
+    /** A big labelled beam so the withdrawal/departure is readable from anywhere on the field. */
+    private void announceStageDebug(World world, BlockPos at, String label) {
+        if (at == null) return;
+        try {
+            studio.ERM.war.strategy.WarHeatDebug.show(world,
+                    java.util.Collections.singletonList(
+                            studio.ERM.war.strategy.WarHeatDebug.Marker.beam(at, 1f, 0.75f, 0.1f, 18)),
+                    java.util.Collections.singletonList(
+                            new studio.ERM.war.strategy.WarHeatDebug.Label(at.up(19), label)),
+                    30 * 20);
+        } catch (Throwable ignored) {}
     }
 
     // ════════════════════════════════════════════════════════════
@@ -4162,6 +4434,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
             case P_ENGINEER: return "Siege — Engineer Push";
             case P_SURGE:    return "Siege — Surge";
             case P_ASSAULT:  return "Siege — Interior Assault";
+            case P_OCCUPY:   return (occStage == 0) ? "Siege — Occupation"
+                                  : (occStage == 1) ? "Siege — Withdrawal"
+                                  : "Siege — Departure";
             default:          return "Siege";
         }
     }
@@ -4187,6 +4462,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
             case P_BOMBARD:  nextDelay = PHASE_BOMBARD_TICKS;  break;
             case P_ENGINEER: nextDelay = PHASE_ENGINEER_TICKS; break;
             case P_SURGE:    nextDelay = PHASE_SURGE_TICKS;    break;
+            case P_ASSAULT:  nextDelay = PHASE_ASSAULT_TICKS;  break;
             default: return 0;
         }
         int remaining = nextDelay - (tickAge - lastPhaseChangeTick);

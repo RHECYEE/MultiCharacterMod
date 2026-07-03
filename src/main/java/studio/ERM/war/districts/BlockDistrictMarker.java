@@ -28,9 +28,27 @@ import javax.annotation.Nullable;
  */
 public class BlockDistrictMarker extends Block {
 
+    // Chest-shaped model (1..15 x 0..14): the block is NOT a full opaque cube. Without these flags the
+    // renderer culls the neighbouring faces and bakes black AO into the 1px gutter around the model --
+    // the "void around the borders" halo.
+    private static final net.minecraft.util.math.AxisAlignedBB CHEST_AABB =
+            new net.minecraft.util.math.AxisAlignedBB(1 / 16.0, 0.0, 1 / 16.0, 15 / 16.0, 14 / 16.0, 15 / 16.0);
+
     public BlockDistrictMarker() {
         super(Material.ROCK);
         setHardness(1.5F);
+    }
+
+    @Override
+    public boolean isOpaqueCube(IBlockState state) { return false; }
+
+    @Override
+    public boolean isFullCube(IBlockState state) { return false; }
+
+    @Override
+    public net.minecraft.util.math.AxisAlignedBB getBoundingBox(IBlockState state,
+            net.minecraft.world.IBlockAccess source, BlockPos pos) {
+        return CHEST_AABB;
     }
 
     @Override

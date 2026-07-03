@@ -41,9 +41,10 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int viewCenterX; // world X at center of canvas
     private int viewCenterZ; // world Z at center of canvas
 
-    // 1 bpp added so planning can zoom in to BLOCK precision (placing markers accurately).
-    private static final int[] ZOOM_LEVELS = {1, 2, 4, 8, 16, 32}; // blocks per pixel
-    private int zoomIndex = 3; // default 8 bpp
+    // 0.5 bpp (2 screen px per block) added so districts can be drawn PRECISELY around even a small
+    // single building; 1 bpp remains the block-precision level for marker placement.
+    private static final double[] ZOOM_LEVELS = {0.5, 1, 2, 4, 8, 16, 32}; // blocks per pixel
+    private int zoomIndex = 4; // default 8 bpp
 
     private int canvasSize = 512;
     private int canvasLeft, canvasTop;
@@ -166,7 +167,8 @@ public class GuiTacticalWarMap extends GuiScreen {
     private static final int TERRAIN_PIXEL_STEP = 2;            // sample one column per 2x2 px block
     private int[] terrainColors;                                // ARGB per sample cell; 0 = unexplored
     private int terrainGridW, terrainGridH;
-    private int terrainCacheCenterX, terrainCacheCenterZ, terrainCacheBpp, terrainCacheCanvas;
+    private int terrainCacheCenterX, terrainCacheCenterZ, terrainCacheCanvas;
+    private double terrainCacheBpp;
     private boolean terrainCacheValid = false;
 
     public GuiTacticalWarMap() {
@@ -232,29 +234,29 @@ public class GuiTacticalWarMap extends GuiScreen {
 
     // ==================== Coordinate Conversion ====================
 
-    private int getBlocksPerPixel() {
+    private double getBlocksPerPixel() {
         return ZOOM_LEVELS[Math.max(0, Math.min(zoomIndex, ZOOM_LEVELS.length - 1))];
     }
 
     /** Convert screen pixel to world coordinates. */
     private int[] screenToWorld(int screenX, int screenY) {
-        int bpp = getBlocksPerPixel();
+        double bpp = getBlocksPerPixel();
         int half = canvasSize / 2;
         int relX = screenX - canvasLeft - half;
         int relY = screenY - canvasTop - half;
         return new int[]{
-                viewCenterX + (relX * bpp),
-                viewCenterZ + (relY * bpp)
+                viewCenterX + (int) Math.floor(relX * bpp),
+                viewCenterZ + (int) Math.floor(relY * bpp)
         };
     }
 
     /** Convert world coordinates to screen pixel. Returns null if off-canvas. */
     private int[] worldToScreen(int worldX, int worldZ) {
-        int bpp = getBlocksPerPixel();
-        if (bpp == 0) return null;
+        double bpp = getBlocksPerPixel();
+        if (bpp <= 0) return null;
         int half = canvasSize / 2;
-        int sx = canvasLeft + half + ((worldX - viewCenterX) / bpp);
-        int sy = canvasTop + half + ((worldZ - viewCenterZ) / bpp);
+        int sx = canvasLeft + half + (int) ((worldX - viewCenterX) / bpp);
+        int sy = canvasTop + half + (int) ((worldZ - viewCenterZ) / bpp);
         return new int[]{sx, sy};
     }
 
@@ -520,11 +522,11 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // Panning
         if (panning) {
-            int bpp = getBlocksPerPixel();
+            double bpp = getBlocksPerPixel();
             int dx = mouseX - panStartMouseX;
             int dy = mouseY - panStartMouseY;
-            viewCenterX = panStartCenterX - (dx * bpp);
-            viewCenterZ = panStartCenterZ - (dy * bpp);
+            viewCenterX = panStartCenterX - (int) Math.round(dx * bpp);
+            viewCenterZ = panStartCenterZ - (int) Math.round(dy * bpp);
 
             // Clamp pan distance from player
             if (mc.player != null) {
@@ -762,7 +764,7 @@ public class GuiTacticalWarMap extends GuiScreen {
     }
 
     private void drawTerrainBackground() {
-        int bpp = getBlocksPerPixel();
+        double bpp = getBlocksPerPixel();
 
         // Base fill: anything we can't sample (no client world / unloaded chunks) reads as
         // "unexplored" rather than a green void.
@@ -789,7 +791,7 @@ public class GuiTacticalWarMap extends GuiScreen {
      * the same technique vanilla maps use. Only loaded client chunks can be sampled; everything else
      * stays "unexplored". Comparatively expensive, so this runs only when the view changes.
      */
-    private void rebuildTerrainCache(World world, int bpp) {
+    private void rebuildTerrainCache(World world, double bpp) {
         int step = TERRAIN_PIXEL_STEP;
         int gw = (canvasSize + step - 1) / step;
         int gh = gw; // canvas is square
@@ -805,8 +807,8 @@ public class GuiTacticalWarMap extends GuiScreen {
                     int idx = gy * gw + gx;
                     int px = gx * step + step / 2;
                     int py = gy * step + step / 2;
-                    int wx = viewCenterX + (px - half) * bpp;
-                    int wz = viewCenterZ + (py - half) * bpp;
+                    int wx = viewCenterX + (int) Math.floor((px - half) * bpp);
+                    int wz = viewCenterZ + (int) Math.floor((py - half) * bpp);
 
                     Chunk chunk = world.getChunkProvider().getLoadedChunk(wx >> 4, wz >> 4);
                     if (chunk == null) { colors[idx] = 0; heights[idx] = -1; continue; }
@@ -876,24 +878,24 @@ public class GuiTacticalWarMap extends GuiScreen {
     }
 
     /** Faint chunk-boundary grid, drawn only when a chunk spans enough pixels to read cleanly. */
-    private void drawChunkGrid(int bpp) {
-        int chunkPx = 16 / bpp;
+    private void drawChunkGrid(double bpp) {
+        int chunkPx = (int) Math.round(16 / bpp);
         if (chunkPx < 8) return;
         int half = canvasSize / 2;
-        int worldLeft = viewCenterX - (half * bpp);
-        int worldTop = viewCenterZ - (half * bpp);
-        int worldRight = viewCenterX + (half * bpp);
-        int worldBottom = viewCenterZ + (half * bpp);
+        int worldLeft = viewCenterX - (int) Math.ceil(half * bpp);
+        int worldTop = viewCenterZ - (int) Math.ceil(half * bpp);
+        int worldRight = viewCenterX + (int) Math.ceil(half * bpp);
+        int worldBottom = viewCenterZ + (int) Math.ceil(half * bpp);
 
         int firstX = Math.floorDiv(worldLeft, 16) * 16;
         for (int wx = firstX; wx <= worldRight; wx += 16) {
-            int sx = canvasLeft + half + (wx - viewCenterX) / bpp;
+            int sx = canvasLeft + half + (int) ((wx - viewCenterX) / bpp);
             if (sx < canvasLeft || sx >= canvasLeft + canvasSize) continue;
             Gui.drawRect(sx, canvasTop, sx + 1, canvasTop + canvasSize, COLOR_GRID);
         }
         int firstZ = Math.floorDiv(worldTop, 16) * 16;
         for (int wz = firstZ; wz <= worldBottom; wz += 16) {
-            int sy = canvasTop + half + (wz - viewCenterZ) / bpp;
+            int sy = canvasTop + half + (int) ((wz - viewCenterZ) / bpp);
             if (sy < canvasTop || sy >= canvasTop + canvasSize) continue;
             Gui.drawRect(canvasLeft, sy, canvasLeft + canvasSize, sy + 1, COLOR_GRID);
         }
@@ -912,8 +914,8 @@ public class GuiTacticalWarMap extends GuiScreen {
         Map<ChunkPos, String> snapshot = ClientTerritoryCache.getSnapshot();
         if (snapshot.isEmpty()) return;
 
-        int bpp = getBlocksPerPixel();
-        int chunkPixelSize = Math.max(1, 16 / bpp);
+        double bpp = getBlocksPerPixel();
+        int chunkPixelSize = Math.max(1, (int) Math.round(16 / bpp));
         String playerId = mc.player != null ? mc.player.getUniqueID().toString() : "";
 
         // First pass: fill
@@ -984,8 +986,8 @@ public class GuiTacticalWarMap extends GuiScreen {
     }
 
     private void drawSelectionPreview() {
-        int bpp = getBlocksPerPixel();
-        int chunkPixelSize = Math.max(1, 16 / bpp);
+        double bpp = getBlocksPerPixel();
+        int chunkPixelSize = Math.max(1, (int) Math.round(16 / bpp));
         int previewColor = claimDragging ? COLOR_CLAIM_PREVIEW : COLOR_UNCLAIM_PREVIEW;
 
         for (ChunkPos cp : pendingSelection) {
@@ -1889,8 +1891,10 @@ public class GuiTacticalWarMap extends GuiScreen {
         int titleWidth = fontRenderer.getStringWidth(title);
         fontRenderer.drawStringWithShadow(title, (sw - titleWidth) / 2, canvasTop - 14, 0xFFFFFFFF);
 
-        // Zoom level
-        String zoomStr = TextFormatting.GRAY + "Zoom: " + TextFormatting.WHITE + getBlocksPerPixel() + " bpp";
+        // Zoom level ("0.5 bpp" at the new close-up level; whole numbers stay clean).
+        double bppNow = getBlocksPerPixel();
+        String bppLabel = (bppNow == Math.floor(bppNow)) ? String.valueOf((int) bppNow) : String.valueOf(bppNow);
+        String zoomStr = TextFormatting.GRAY + "Zoom: " + TextFormatting.WHITE + bppLabel + " bpp";
         fontRenderer.drawStringWithShadow(zoomStr, canvasLeft, canvasTop + canvasSize + 4, 0xFFFFFFFF);
 
         // World coordinates at cursor

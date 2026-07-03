@@ -50,6 +50,8 @@ public final class CivilStats {
                 housing.add(m);
             }
         }
+        java.util.Set<BlockPos> claimed = BedAssignmentData.get(world).claimedBeds();
+        int claimedSeen = 0;
         int columns = 0;
         outer:
         for (CivilMarker m : housing) {
@@ -68,17 +70,19 @@ public final class CivilStats {
                     int surfaceY = world.getHeight(x, z);
                     int lo = Math.max(0, surfaceY - Y_WINDOW), hi = surfaceY + Y_WINDOW;
                     for (int y = lo; y <= hi; y++) {
-                        IBlockState st = world.getBlockState(new BlockPos(x, y, z));
+                        BlockPos bp = new BlockPos(x, y, z);
+                        IBlockState st = world.getBlockState(bp);
                         if (st.getBlock() instanceof BlockBed
                                 && st.getValue(BlockBed.PART) == BlockBed.EnumPartType.HEAD) {
                             s.totalBeds++;
+                            if (claimed.contains(bp)) claimedSeen++;
                         }
                     }
                 }
             }
         }
-        // Bed CLAIMING isn't built yet -> every bed is currently free.
-        s.availBeds = s.totalBeds;
+        // Free = counted beds minus the ones citizens have claimed (BedAssignmentManager).
+        s.availBeds = Math.max(0, s.totalBeds - claimedSeen);
         return s;
     }
 }

@@ -210,6 +210,11 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.DistrictWorkExecutor.class);
             logger.info("[Strategic] district work executor registered (district labor is LIVE)");
 
+            // BED AUTO-ASSIGNMENT — housing ownership: citizens claim persistent Residential/Barracks
+            // beds (scored indoor/lit/reachable), repaired when beds break or districts change.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.BedAssignmentManager.class);
+            logger.info("[Strategic] bed assignment manager registered (housing ownership is LIVE)");
+
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(
                     instance, new studio.ERM.strategic.defense.ErmGuiHandler());

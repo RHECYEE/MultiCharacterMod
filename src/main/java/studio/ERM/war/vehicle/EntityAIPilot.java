@@ -77,6 +77,25 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
     public void setDirectorRouteStatus(studio.ERM.war.strategy.RouteStatus s) { this.directorRouteStatus = s; }
     public void setBreachHold(net.minecraft.util.math.BlockPos p) { this.breachHold = p; }
 
+    // Director-pushed "no block damage" zones (staging platform centre / loot depot). A main-gun blast that
+    // would land inside one -- or right beside ANY friendly hull, including our own footing -- switches to an
+    // entity-only AoE so the army never craters its own platform, loot chests, or sister tanks.
+    private java.util.List<net.minecraft.util.math.BlockPos> noBlastZones = java.util.Collections.emptyList();
+    private static final double NO_BLAST_ZONE_R_SQ = 20.0 * 20.0;
+    public void setNoBlastZones(java.util.List<net.minecraft.util.math.BlockPos> zones) {
+        this.noBlastZones = (zones != null) ? zones : java.util.Collections.emptyList();
+    }
+
+    /** True when this pilot's current driveable categorizes as a BOAT -- the director must not overwrite its
+     *  rallyPoint with land waypoints (boats read rallyPoint as their water-patrol centre). */
+    public boolean isDrivingBoat() {
+        try {
+            if (!(this.getRidingEntity() instanceof EntitySeat)) return false;
+            EntitySeat seat = (EntitySeat) this.getRidingEntity();
+            return seat.driveable != null && categorizeVehicle(seat.driveable) == VehicleCategory.BOAT;
+        } catch (Throwable t) { return false; }
+    }
+
     // C12: cheap stuck-detection. Sampled ~every STUCK_SAMPLE ticks while the hull is TRYING to advance: if
     // it barely moved, flag it so the director (which already owns the vehicle list) can divert a crew to
     // clear whatever is in front. One-way -- the director polls these; no back-reference to the director.
@@ -853,16 +872,25 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
 
         Entity target = this.getAttackTarget();
         if (target == null) target = this.lockedTarget;
-        if (target == null) return;
+        // A RALLIED vehicle keeps driving to its rally point even with no live target -- "tanks refuse to
+        // drive off the platform" was partly this early-return freezing any vehicle whose target died/left.
+        if (target == null && rallyPoint == null) return;
 
-        if (lockedTarget != target) {
-            lockedTarget = target;
-            lockedTargetTicks = 0;
+        if (target != null) {
+            if (lockedTarget != target) {
+                lockedTarget = target;
+                lockedTargetTicks = 0;
+            }
+            lockedTargetTicks++;
         }
-        lockedTargetTicks++;
 
         updateVehicleControl(driving);
         VehicleCategory cat = getVehicleCategory(driving);
+
+        if (target == null && cat != VehicleCategory.BOAT
+                && !(rallyPoint != null && driving instanceof EntityVehicle)) {
+            return; // nothing to chase and no land rally to drive -- hold
+        }
 
         if (cat == VehicleCategory.BOAT) {
             // BOATS always use the water-corridor pilot (it reads rallyPoint as the patrol centre). They must
@@ -1353,14 +1381,22 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
 
         float explosionPower = getExplosionPowerForVehicle(vehicle);
 
-        // Shield friendly crew/infantry inside the blast so the main gun never damages its own
-        // vehicle's crew or nearby allied troops. The vehicle (exploder) is already excluded by
-        // vanilla; this covers everyone riding it and friendly units standing beside it.
-        java.util.List<Entity> shielded = shieldFriendliesForBlast(explosionX, explosionY, explosionZ, explosionPower);
-        try {
-            this.world.newExplosion(vehicle, explosionX, explosionY, explosionZ, explosionPower, false, explosionPower > 2.0F);
-        } finally {
-            clearExplosionShields(shielded);
+        if (isBlastNearProtectedAssets(explosionX, explosionY, explosionZ)) {
+            // PROTECTED GROUND: the shell would land on the siege's own platform / loot depot / beside a
+            // friendly hull (Flan vehicles are multi-part -- a real explosion shreds a neighbour tank's
+            // seats+wheels, and block damage craters the deck under the army). Same spectacle, entity-only:
+            // direct AoE on hostiles; the particles/sound/launch/hit-roll below still run.
+            damageHostilesDirect(explosionX, explosionY, explosionZ, explosionPower);
+        } else {
+            // Shield friendly crew/infantry inside the blast so the main gun never damages its own
+            // vehicle's crew or nearby allied troops. The vehicle (exploder) is already excluded by
+            // vanilla; this covers everyone riding it and friendly units standing beside it.
+            java.util.List<Entity> shielded = shieldFriendliesForBlast(explosionX, explosionY, explosionZ, explosionPower);
+            try {
+                this.world.newExplosion(vehicle, explosionX, explosionY, explosionZ, explosionPower, false, explosionPower > 2.0F);
+            } finally {
+                clearExplosionShields(shielded);
+            }
         }
 
         spawnImpactParticles(explosionX, explosionY, explosionZ);
@@ -1406,6 +1442,66 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
             double f = (1.0 - d / r) * 2.2; // closer = bigger launch
             e.addVelocity((dx / d) * f, Math.max(0.5, (dy / d) * f) + 0.6, (dz / d) * f);
             e.velocityChanged = true;
+        }
+    }
+
+    /**
+     * True when a shell impact at (x,y,z) would land inside a director-pushed no-blast zone (staging
+     * platform / loot depot) or within 12 blocks of ANY friendly-crewed hull (including the firing
+     * vehicle's own footing). Those blasts must not break blocks or run a real explosion.
+     */
+    private boolean isBlastNearProtectedAssets(double x, double y, double z) {
+        for (net.minecraft.util.math.BlockPos p : noBlastZones) {
+            if (p == null) continue;
+            double dx = p.getX() + 0.5 - x, dy = p.getY() + 0.5 - y, dz = p.getZ() + 0.5 - z;
+            if (dx * dx + dy * dy + dz * dz < NO_BLAST_ZONE_R_SQ) return true;
+        }
+        String myTeam = this.getMcmTeam();
+        double r = 12.0;
+        net.minecraft.util.math.AxisAlignedBB box =
+                new net.minecraft.util.math.AxisAlignedBB(x - r, y - r, z - r, x + r, y + r, z + r);
+        for (EntityDriveable d : world.getEntitiesWithinAABB(EntityDriveable.class, box)) {
+            if (d == null || d.isDead) continue;
+            if (isFriendlyCrewedDriveable(d, myTeam)) return true;
+        }
+        return false;
+    }
+
+    /** A driveable counts as FRIENDLY when any of its seats is crewed by a same-team AI pilot. */
+    private boolean isFriendlyCrewedDriveable(EntityDriveable d, String myTeam) {
+        try {
+            List<EntitySeat> seats = getSeatsFromVehicle(d);
+            if (seats == null) return false;
+            for (EntitySeat s : seats) {
+                if (s == null) continue;
+                Entity rider = s.getControllingPassenger();
+                if (rider instanceof EntityAIPilot && sameTeam(myTeam, ((EntityAIPilot) rider).getMcmTeam()))
+                    return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /**
+     * Entity-only replacement for the shell's world explosion when it lands on protected ground: hostile
+     * living entities in the blast radius take distance-scaled explosion damage; friendlies are skipped
+     * here AND by the war friendly-fire handler. No blocks are touched.
+     */
+    private void damageHostilesDirect(double x, double y, double z, float power) {
+        double r = power * 2.0 + 2.0;
+        String myTeam = this.getMcmTeam();
+        net.minecraft.util.math.AxisAlignedBB box =
+                new net.minecraft.util.math.AxisAlignedBB(x - r, y - r, z - r, x + r, y + r, z + r);
+        for (Entity e : world.getEntitiesWithinAABB(Entity.class, box)) {
+            if (!(e instanceof EntityLivingBase) || e.isDead || e == this) continue;
+            if (e instanceof EntityAIPilot && sameTeam(myTeam, ((EntityAIPilot) e).getMcmTeam())) continue;
+            if (e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier
+                    && sameTeam(myTeam, ((studio.ERM.war.BattleManagers.entities.EntitySoldier) e).getTeam_())) continue;
+            double dx = e.posX - x, dy = e.posY - y, dz = e.posZ - z;
+            double dd = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dd > r) continue;
+            float dmg = (float) (power * 5.0 * (1.0 - dd / r));
+            if (dmg > 1f) e.attackEntityFrom(DamageSource.causeExplosionDamage(this), dmg);
         }
     }
 

@@ -153,6 +153,7 @@ public final class DistrictWorkExecutor {
             if (!alive.contains(en.getKey()) || district == null || depot == null) {
                 ASSIGNMENTS.remove(en.getKey());
                 CARRIED.remove(en.getKey()); // in-transit yields die with the worker (or unload)
+                if (alive.contains(en.getKey())) clearJobItem(world, en.getKey()); // district gone -> badge off
                 continue;
             }
             staffed.merge(a.districtUid, 1, Integer::sum);
@@ -191,6 +192,7 @@ public final class DistrictWorkExecutor {
                 ASSIGNMENTS.put(worker.getUniqueID(),
                         new Assignment(district.uid, district.kind, district.depotPos, spot));
                 ensureWorkTask(worker);
+                equipJobItem(worker, district.kind); // rod/axe/hoe/pick/bow in hand = the job reads at a glance
                 staffed.merge(district.uid, 1, Integer::sum);
                 want--;
                 EpochRunnerMod.logger.info("[DistrictAI] hired " + worker.getName() + " ("
@@ -209,8 +211,44 @@ public final class DistrictWorkExecutor {
             if (extra <= 0) break;
             if (en.getValue().districtUid == district.uid) {
                 ASSIGNMENTS.remove(en.getKey());
+                clearJobItem(world, en.getKey());
                 extra--;
             }
+        }
+    }
+
+    /**
+     * The visible JOB BADGE: a hired worker holds the tool of its trade (fishing rod / axe / hoe /
+     * pickaxe / bow), so what a citizen does is readable at a glance. Cleared when the worker is
+     * explicitly released (overstaff / district deleted); kept overnight -- they're still employed,
+     * just walking home. Zero drop chance so the tool never becomes loot.
+     */
+    private static void equipJobItem(EntityCreature worker, int kind) {
+        try {
+            net.minecraft.item.ItemStack tool = jobItemFor(kind);
+            if (tool.isEmpty()) return;
+            worker.setHeldItem(net.minecraft.util.EnumHand.MAIN_HAND, tool);
+            worker.setDropChance(net.minecraft.inventory.EntityEquipmentSlot.MAINHAND, 0f);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void clearJobItem(WorldServer world, UUID workerId) {
+        try {
+            net.minecraft.entity.Entity e = world.getEntityFromUuid(workerId);
+            if (e instanceof EntityCreature)
+                ((EntityCreature) e).setHeldItem(net.minecraft.util.EnumHand.MAIN_HAND,
+                        net.minecraft.item.ItemStack.EMPTY);
+        } catch (Throwable ignored) {}
+    }
+
+    private static net.minecraft.item.ItemStack jobItemFor(int kind) {
+        switch (kind) {
+            case CivilMarker.FISHING: return new net.minecraft.item.ItemStack(net.minecraft.init.Items.FISHING_ROD);
+            case CivilMarker.LUMBER:  return new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_AXE);
+            case CivilMarker.FARM:    return new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_HOE);
+            case CivilMarker.MINING:  return new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_PICKAXE);
+            case CivilMarker.HUNTING: return new net.minecraft.item.ItemStack(net.minecraft.init.Items.BOW);
+            default:                  return net.minecraft.item.ItemStack.EMPTY;
         }
     }
 

@@ -144,6 +144,7 @@ public class EntityAIBanquetHallVisit extends net.minecraft.entity.ai.EntityAIBa
 
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
+        boolean bestIsHall = false;
 
         for (TileEntity te : citizen.world.loadedTileEntityList) {
             if (!(te instanceof TileEntityBanquetHall)) continue;
@@ -157,13 +158,44 @@ public class EntityAIBanquetHallVisit extends net.minecraft.entity.ai.EntityAIBa
             if (dist < bestDist) {
                 bestDist = dist;
                 best = p;
+                bestIsHall = true;
             }
         }
 
-        if (best != null) {
-            citizen.setBanquetHallPos(best);
+        // 3) KITCHEN districts feed citizens too: they go to whichever is NEAREST -- a kitchen depot
+        //    stocked with food, or a hall. (updateTask's pull path already handles any IItemHandler TE.)
+        try {
+            for (studio.ERM.strategic.civil.CivilMarker m
+                    : studio.ERM.strategic.civil.CivilPlanData.get(citizen.world).markers) {
+                if (m.isRoad() || m.kind != studio.ERM.strategic.civil.CivilMarker.KITCHEN || !m.hasDepot()) continue;
+                BlockPos p = m.depotPos;
+                if (p == null) continue;
+                if (!box.contains(new Vec3d(p.getX() + 0.5D, p.getY() + 0.5D, p.getZ() + 0.5D))) continue;
+                TileEntity te = citizen.world.getTileEntity(p);
+                if (te == null || !te.hasCapability(CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, EnumFacing.UP)) continue;
+                if (!holdsAnyFood(te.getCapability(CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, EnumFacing.UP))) continue;
+                double dist = citizen.getDistanceSqToCenter(p);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = p;
+                    bestIsHall = false;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (best != null && bestIsHall) {
+            citizen.setBanquetHallPos(best); // only halls are cached as the standing assignment
         }
         return best;
+    }
+
+    private static boolean holdsAnyFood(@Nullable IItemHandler h) {
+        if (h == null) return false;
+        for (int i = 0; i < h.getSlots(); i++) {
+            ItemStack s = h.getStackInSlot(i);
+            if (!s.isEmpty() && s.getItem() instanceof ItemFood) return true;
+        }
+        return false;
     }
 
     private int pullFoodFrom(IItemHandler from, int maxItems) {
