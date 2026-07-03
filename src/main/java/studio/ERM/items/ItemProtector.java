@@ -186,6 +186,8 @@ public class ItemProtector extends ItemBase {
                 player.sendMessage(new TextComponentString(TextFormatting.GOLD + "[Courier Marker] "
                         + TextFormatting.GRAY + "districts drawn: " + TextFormatting.WHITE + districts
                         + TextFormatting.GRAY + "  with depot: " + TextFormatting.WHITE + bound
+                        + TextFormatting.GRAY + "  workers hired: " + TextFormatting.WHITE
+                        + studio.ERM.strategic.civil.DistrictWorkExecutor.assignedCount()
                         + TextFormatting.DARK_GRAY + "  (rival level "
                         + DistrictRegistry.rivalLevel(world) + " gates output tables)"));
                 break;

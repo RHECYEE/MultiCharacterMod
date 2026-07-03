@@ -205,6 +205,11 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.defense.DefensePlanExecutor.class);
             logger.info("[Strategic] defense-plan executor registered");
 
+            // DISTRICT LABOR — the civilian mirror: drawn districts hijack AW2 worker npcs and
+            // reorder their tasks (work spots inside the polygon -> yields into the depot).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.DistrictWorkExecutor.class);
+            logger.info("[Strategic] district work executor registered (district labor is LIVE)");
+
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(
                     instance, new studio.ERM.strategic.defense.ErmGuiHandler());
