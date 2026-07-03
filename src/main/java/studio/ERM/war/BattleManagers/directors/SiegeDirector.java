@@ -945,11 +945,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
      */
     private void beginEngineerTunnels(World world) {
         tunnelPhase = true;
-        // Clear out any drained phase-1 tasks so the queue holds ONLY the tunnels (keeps the
-        // all-done check + reserveNextTask scan clean).
+        // Clear out any drained phase-1 tasks (keeps the all-done check + reserveNextTask scan clean).
+        // The handoff now fires as soon as the EXTERNAL route work is done, so WIDEN/CORRIDOR polish may
+        // still be mid-work -- those tasks stay queued and their crews stay ON them.
         engQueue.removeIf(t -> t.done);
-        // Release every crew from its (completed) phase-1 task so it can take its bound tunnel.
-        for (EngCrew crew : engCrews) releaseTask(crew);
+        // Release only IDLE crews (their task finished); a crew mid-WIDEN/CORRIDOR keeps its job and picks
+        // up remaining tunnel/ladder work from the queue afterwards.
+        for (EngCrew crew : engCrews) {
+            if (crew.current != null && crew.current.done) releaseTask(crew);
+        }
 
         // The interior foot of the breach = ~3 blocks inside the wall, on the breach grade. Every tunnel
         // starts here and fans out to its own heat spot.
@@ -959,7 +963,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
         BlockPos interiorFoot = new BlockPos(ifx, breachCorridor.getY(), ifz);
 
         List<BlockPos> spots = enumerateHeatSpots(world);
-        if (spots.isEmpty()) { engineersComplete = true; return; } // nothing to dig to; let the surge fire
+        boolean anyPending = false;
+        for (EngTask t : engQueue) if (!t.done) { anyPending = true; break; }
+        if (spots.isEmpty()) { engineersComplete = !anyPending; return; } // nothing to dig to
 
         int planned = 0;
         for (int ci = 0; ci < engCrews.size(); ci++) {
@@ -969,10 +975,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
             crewHeatSpot.put(crew, spot);
             EngTask tunnel = planEngineerTunnel(world, interiorFoot, spot, ci);
             if (tunnel != null) {
-                tunnel.claimedBy = crew; // PRE-CLAIM: each squad owns ITS tunnel to ITS spot
-                crew.current = tunnel;
-                crew.reservedAtTick = tickAge;
-                crew.arrived = false;
+                tunnel.shaftSpot = spot; // the DESTINATION rides on the task (any crew may finish it)
+                if (crew.current == null) { // idle squad: claim ITS tunnel now; busy squads come back for theirs
+                    tunnel.claimedBy = crew;
+                    crew.current = tunnel;
+                    crew.reservedAtTick = tickAge;
+                    crew.arrived = false;
+                    crew.bestDistToStand = Double.MAX_VALUE;
+                    crew.noProgressTicks = 0; crew.marchTicks = 0; crew.remoteLogged = false;
+                }
                 engQueue.add(tunnel);
                 planned++;
             }
@@ -987,7 +998,8 @@ public class SiegeDirector implements IPhasedBattleDirector {
             if (ladder != null) { engQueue.add(ladder); shafts++; }
         }
         engQueue.sort((a, b) -> b.priority - a.priority);
-        engineersComplete = (planned == 0 && shafts == 0); // nothing to build -> let the surge proceed
+        // Only report "all done" when NOTHING is pending (tunnels, ladders, or leftover widen/corridor).
+        engineersComplete = (planned == 0 && shafts == 0) && !anyPending;
         recomputeRouteStatus();
         EpochRunnerMod.logger.info("[Siege] PHASE2 tunnels: " + planned + " interior staircase(s) + "
                 + shafts + " triple-ladder(s) to loot, from " + xyz(interiorFoot));
@@ -3273,8 +3285,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 double lx = launchX + (b == 0 ? 0 : (world.rand.nextDouble() - 0.5) * 1.5);
                 double lz = launchZ + (b == 0 ? 0 : (world.rand.nextDouble() - 0.5) * 1.5);
                 BlockPos launchBlock = new BlockPos(lx, launchY, lz);
+                boolean placedSupport = false;
                 if (world.isAirBlock(launchBlock)) {
                     world.setBlockState(launchBlock, Blocks.COBBLESTONE.getDefaultState(), 2);
+                    placedSupport = true;
                 }
                 EntityFallingBlock fb = new EntityFallingBlock(world, lx, launchY, lz,
                         Blocks.COBBLESTONE.getDefaultState());
@@ -4281,6 +4295,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
         final BlockPos target;
         final int impactTick;
         int lastX, lastY = Integer.MIN_VALUE, lastZ; // last live position (for cleaning the landed block)
+        // The support cobblestone placed at the LAUNCH position (EntityFallingBlock dies on its first
+        // tick unless the block exists there). It was NEVER removed -- one floating cobblestone per
+        // shot piling up above every catapult, the "/war repair still leaves cobblestone" leak.
+        BlockPos launchPos = null;
+        int launchTick = 0;
         CatapultShot(EntityFallingBlock block, BlockPos target, int impactTick) {
             this.block = block;
             this.target = target;

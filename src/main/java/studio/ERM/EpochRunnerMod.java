@@ -67,7 +67,8 @@ public class EpochRunnerMod {
                 java.io.File cfgDir = event.getModConfigurationDirectory();
                 studio.ERM.war.config.WarMasterConfig.load(cfgDir);
                 studio.ERM.war.config.WarLevelsConfig.load(cfgDir);
-                logger.info("[Config] WarMaster + WarLevels configs loaded from " + cfgDir);
+                studio.ERM.war.config.DistrictOutputConfig.load(cfgDir);
+                logger.info("[Config] WarMaster + WarLevels + DistrictOutput configs loaded from " + cfgDir);
             } catch (Throwable t) {
                 logger.error("[Config] failed to load war configs", t);
             }

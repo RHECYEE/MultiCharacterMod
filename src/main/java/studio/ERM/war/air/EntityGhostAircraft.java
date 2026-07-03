@@ -905,32 +905,54 @@ public class EntityGhostAircraft extends EntityLiving {
     private void fireStrafe() {
         if (world.isRemote) return;
 
-        AirDoctrine.AircraftProfile p = AirDoctrine.getProfile(getAircraftType());
-        float accuracy = this.dataManager.get(ACCURACY); // higher = more spread, per your comment
-
+        // A STRAFING RUN: a straight LINE of explosion PARTICLES walked along the aircraft's heading, with
+        // ENTITY damage at each point and ZERO block damage (no world.newExplosion -> the run scars nothing,
+        // it just shreds whatever is standing in the line). Fixes "never hits, no effective damage, craters".
         double yawRad = Math.toRadians(rotationYaw + 90);
-        double forwardX = Math.cos(yawRad);
-        double forwardZ = Math.sin(yawRad);
+        double fx = Math.cos(yawRad), fz = Math.sin(yawRad);
+        final int points = 14;      // explosions in the line
+        final double step = 3.0;    // spacing between them
+        final double start = 12.0;  // begins just ahead of the nose (so it walks across the ground below/ahead)
+        final float dmg = 6.0f;     // per-hit ENTITY damage
+        final double hitR = 2.75;   // entity hit radius per point
+        net.minecraft.world.WorldServer ws = (world instanceof net.minecraft.world.WorldServer)
+                ? (net.minecraft.world.WorldServer) world : null;
 
-        int shots = (p.attackPattern == AirDoctrine.AttackPattern.GUN_RUN) ? 12 : 6;
-        float radius = (p.attackPattern == AirDoctrine.AttackPattern.GUN_RUN) ? 0.9f : 0.6f;
+        // One tracer from the aircraft to the middle of the line, so it visibly opens fire.
+        double midD = start + points * step * 0.5;
+        double mx = posX + fx * midD, mz = posZ + fz * midD;
+        BlockPos midG = world.getTopSolidOrLiquidBlock(new BlockPos(mx, 0, mz));
+        emitTracer(mx, midG.getY() + 0.5, mz, 1.0f, 0.85f, 0.2f);
 
-        for (int i = 0; i < shots; i++) {
-            double spread = (rand.nextDouble() - 0.5) * 10.0 * accuracy;
-            double range = 55 + rand.nextInt(20);
-
-            double targetX = posX + forwardX * range + spread;
-            double targetZ = posZ + forwardZ * range + spread;
-
-            BlockPos groundPos = world.getTopSolidOrLiquidBlock(new BlockPos(targetX, 0, targetZ));
-
-            world.newExplosion(null,
-                    groundPos.getX() + 0.5, groundPos.getY(), groundPos.getZ() + 0.5,
-                    radius, false, true);
-            // Draw the round so the aircraft visibly SHOOTS (it was just making ground explosions from
-            // nowhere). A yellow tracer line from the muzzle down to the impact.
-            emitTracer(groundPos.getX() + 0.5, groundPos.getY() + 0.5, groundPos.getZ() + 0.5, 1.0f, 0.85f, 0.2f);
+        for (int i = 0; i < points; i++) {
+            double d = start + i * step;
+            double cx = posX + fx * d, cz = posZ + fz * d;
+            BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos(cx, 0, cz));
+            double gy = g.getY() + 1.0;
+            if (ws != null) {
+                ws.spawnParticle(net.minecraft.util.EnumParticleTypes.EXPLOSION_LARGE, cx, gy, cz, 1, 0.0, 0.0, 0.0, 0.0);
+                ws.spawnParticle(net.minecraft.util.EnumParticleTypes.EXPLOSION_NORMAL, cx, gy, cz, 5, 0.7, 0.35, 0.7, 0.02);
+            }
+            world.playSound(null, new BlockPos(cx, gy, cz), net.minecraft.init.SoundEvents.ENTITY_GENERIC_EXPLODE,
+                    net.minecraft.util.SoundCategory.HOSTILE, 0.5f, 1.25f + rand.nextFloat() * 0.2f);
+            // ENTITY DAMAGE ONLY: hit hostiles (the defenders / player) near this point; never the siege's own
+            // army (skipped here + the friendly-fire handler cancels same-side damage as a backstop).
+            net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(
+                    cx - hitR, gy - hitR, cz - hitR, cx + hitR, gy + hitR, cz + hitR);
+            for (net.minecraft.entity.EntityLivingBase e
+                    : world.getEntitiesWithinAABB(net.minecraft.entity.EntityLivingBase.class, box)) {
+                if (e == null || e.isDead || isStrafeFriendly(e)) continue;
+                e.attackEntityFrom(DamageSource.causeExplosionDamage(this), dmg);
+            }
         }
+    }
+
+    /** True if the entity is the siege's OWN side -- never strafe your own army. */
+    private static boolean isStrafeFriendly(Entity e) {
+        return e instanceof EntityGhostAircraft
+                || e instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier
+                || e instanceof studio.ERM.war.BattleManagers.entities.EntityFormationCarrier
+                || e instanceof studio.ERM.war.vehicle.EntityAIPilot;
     }
 
     /** Draw a coloured TRACER line from the aircraft to an impact point so its fire is visible. */

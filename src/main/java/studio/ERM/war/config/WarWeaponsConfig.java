@@ -45,16 +45,16 @@ public class WarWeaponsConfig {
     })
     @Config.Name("melee_weapons")
     public static String[] meleeWeapons = {
-        /* L1  */ "minecraft:wooden_sword",
-        /* L2  */ "minecraft:stone_sword",
-        /* L3  */ "minecraft:iron_sword",
-        /* L4  */ "minecraft:iron_axe",
-        /* L5  */ "minecraft:golden_sword",
-        /* L6  */ "minecraft:iron_sword",
-        /* L7  */ "minecraft:diamond_sword",
-        /* L8  */ "minecraft:diamond_axe",
-        /* L9  */ "minecraft:diamond_sword",
-        /* L10 */ "minecraft:diamond_sword"
+        /* L1  */ "ancientwarfarenpc:macuahuitl",
+        /* L2  */ "ancientwarfarenpc:iron_cleaver",
+        /* L3  */ "ancientwarfarenpc:iron_lance",
+        /* L4  */ "ancientwarfarenpc:diamond_cleaver",
+        /* L5  */ "ancientwarfarenpc:diamond_lance",
+        /* L6  */ "ancientwarfarenpc:diamond_lance",
+        /* L7  */ "flansmod:trenchgun",
+        /* L8  */ "flansmod:m3a1",
+        /* L9  */ "flansmod:m16a4",
+        /* L10 */ "flansmod:fnscar"
     };
 
     // ═══════════════════════════════════════════════════════
@@ -73,10 +73,10 @@ public class WarWeaponsConfig {
         /* L4  */ "minecraft:bow",
         /* L5  */ "minecraft:bow",
         /* L6  */ "minecraft:bow",
-        /* L7  */ "minecraft:bow",
-        /* L8  */ "flansmod:ak47",
-        /* L9  */ "flansmod:ak47",
-        /* L10 */ "flansmod:m4"
+        /* L7  */ "flansmod:springfield",
+        /* L8  */ "flansmod:m1garand",
+        /* L9  */ "flansmod:m16a4",
+        /* L10 */ "flansmod:m16a4"
     };
 
     // ═══════════════════════════════════════════════════════
@@ -88,16 +88,16 @@ public class WarWeaponsConfig {
     })
     @Config.Name("heavy_weapons")
     public static String[] heavyWeapons = {
-        /* L1  */ "minecraft:wooden_axe",
-        /* L2  */ "minecraft:stone_axe",
-        /* L3  */ "minecraft:iron_axe",
-        /* L4  */ "minecraft:iron_axe",
-        /* L5  */ "minecraft:iron_axe",
-        /* L6  */ "minecraft:diamond_axe",
-        /* L7  */ "minecraft:diamond_axe",
-        /* L8  */ "minecraft:diamond_sword",
-        /* L9  */ "minecraft:diamond_sword",
-        /* L10 */ "minecraft:diamond_sword"
+        /* L1  */ "ancientwarfarenpc:wooden_hammer",
+        /* L2  */ "ancientwarfarenpc:iron_halberd",
+        /* L3  */ "ancientwarfarenpc:iron_halberd",
+        /* L4  */ "ancientwarfarenpc:diamond_halberd",
+        /* L5  */ "ancientwarfarenpc:giant_club",
+        /* L6  */ "ancientwarfarenpc:diamond_halberd",
+        /* L7  */ "flansmod:flamethrower",
+        /* L8  */ "flansmod:flamethrower",
+        /* L9  */ "flansmod:m249",
+        /* L10 */ "flansmod:m249"
     };
 
     // ═══════════════════════════════════════════════════════

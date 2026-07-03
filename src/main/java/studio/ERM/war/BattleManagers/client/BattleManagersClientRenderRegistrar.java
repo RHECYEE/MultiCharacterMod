@@ -119,6 +119,15 @@ public final class BattleManagersClientRenderRegistrar {
                 RenderingRegistry.registerEntityRenderingHandler(
                         studio.ERM.war.air.EntityGhostAircraft.class,
                         new studio.ERM.war.air.RenderGhostAircraftSafe.Factory()));
+
+        // Flan bullets: replace the default white-cube render with a glowing motion-aligned TRACER.
+        // OVERRIDES Flan's own EntityBullet renderer. Guarded -- if Flan's class can't load in this pack
+        // the registration is skipped and Flan's default render stays. The class ref is the only Flan
+        // import here; RenderBulletTracer itself has zero Flan imports so it never blocks class-load.
+        safeRegister("EntityBullet(tracer)", () ->
+                RenderingRegistry.registerEntityRenderingHandler(
+                        com.flansmod.common.guns.EntityBullet.class,
+                        RenderBulletTracer::new));
     }
 
     /** Bind one item to its {@code <modid>:<registryName>#inventory} model. Guarded so a missing/empty

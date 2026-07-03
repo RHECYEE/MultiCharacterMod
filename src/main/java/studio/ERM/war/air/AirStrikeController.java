@@ -78,11 +78,12 @@ public class AirStrikeController {
         } else if (level == 7) {
             return new String[] { "Mustang", "LittleBird", "cobra", "hind", "BlackHawk" };     // + assault/transport heli
         } else if (level == 8) {
-            return new String[] { "A10", "SU25", "ApacheAH64", "EC665", "cobra", "hind" };     // modern attack
+            return new String[] { "cobra", "hind", "LittleBird", "Lancaster" };  // early cold war: Vietnam helis + WW2 bomber (NO jets)
         } else if (level == 9) {
-            return new String[] { "A10", "SU25", "ApacheAH64", "EC665", "hind", "chinook" };   // + heavy lift
+            return new String[] { "A10", "tornado", "ApacheAH64", "EC665", "hind", "LittleBird" }; // + CAS jets; littlebird reduced
         }
-        return new String[] { "B52", "f22", "tornado", "A10", "ApacheAH64", "EC665" };  // L10 escalation
+        // L10: emphasize A10/tornado, add LittleBird, keep modern jets/heavy bomber. Lancaster retired.
+        return new String[] { "A10", "A10", "tornado", "tornado", "LittleBird", "f22", "ApacheAH64", "EC665", "B52" };
     }
 
     // ============================================================
@@ -268,9 +269,9 @@ public class AirStrikeController {
     // Each forced ShortName routes through WarAirstrikeHelper.getProfile -> BOMBING_RUN (bombers,
     // 10 bombs) or STRAFING (jets), so the aircraft actually attack the ground and are visible.
 
-    private static final String[] JETS_L8  = { "A10", "SU25" };
-    private static final String[] JETS_L9  = { "A10", "SU25", "tornado" };
-    private static final String[] JETS_L10 = { "A10", "SU25", "tornado", "f22" };
+    private static final String[] JETS_L8  = { "Lancaster" };                          // L8: WW2 bomber, no jets yet
+    private static final String[] JETS_L9  = { "A10", "tornado" };
+    private static final String[] JETS_L10 = { "A10", "A10", "tornado", "tornado", "f22" }; // emphasize A10/tornado
 
     /** One hostile JET strike (strafing/gun-rocket pass) on target. Level-scaled jet pool, no cooldown. */
     public static boolean launchHostileJetStrike(World world, BlockPos target, int level) {
@@ -516,7 +517,7 @@ public class AirStrikeController {
                     } catch (Throwable ignored) {}
                 }
             }
-            int runY = Math.min(240, Math.max((int) prof.altitude, maxSurf + 28));
+            int runY = Math.min(270, Math.max((int) prof.altitude + 30, maxSurf + 58)); // +30 higher: clear towers
             BlockPos startPos = new BlockPos(baseStartPos.getX(), runY, baseStartPos.getZ());
             BlockPos endPos = new BlockPos(baseEndPos.getX(), runY, baseEndPos.getZ());
 

@@ -29,6 +29,8 @@ import java.util.*;
  *   - Shift + Left-click drag: Select area to CLAIM territory
  *   - Shift + Right-click drag: Select area to UNCLAIM territory
  *   - Right-click: Context menu (deploy battle, recenter, copy coords)
+ *   - Military/Civilian tabs: pick a tool from the Icon+Name list LEFT of the canvas
+ *     (mirrors the stats sidebar; replaces the old P-key tool cycle)
  *   - ESC: Close
  *
  * Territory is visualized as colored chunk overlays with frontline borders.
@@ -46,8 +48,9 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int canvasSize = 512;
     private int canvasLeft, canvasTop;
 
-    // Layout constants used by initGui() to keep the map + sidebar on-screen at any GUI scale.
+    // Layout constants used by initGui() to keep the map + side columns on-screen at any GUI scale.
     private static final int SIDEBAR_WIDTH = 92; // right-hand stats/controls/legend column
+    private static final int TOOLBAR_WIDTH = 92; // left-hand tool list column (Military/Civilian tabs)
     private static final int LEFT_MARGIN = 12;
     private static final int RIGHT_MARGIN = 8;
 
@@ -77,7 +80,8 @@ public class GuiTacticalWarMap extends GuiScreen {
     private static int activeTab = 0;
 
     // ==================== PHASE 2: Defensive Planning (Military overlay) ====================
-    // planMode: -1 = off, else the DefenseMarker type being placed. P cycles modes. In plan mode,
+    // planMode: -1 = Troop Allocation (edit markers), else the DefenseMarker type being placed.
+    // Selected from the tool list LEFT of the canvas (replaces the old P-key cycle). In plan mode,
     // left-click places (point markers commit instantly; polylines accumulate clicks), right-click
     // commits a >=2-point polyline / discards a 1-point one / removes the nearest marker.
     private int planMode = -1;
@@ -95,6 +99,31 @@ public class GuiTacticalWarMap extends GuiScreen {
             0xFFFF8A80, // MEDICAL red-white
             0xFFFF1744  // ENGAGEMENT ZONE red
     };
+    // ==================== CIVILIAN infrastructure drawing (Civilian tab) ====================
+    // civilMode: -1 = Inspect, else the CivilMarker KIND being drawn. A road is infrastructure,
+    // not a district: it draws as an open POLYLINE (right-click commits >=2 points). Districts are
+    // closed POLYGONS that generate jobs + logistics (right-click commits >=3 corners).
+    private int civilMode = -1;
+    private final List<net.minecraft.util.math.BlockPos> civilPending = new ArrayList<>();
+    // Kind-indexed colors (see CivilMarker): road tan, then one hue per district type.
+    private static final int[] CIVIL_COLORS = {
+            0xFFD2A24C, // ROAD tan
+            0xFF66BB6A, // RESIDENTIAL green
+            0xFF9E9D24, // BARRACKS olive
+            0xFFFFB300, // WAREHOUSE amber
+            0xFF90A4AE, // ARMORY steel
+            0xFFFF7043, // KITCHEN orange
+            0xFFEF5350, // HOSPITAL red
+            0xFF8D6E63, // FACTORY industrial brown
+            0xFF7E57C2, // RESEARCH purple
+            0xFF26A69A, // TRADE DEPOT teal
+            0xFF29B6F6, // FISHING light blue
+            0xFF33691E, // LUMBER deep green
+            0xFFD4E157, // FARM lime
+            0xFF757575, // MINING gray
+            0xFF6D4C41  // HUNTING dark brown
+    };
+
     // Mouse position captured each frame for marker hover readouts.
     private int uiMouseX, uiMouseY;
     // Bottom of the sidebar chrome (Stats/Controls/Legend) -- the military panel anchors BELOW it.
@@ -159,17 +188,17 @@ public class GuiTacticalWarMap extends GuiScreen {
         final int topMargin = 18;             // room for the title above the canvas
         final int bottomMargin = 24;          // room for zoom + mode labels below
 
-        int availW = sw - (LEFT_MARGIN + gap + sidebarW + RIGHT_MARGIN);
+        int availW = sw - (LEFT_MARGIN + TOOLBAR_WIDTH + gap + gap + sidebarW + RIGHT_MARGIN);
         int availH = sh - (topMargin + bottomMargin);
         int size = Math.min(Math.min(availW, availH), 512);
         // Tiny-screen guard: never collapse to nothing, but don't exceed what we have.
         if (size < 64) size = Math.max(64, Math.min(availW, availH));
         canvasSize = Math.max(64, size);
 
-        // Center the [canvas | gap | sidebar] block horizontally; clamp so nothing
-        // spills off the left/top edges on small screens.
-        int blockW = canvasSize + gap + sidebarW;
-        canvasLeft = Math.max(LEFT_MARGIN, (sw - blockW) / 2);
+        // Center the [tool list | gap | canvas | gap | sidebar] block horizontally; clamp so
+        // nothing spills off the left/top edges on small screens.
+        int blockW = TOOLBAR_WIDTH + gap + canvasSize + gap + sidebarW;
+        canvasLeft = Math.max(LEFT_MARGIN + TOOLBAR_WIDTH + gap, (sw - blockW) / 2 + TOOLBAR_WIDTH + gap);
         canvasTop = Math.max(topMargin, (sh - canvasSize) / 2);
 
         // Center on player position
@@ -181,6 +210,8 @@ public class GuiTacticalWarMap extends GuiScreen {
             TacticalWarMapNetwork.sendToServer(new C2SRequestTerritorySync());
             // ...and the defensive plan for the Military overlay.
             TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.requestSync());
+            // ...and the civilian infrastructure (roads + districts) for the Civilian tab.
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SCivilPlanEdit.requestSync());
             // Real-logger trace: confirms the GUI constructed + sent its sync request. If we see
             // this but never see the server-side "C2SRequestTerritorySync received", the C2S packet
             // is not reaching the server (channel/registration), which would also explain why
@@ -243,12 +274,49 @@ public class GuiTacticalWarMap extends GuiScreen {
             for (int i = 0; i < TABS.length; i++) {
                 int[] b = tabBounds(i);
                 if (mouseX >= b[0] && mouseX < b[2] && mouseY >= b[1] && mouseY < b[3]) {
-                    if (activeTab != i && i != 2) { commitPendingPolyline(); planMode = -1; }
+                    if (activeTab != i) {
+                        // Leaving a drawing tab commits (or discards) whatever is mid-draw.
+                        if (activeTab == 2) { commitPendingPolyline(); planMode = -1; }
+                        if (activeTab == 1) { commitPendingCivil(); civilMode = -1; }
+                    }
                     activeTab = i;
                     setStatus(TextFormatting.AQUA + TABS[i] + " tab"
-                            + (i == 2 ? TextFormatting.GRAY + "  (P = plan markers, right-click = deploy)" : ""));
+                            + (i == 2 ? TextFormatting.GRAY + "  (pick a tool on the left, right-click = deploy)"
+                            : i == 1 ? TextFormatting.GRAY + "  (draw roads + districts with the left tools)" : ""));
                     return;
                 }
+            }
+        }
+
+        // TOOL LIST (left of the canvas, Military + Civilian tabs): click a row to select that
+        // tool. Row 0 is the tab's "no tool" mode (Troop Allocation / Inspect); switching tools
+        // commits anything mid-draw, same as the old P-cycle did.
+        if (mouseButton == 0 && (activeTab == 1 || activeTab == 2)) {
+            int row = toolbarRowAt(mouseX, mouseY);
+            if (row != -1) {
+                if (activeTab == 2) {
+                    commitPendingPolyline();
+                    panelUid = -1; // picking a tool ends any marker-properties editing
+                    planMode = row - 1;
+                    setStatus(planMode < 0
+                            ? TextFormatting.GOLD + "TOOL: Troop Allocation" + TextFormatting.GRAY
+                              + "  (click a marker to edit its units/formation)"
+                            : TextFormatting.AQUA + "TOOL: "
+                              + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
+                              + TextFormatting.GRAY + "  (click to place, right-click removes/commits)");
+                } else {
+                    commitPendingCivil();
+                    civilMode = row - 1;
+                    setStatus(civilMode < 0
+                            ? TextFormatting.GOLD + "TOOL: Inspect" + TextFormatting.GRAY
+                              + "  (click a road/district for details)"
+                            : TextFormatting.AQUA + "TOOL: "
+                              + studio.ERM.strategic.civil.CivilMarker.nameOf(civilMode)
+                              + TextFormatting.GRAY + (civilMode == studio.ERM.strategic.civil.CivilMarker.ROAD
+                                ? "  (click waypoints, right-click finishes the road)"
+                                : "  (click corners, right-click closes the district)"));
+                }
+                return;
             }
         }
 
@@ -322,6 +390,46 @@ public class GuiTacticalWarMap extends GuiScreen {
                 }
             }
             return;
+        }
+
+        // CIVILIAN drawing (Civilian tab, tool selected): left-click adds a waypoint/corner;
+        // right-click commits (road >=2 pts, district >=3), discards a fragment, or removes the
+        // nearest road/district when nothing is pending.
+        if (activeTab == 1 && civilMode >= 0) {
+            int[] w = screenToWorld(mouseX, mouseY);
+            if (mouseButton == 0) {
+                if (civilPending.size() >= 100) {
+                    setStatus(TextFormatting.RED + "Too many points — right-click to finish.");
+                } else {
+                    civilPending.add(new net.minecraft.util.math.BlockPos(w[0], 0, w[1]));
+                }
+            } else if (mouseButton == 1) {
+                boolean road = civilMode == studio.ERM.strategic.civil.CivilMarker.ROAD;
+                if (civilPending.size() >= (road ? 2 : 3)) {
+                    commitPendingCivil();
+                } else if (!civilPending.isEmpty()) {
+                    civilPending.clear();
+                    setStatus(TextFormatting.GRAY + "Pending " + (road ? "road" : "district") + " discarded.");
+                } else {
+                    TacticalWarMapNetwork.sendToServer(
+                            studio.ERM.war.map.net.C2SCivilPlanEdit.removeNearest(w[0], w[1]));
+                    setStatus(TextFormatting.YELLOW + "Removed nearest road/district.");
+                }
+            }
+            return;
+        }
+
+        // INSPECT (Civilian tab, no drawing tool): click a road/district for a quick readout.
+        // Falls through to panning when nothing is under the cursor.
+        if (activeTab == 1 && civilMode < 0 && mouseButton == 0) {
+            studio.ERM.strategic.civil.CivilMarker hit = civilMarkerAt(mouseX, mouseY);
+            if (hit != null) {
+                net.minecraft.util.math.BlockPos c = hit.center();
+                setStatus(TextFormatting.AQUA + studio.ERM.strategic.civil.CivilMarker.nameOf(hit.kind)
+                        + (hit.isRoad() ? "" : " District") + TextFormatting.GRAY + "  "
+                        + hit.points.size() + " pts, centre " + c.getX() + ", " + c.getZ());
+                return;
+            }
         }
 
         // MARKER CLICK -> PROPERTIES PANEL (Military tab, planning off): units / priority / formation /
@@ -482,23 +590,7 @@ public class GuiTacticalWarMap extends GuiScreen {
                 viewCenterZ = (int) mc.player.posZ;
             }
         }
-        // 'P' cycles the defensive-PLANNING mode: off -> Line -> Strongpoint -> Vehicle -> AA -> Rally
-        // -> Reserve -> Fallback Line -> Patrol Route -> off. Cycling commits any pending polyline.
-        // Planning is a MILITARY-tab feature: pressing P elsewhere jumps to that tab first.
-        if (typedChar == 'p' || typedChar == 'P') {
-            if (activeTab != 2) {
-                activeTab = 2;
-                setStatus(TextFormatting.AQUA + "MILITARY tab" + TextFormatting.GRAY + " — press P again to start planning.");
-                return;
-            }
-            commitPendingPolyline();
-            planMode = (planMode >= studio.ERM.strategic.defense.DefenseMarker.NAMES.length - 1) ? -1 : planMode + 1;
-            setStatus(planMode < 0
-                    ? TextFormatting.GOLD + "TOOL: Troop Allocation" + TextFormatting.GRAY
-                      + "  (click a marker to edit its units/formation, P = place markers)"
-                    : TextFormatting.AQUA + "TOOL: " + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode)
-                      + TextFormatting.GRAY + "  (click to place, right-click removes/commits, P = next)");
-        }
+        // (The old 'P' tool cycle is gone: tools are picked from the Icon+Name list LEFT of the map.)
     }
 
     /** Send an accumulated polyline (>=2 points) to the server as a plan marker; discard fragments. */
@@ -511,6 +603,23 @@ public class GuiTacticalWarMap extends GuiScreen {
             setStatus(TextFormatting.GREEN + studio.ERM.strategic.defense.DefenseMarker.nameOf(planMode) + " placed.");
         }
         planPending.clear();
+    }
+
+    /** Send an accumulated road (>=2 pts) or district polygon (>=3 corners) to the server; the
+     *  server validates territory rules and answers with a fresh sync. Fragments are discarded. */
+    private void commitPendingCivil() {
+        if (civilMode >= 0) {
+            int min = (civilMode == studio.ERM.strategic.civil.CivilMarker.ROAD) ? 2 : 3;
+            if (civilPending.size() >= min) {
+                studio.ERM.strategic.civil.CivilMarker m = new studio.ERM.strategic.civil.CivilMarker();
+                m.kind = civilMode;
+                m.points.addAll(civilPending);
+                TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SCivilPlanEdit.add(m));
+                setStatus(TextFormatting.GREEN + studio.ERM.strategic.civil.CivilMarker.nameOf(civilMode)
+                        + (m.isRoad() ? "" : " district") + " submitted.");
+            }
+        }
+        civilPending.clear();
     }
 
     // ==================== Selection Preview ====================
@@ -585,6 +694,9 @@ public class GuiTacticalWarMap extends GuiScreen {
         // Draw the DEFENSIVE PLAN (Military tab only) under the traffic + player markers.
         if (activeTab == 2) drawDefensePlan();
 
+        // CIVILIAN INFRASTRUCTURE (Civilian tab): roads + district polygons under the traffic dots.
+        if (activeTab == 1) drawCivilPlan();
+
         // LIVE UNIT DOTS (Military tab): every loaded friendly soldier + red enemy dots.
         if (activeTab == 2) drawUnitDots();
 
@@ -600,6 +712,9 @@ public class GuiTacticalWarMap extends GuiScreen {
         // The FALL BACK + CLEAR ALL buttons and planning-mode readout (Military tab only).
         if (activeTab == 2) drawFallbackButton();
 
+        // Civilian tab's active-tool readout (same spot the Military tab uses for its buttons).
+        if (activeTab == 1) drawCivilToolReadout();
+
         // The Claims / Civilian / Military tab bar (always).
         drawTabs();
 
@@ -607,6 +722,9 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // Draw UI chrome (borders, labels, stats)
         drawUIChrome(mouseX, mouseY);
+
+        // The LEFT tool list (Military + Civilian tabs) — mirrors the stats sidebar on the right.
+        if (activeTab != 0) drawToolbar(mouseX, mouseY);
 
         // The military side panel: units assigned X/Y + control reminders. Anchors BELOW the sidebar
         // chrome (drawn after it so sidebarEndY is current-frame accurate -- no more Legend overlap).
@@ -1025,7 +1143,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         String[] lines = {
                 TextFormatting.GOLD + "Military",
                 TextFormatting.YELLOW + "Assigned: " + assigned + "/" + have,
-                TextFormatting.GRAY + "P: cycle tool",
+                TextFormatting.GRAY + "Tools: left list",
                 TextFormatting.GRAY + "Click marker: edit",
                 TextFormatting.GRAY + "R-click line: finish",
                 TextFormatting.GRAY + "R-click map: deploy",
@@ -1058,11 +1176,15 @@ public class GuiTacticalWarMap extends GuiScreen {
 
     /** GL line between two screen points (the map's polylines are diagonal; drawRect can't do that). */
     private void drawMapLine(int x1, int y1, int x2, int y2, int argb) {
+        drawMapLine(x1, y1, x2, y2, argb, 2.0F);
+    }
+
+    private void drawMapLine(int x1, int y1, int x2, int y2, int argb, float width) {
         float a = (argb >>> 24) / 255F, r = ((argb >> 16) & 0xFF) / 255F,
                 g = ((argb >> 8) & 0xFF) / 255F, b = (argb & 0xFF) / 255F;
         GlStateManager.disableTexture2D();
         GlStateManager.enableBlend();
-        GlStateManager.glLineWidth(2.0F);
+        GlStateManager.glLineWidth(width);
         net.minecraft.client.renderer.Tessellator tess = net.minecraft.client.renderer.Tessellator.getInstance();
         net.minecraft.client.renderer.BufferBuilder buf = tess.getBuffer();
         buf.begin(org.lwjgl.opengl.GL11.GL_LINES,
@@ -1287,6 +1409,228 @@ public class GuiTacticalWarMap extends GuiScreen {
         fontRenderer.drawStringWithShadow(tool, b[0], b[3] + 3, planMode < 0 ? 0xFFFFD54F : 0xFF00E5FF);
     }
 
+    /** Civilian tab's active-tool readout (top-left of the canvas, under the tab bar). */
+    private void drawCivilToolReadout() {
+        String tool = (civilMode < 0)
+                ? "TOOL: Inspect"
+                : "TOOL: " + studio.ERM.strategic.civil.CivilMarker.nameOf(civilMode)
+                  + (civilPending.isEmpty() ? "" : " (" + civilPending.size() + " pts)");
+        fontRenderer.drawStringWithShadow(tool, canvasLeft + 4, canvasTop + 20,
+                civilMode < 0 ? 0xFFFFD54F : 0xFF00E5FF);
+    }
+
+    // ==================== LEFT TOOL LIST (Military + Civilian tabs) ====================
+    // The tools moved from the old P-key cycle to a selectable Icon+Name list LEFT of the canvas,
+    // mirroring the stats sidebar on the right. Row 0 is each tab's "no tool" mode (Troop
+    // Allocation / Inspect); every other row maps to DefenseMarker type / CivilMarker kind (row-1).
+
+    private static final String[] MIL_TOOL_NAMES = {
+            "Troop Alloc", "Def. Line", "Strongpoint", "Vehicle Pos", "AA Battery", "Rally Point",
+            "Reserve", "Fallback Ln", "Patrol Route", "Heli LZ", "Medical", "Engage Zone" };
+    private static final String[] CIV_TOOL_NAMES = {
+            "Inspect", "Road", "Residential", "Barracks", "Warehouse", "Armory",
+            "Kitchen", "Hospital", "Factory", "Research", "Trade Depot",
+            "Fishing", "Lumber", "Farm", "Mining", "Hunting" };
+    private static net.minecraft.item.ItemStack[] milToolIcons, civToolIcons;
+
+    private int toolbarX() {
+        return canvasLeft - 6 - TOOLBAR_WIDTH;
+    }
+
+    private String[] toolNames() {
+        return activeTab == 2 ? MIL_TOOL_NAMES : CIV_TOOL_NAMES;
+    }
+
+    /** The tool-list row under the mouse (0-based), or -1. Rows start below the "Tools" header. */
+    private int toolbarRowAt(int mx, int my) {
+        int tx = toolbarX();
+        if (mx < tx || mx >= tx + TOOLBAR_WIDTH - 2) return -1;
+        int y0 = canvasTop + 14;
+        if (my < y0) return -1;
+        int row = (my - y0) / 14;
+        return (row >= 0 && row < toolNames().length) ? row : -1;
+    }
+
+    /** The selectable Icon+Name tool list, drawn in the LEFT column (mirror of the stats sidebar). */
+    private void drawToolbar(int mouseX, int mouseY) {
+        initIconStacks();
+        String[] names = toolNames();
+        net.minecraft.item.ItemStack[] icons = (activeTab == 2) ? milToolIcons : civToolIcons;
+        int selected = ((activeTab == 2) ? planMode : civilMode) + 1;
+        int tx = toolbarX();
+
+        fontRenderer.drawStringWithShadow(TextFormatting.GOLD + "" + TextFormatting.BOLD + "Tools",
+                tx, canvasTop, 0xFFFFFFFF);
+        int hover = toolbarRowAt(mouseX, mouseY);
+        for (int i = 0; i < names.length; i++) {
+            int ry = canvasTop + 14 + i * 14;
+            int bg = (i == selected) ? 0xEE1565C0 : (i == hover ? 0xCC2C3A47 : 0x9910101E);
+            Gui.drawRect(tx, ry, tx + TOOLBAR_WIDTH - 2, ry + 13, bg);
+            if (i == selected) Gui.drawRect(tx, ry, tx + 2, ry + 13, 0xFFFFFFFF);
+            if (icons != null && i < icons.length) drawItemIcon(icons[i], tx + 9, ry + 6, 0);
+            fontRenderer.drawStringWithShadow(names[i], tx + 17, ry + 3,
+                    (i == selected) ? 0xFFFFFFFF : 0xFFB0BEC5);
+        }
+    }
+
+    // ==================== CIVILIAN plan drawing ====================
+
+    /** Roads as cased tan polylines, districts as translucent polygons with outline + icon + name. */
+    private void drawCivilPlan() {
+        initIconStacks();
+        for (studio.ERM.strategic.civil.CivilMarker m
+                : studio.ERM.war.map.client.ClientCivilPlanCache.markers()) {
+            int color = CIVIL_COLORS[Math.max(0, Math.min(m.kind, CIVIL_COLORS.length - 1))];
+            if (m.isRoad()) {
+                drawRoadLine(m.points, color, false);
+            } else {
+                drawDistrictPolygon(m.points, color, false);
+                net.minecraft.util.math.BlockPos c = m.center();
+                int[] scr = worldToScreen(c.getX(), c.getZ());
+                if (scr != null && onCanvasPoint(scr)) {
+                    drawItemIcon(civToolIcons[Math.min(m.kind + 1, civToolIcons.length - 1)],
+                            scr[0], scr[1], 0);
+                    String label = studio.ERM.strategic.civil.CivilMarker.nameOf(m.kind);
+                    int tw = fontRenderer.getStringWidth(label);
+                    fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] + 8, color);
+                }
+            }
+        }
+        // Pending shape preview (semi-transparent); districts show their closing edge live.
+        if (civilMode >= 0 && !civilPending.isEmpty()) {
+            int color = (CIVIL_COLORS[Math.max(0, Math.min(civilMode, CIVIL_COLORS.length - 1))]
+                    & 0x00FFFFFF) | 0x88000000;
+            if (civilMode == studio.ERM.strategic.civil.CivilMarker.ROAD) {
+                drawRoadLine(civilPending, color, true);
+            } else {
+                drawDistrictPolygon(civilPending, color, true);
+            }
+        }
+        // Hover readout: what is under the cursor (districts by containment, roads near the line).
+        studio.ERM.strategic.civil.CivilMarker hover = civilMarkerAt(uiMouseX, uiMouseY);
+        if (hover != null) {
+            String label = studio.ERM.strategic.civil.CivilMarker.nameOf(hover.kind)
+                    + (hover.isRoad() ? "" : " District");
+            int tw = fontRenderer.getStringWidth(label);
+            Gui.drawRect(uiMouseX + 6, uiMouseY - 12, uiMouseX + tw + 12, uiMouseY - 1, 0xCC000000);
+            fontRenderer.drawStringWithShadow(label, uiMouseX + 9, uiMouseY - 10, 0xFFFFD54F);
+        }
+    }
+
+    /** A road: dark casing under a tan centre line (reads as infrastructure), waypoint dots. */
+    private void drawRoadLine(java.util.List<net.minecraft.util.math.BlockPos> pts, int color, boolean pending) {
+        int casing = pending ? 0x66201510 : 0xCC3E2723;
+        int[] prev = null;
+        for (net.minecraft.util.math.BlockPos p : pts) {
+            int[] scr = worldToScreen(p.getX(), p.getZ());
+            if (scr == null) { prev = null; continue; }
+            if (prev != null) drawMapLine(prev[0], prev[1], scr[0], scr[1], casing, 4.0F);
+            prev = scr;
+        }
+        prev = null;
+        for (net.minecraft.util.math.BlockPos p : pts) {
+            int[] scr = worldToScreen(p.getX(), p.getZ());
+            if (scr == null) { prev = null; continue; }
+            if (onCanvasPoint(scr)) Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 2, scr[1] + 2, color);
+            if (prev != null) drawMapLine(prev[0], prev[1], scr[0], scr[1], color, 2.0F);
+            prev = scr;
+        }
+    }
+
+    /** A district polygon: translucent fill (triangle fan from the centroid) + solid outline with
+     *  corner dots. The closing edge draws whenever there are >=3 corners, so pending polygons show
+     *  their final shape live. Concave shapes may over-fill slightly; the outline stays exact. */
+    private void drawDistrictPolygon(java.util.List<net.minecraft.util.math.BlockPos> pts, int color, boolean pending) {
+        int n = pts.size();
+        if (n >= 3) {
+            long cx = 0, cz = 0;
+            for (net.minecraft.util.math.BlockPos p : pts) { cx += p.getX(); cz += p.getZ(); }
+            int[] cs = worldToScreen((int) (cx / n), (int) (cz / n));
+            int fill = (color & 0x00FFFFFF) | (pending ? 0x22000000 : 0x3A000000);
+            float a = (fill >>> 24) / 255F, r = ((fill >> 16) & 0xFF) / 255F,
+                    g = ((fill >> 8) & 0xFF) / 255F, b = (fill & 0xFF) / 255F;
+            GlStateManager.disableTexture2D();
+            GlStateManager.enableBlend();
+            GlStateManager.tryBlendFuncSeparate(
+                    GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA,
+                    GlStateManager.SourceFactor.ONE, GlStateManager.DestFactor.ZERO);
+            net.minecraft.client.renderer.Tessellator tess = net.minecraft.client.renderer.Tessellator.getInstance();
+            net.minecraft.client.renderer.BufferBuilder buf = tess.getBuffer();
+            buf.begin(org.lwjgl.opengl.GL11.GL_TRIANGLE_FAN,
+                    net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_COLOR);
+            buf.pos(cs[0], cs[1], 0).color(r, g, b, a).endVertex();
+            for (int i = 0; i <= n; i++) {
+                net.minecraft.util.math.BlockPos p = pts.get(i % n);
+                int[] scr = worldToScreen(p.getX(), p.getZ());
+                buf.pos(scr[0], scr[1], 0).color(r, g, b, a).endVertex();
+            }
+            tess.draw();
+            GlStateManager.disableBlend();
+            GlStateManager.enableTexture2D();
+            GlStateManager.color(1F, 1F, 1F, 1F);
+        }
+        // Outline: consecutive edges, plus the closing edge once a polygon exists.
+        int[] prev = null, first = null;
+        for (net.minecraft.util.math.BlockPos p : pts) {
+            int[] scr = worldToScreen(p.getX(), p.getZ());
+            if (scr == null) { prev = null; continue; }
+            if (first == null) first = scr;
+            if (onCanvasPoint(scr)) Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 2, scr[1] + 2, color);
+            if (prev != null) drawMapLine(prev[0], prev[1], scr[0], scr[1], color, 2.0F);
+            prev = scr;
+        }
+        if (n >= 3 && prev != null && first != null) {
+            drawMapLine(prev[0], prev[1], first[0], first[1], color, 2.0F);
+        }
+    }
+
+    /** The civil marker under the mouse: districts by polygon containment, roads within ~4 px of
+     *  any segment. Iterates in reverse so the most recently drawn shape wins overlaps. */
+    private studio.ERM.strategic.civil.CivilMarker civilMarkerAt(int mx, int my) {
+        java.util.List<studio.ERM.strategic.civil.CivilMarker> list =
+                studio.ERM.war.map.client.ClientCivilPlanCache.markers();
+        for (int k = list.size() - 1; k >= 0; k--) {
+            studio.ERM.strategic.civil.CivilMarker m = list.get(k);
+            if (m.isRoad()) {
+                int[] prev = null;
+                for (net.minecraft.util.math.BlockPos p : m.points) {
+                    int[] scr = worldToScreen(p.getX(), p.getZ());
+                    if (scr == null) { prev = null; continue; }
+                    if (prev != null && pointSegDistSq(mx, my, prev[0], prev[1], scr[0], scr[1]) <= 16) return m;
+                    prev = scr;
+                }
+            } else if (m.points.size() >= 3 && pointInPolygon(mx, my, m.points)) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /** Squared distance from point (px,py) to segment (x1,y1)-(x2,y2), all in screen pixels. */
+    private static double pointSegDistSq(int px, int py, int x1, int y1, int x2, int y2) {
+        double dx = x2 - x1, dy = y2 - y1;
+        double len2 = dx * dx + dy * dy;
+        double t = len2 <= 0 ? 0 : Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2));
+        double qx = x1 + t * dx - px, qy = y1 + t * dy - py;
+        return qx * qx + qy * qy;
+    }
+
+    /** Ray-cast containment test in SCREEN space against the polygon's projected vertices. */
+    private boolean pointInPolygon(int mx, int my, java.util.List<net.minecraft.util.math.BlockPos> pts) {
+        boolean in = false;
+        int n = pts.size();
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+            int[] a = worldToScreen(pts.get(i).getX(), pts.get(i).getZ());
+            int[] b = worldToScreen(pts.get(j).getX(), pts.get(j).getZ());
+            if (a == null || b == null) continue;
+            if ((a[1] > my) != (b[1] > my)
+                    && mx < (double) (b[0] - a[0]) * (my - a[1]) / (double) (b[1] - a[1]) + a[0]) {
+                in = !in;
+            }
+        }
+        return in;
+    }
+
     // ==================== ITEM-BASED map icons (the icon table) ====================
     // Allegiance colours: green = yours, red = rival, yellow = neutral trade, blue = allied (later).
     private static final int OUTLINE_FRIENDLY = 0xAA00E676;
@@ -1318,6 +1662,33 @@ public class GuiTacticalWarMap extends GuiScreen {
         icSquad = new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD);
         icVehicle = new net.minecraft.item.ItemStack(net.minecraft.init.Items.MINECART);
         icEnemyCamp = new net.minecraft.item.ItemStack(net.minecraft.init.Items.BANNER);
+
+        // LEFT tool-list icons. Military row 0 = Troop Allocation, then the marker types above.
+        milToolIcons = new net.minecraft.item.ItemStack[MIL_TOOL_NAMES.length];
+        milToolIcons[0] = new net.minecraft.item.ItemStack(net.minecraft.init.Items.NAME_TAG);
+        System.arraycopy(markerIconStacks, 0, milToolIcons, 1, markerIconStacks.length);
+        // Civilian row 0 = Inspect, row 1 = Road, then the district kinds (CivilMarker order).
+        civToolIcons = new net.minecraft.item.ItemStack[]{
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.COMPASS),          // Inspect
+                new net.minecraft.item.ItemStack(net.minecraft.item.Item.getItemFromBlock(
+                        net.minecraft.init.Blocks.GRASS_PATH)),                              // Road
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BED),             // Residential
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_CHESTPLATE), // Barracks
+                new net.minecraft.item.ItemStack(net.minecraft.item.Item.getItemFromBlock(
+                        net.minecraft.init.Blocks.CHEST)),                                   // Warehouse
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD),      // Armory
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BREAD),           // Kitchen
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.GOLDEN_APPLE),    // Hospital
+                new net.minecraft.item.ItemStack(net.minecraft.item.Item.getItemFromBlock(
+                        net.minecraft.init.Blocks.FURNACE)),                                 // Factory
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BOOK),            // Research
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.EMERALD),         // Trade Depot
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.FISHING_ROD),     // Fishing
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_AXE),        // Lumber
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.WHEAT),           // Farm
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_PICKAXE),    // Mining
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BOW)              // Hunting
+        };
     }
 
     /** Draw a real ITEM icon (10x10) centred at (cx,cy) with an optional allegiance outline. */

@@ -43,7 +43,7 @@ public class RivalCityManager {
     // TESTING DEFAULT: start at the max war level (10) so sieges immediately field modern troops
     // (Flan-gun infantry at L8-10 per WarWeaponsConfig), hostile CAS, and the heavier waves. An
     // actual rival city still overrides this with its real level once one is generated/loaded.
-    private static int rivalCityLevel = 10;
+    private static int rivalCityLevel = 9; // default siege level for tuning (L10 config is locked in; now tuning L9)
     private static int rivalCitySize = 48;
     private static boolean isInitialized = false;
     private static boolean isGenerating = false;
@@ -520,7 +520,7 @@ public class RivalCityManager {
     public static void reset() {
         rivalCitiesByDim.clear();
         rivalCityCenter = null;
-        rivalCityLevel = 10; // testing default (see field declaration)
+        rivalCityLevel = 9; // testing default (see field declaration)
         rivalCitySize = 48;
         currentRingRadius = 0;
         isInitialized = false;

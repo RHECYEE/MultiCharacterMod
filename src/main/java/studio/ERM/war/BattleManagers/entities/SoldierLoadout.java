@@ -44,9 +44,16 @@ public final class SoldierLoadout {
         // modern armour. This overrides the medieval melee/bow loadout entirely. The gun AI
         // (AIInjectionHandler) recognises the held gun and makes them shoot at standoff range.
         if (warLevel >= 10) {
-            ItemStack uzi = makeAttachmentUzi();
-            if (!uzi.isEmpty()) {
-                soldier.setItemStackToSlot(EntityEquipmentSlot.MAINHAND, uzi);
+            // EVERY L10 soldier carries a MODERN GUN -- never a bow/medieval weapon. Prefer the kitted Uzi;
+            // if that item isn't in the pack fall back to the configured L10 ranged gun, then known modern
+            // rifles -- so we NEVER drop through to the medieval/bow loadout (the "arrows at L10" bug, which
+            // happened whenever flansmod:uzi was absent and execution fell into the role switch -> bow).
+            ItemStack gun = makeAttachmentUzi();
+            if (gun.isEmpty()) gun = createStack(safeGet(WarWeaponsConfig.rangedWeapons, 9));
+            if (gun.isEmpty()) gun = createStack("flansmod:m16a4");
+            if (gun.isEmpty()) gun = createStack("flansmod:m4");
+            if (!gun.isEmpty()) {
+                soldier.setItemStackToSlot(EntityEquipmentSlot.MAINHAND, gun);
                 if (ModItems.MAG_25 != null) {
                     soldier.setItemStackToSlot(EntityEquipmentSlot.OFFHAND, new ItemStack(ModItems.MAG_25, 4));
                 }

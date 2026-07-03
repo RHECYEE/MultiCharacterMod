@@ -118,12 +118,56 @@ public class EntitySoldierPuppet extends EntityCreature implements studio.ERM.wa
         double ty = carrier.posY + rotated.y;
         double tz = carrier.posZ + rotated.z;
 
-        this.setPosition(tx, ty, tz);
+        // PHYSICAL MARCH: chase the slot at a bounded walking pace instead of hard-snapping to it every
+        // tick. When the carrier turns or crosses rough ground the squad visibly JOGS back into position
+        // ("reforming") instead of whipping around rigidly -- and the small per-tick steps are what make
+        // the client animate their legs as a real march. Feet conform to the ground under the puppet (it
+        // is noClip, so previously it hovered/embedded at the carrier's exact Y on any slope).
+        double dx = tx - this.posX, dz = tz - this.posZ;
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist > 24.0) {
+            this.setPosition(tx, ty, tz); // lost the formation entirely -> the old snap as a last resort
+            this.rotationYaw = carrier.rotationYaw;
+            this.renderYawOffset = carrier.rotationYaw;
+            this.rotationYawHead = carrier.rotationYaw;
+            return;
+        }
+        double step = Math.min(dist, 0.38); // max chase speed: a brisk jog, always able to catch the carrier
+        double nx = (dist > 0.001) ? this.posX + dx / dist * step : tx;
+        double nz = (dist > 0.001) ? this.posZ + dz / dist * step : tz;
+        this.setPosition(nx, groundYFor(nx, ty, nz), nz);
 
-        // Face roughly the same way as carrier.
-        this.rotationYaw = carrier.rotationYaw;
-        this.renderYawOffset = carrier.rotationYaw;
-        this.rotationYawHead = carrier.rotationYaw;
+        if (step > 0.08) {
+            // Catching up: face the direction of movement (the squad visibly turns and jogs to reform).
+            float moveYaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0D);
+            this.rotationYaw = moveYaw;
+            this.renderYawOffset = moveYaw;
+            this.rotationYawHead = moveYaw;
+        } else {
+            // In slot: face the same way as the carrier (the held formation).
+            this.rotationYaw = carrier.rotationYaw;
+            this.renderYawOffset = carrier.rotationYaw;
+            this.rotationYawHead = carrier.rotationYaw;
+        }
+    }
+
+    /** The Y to stand at near (x, z): the top of the highest standable block within a small band around
+     *  the carrier's level, so puppets walk the terrain under THEM (stairs, ramps, bridge decks) instead
+     *  of hovering at the carrier's exact Y across every slope. Falls back to the carrier level. */
+    private double groundYFor(double x, double baseY, double z) {
+        int bx = net.minecraft.util.math.MathHelper.floor(x);
+        int bz = net.minecraft.util.math.MathHelper.floor(z);
+        int by = net.minecraft.util.math.MathHelper.floor(baseY);
+        try {
+            for (int dy = 2; dy >= -3; dy--) {
+                net.minecraft.util.math.BlockPos p = new net.minecraft.util.math.BlockPos(bx, by + dy, bz);
+                if (world.getBlockState(p).getMaterial().isSolid()
+                        && !world.getBlockState(p.up()).getMaterial().isSolid()) {
+                    return by + dy + 1;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return baseY;
     }
 
     @Override
