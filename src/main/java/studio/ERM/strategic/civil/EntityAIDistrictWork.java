@@ -78,7 +78,7 @@ public class EntityAIDistrictWork extends EntityAIBase {
                 DistrictWorkExecutor.depositCarried(world, npc, a);
                 a.depositRun = false;
                 BlockPos next = DistrictWorkExecutor.pickWorkSpot(world,
-                        DistrictRegistry.byUid(world, a.districtUid));
+                        DistrictRegistry.byUid(world, a.districtUid), a.workSpot);
                 if (next != null) a.workSpot = next;
                 workTimer = 0;
             } else {
@@ -108,7 +108,7 @@ public class EntityAIDistrictWork extends EntityAIBase {
                     a.depositRun = true;
                 } else {
                     BlockPos next = DistrictWorkExecutor.pickWorkSpot(world,
-                            DistrictRegistry.byUid(world, a.districtUid));
+                            DistrictRegistry.byUid(world, a.districtUid), a.workSpot);
                     if (next != null) a.workSpot = next;
                 }
             }

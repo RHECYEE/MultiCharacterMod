@@ -94,9 +94,24 @@ public class C2SCivilPlanEdit implements IMessage {
                     default:
                         break;
                 }
-                TacticalWarMapNetwork.sendTo(new S2CCivilPlanSync(plan.markers), player);
+                sendSync(player, plan);
             });
             return null;
+        }
+
+        /** Populate each district's live worker counts + the settlement stats, then ship it. */
+        static void sendSync(EntityPlayerMP player, CivilPlanData plan) {
+            for (studio.ERM.strategic.civil.CivilMarker m : plan.markers) {
+                if (m.isRoad()) continue;
+                m.assignedWorkers = studio.ERM.strategic.civil.DistrictWorkExecutor.assignedTo(m.uid);
+                studio.ERM.war.districts.TileEntityDistrictMarker depot =
+                        studio.ERM.strategic.civil.DistrictRegistry.depotOf(player.world, m);
+                m.desiredWorkers = depot != null ? depot.getDesiredWorkers() : 0;
+            }
+            studio.ERM.strategic.civil.CivilStats st =
+                    studio.ERM.strategic.civil.CivilStats.compute(player.world);
+            TacticalWarMapNetwork.sendTo(new S2CCivilPlanSync(
+                    plan.markers, st.availWorkers, st.totalWorkers, st.availBeds, st.totalBeds), player);
         }
 
         /** Null when the marker is allowed; otherwise the player-facing reason it was refused. */

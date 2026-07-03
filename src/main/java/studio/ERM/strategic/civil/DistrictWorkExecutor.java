@@ -82,6 +82,27 @@ public final class DistrictWorkExecutor {
         return ASSIGNMENTS.size();
     }
 
+    /** Workers currently assigned to one district (for the map panel's "Workers X/Y"). */
+    public static int assignedTo(int districtUid) {
+        int n = 0;
+        for (Assignment a : ASSIGNMENTS.values()) if (a.districtUid == districtUid) n++;
+        return n;
+    }
+
+    /** Is this AW2 npc an unassigned, player-owned civilian worker? (available-labor pool test) */
+    public static boolean isFreeWorker(EntityCreature c) {
+        return !c.isDead
+                && Aw2Npc.allegiance(c) == Aw2Npc.Allegiance.PLAYER_OWNED
+                && "worker".equalsIgnoreCase(Aw2Npc.type(c))
+                && !ASSIGNMENTS.containsKey(c.getUniqueID());
+    }
+
+    public static boolean isAnyWorker(EntityCreature c) {
+        return !c.isDead
+                && Aw2Npc.allegiance(c) == Aw2Npc.Allegiance.PLAYER_OWNED
+                && "worker".equalsIgnoreCase(Aw2Npc.type(c));
+    }
+
     public static void resetTransients() {
         ASSIGNMENTS.clear();
         CARRIED.clear();
@@ -162,13 +183,16 @@ public final class DistrictWorkExecutor {
                     y.getDistanceSq(centroid.getX(), centroid.getY(), centroid.getZ())));
 
             for (EntityCreature worker : pool) {
-                if (want-- <= 0) break;
-                BlockPos spot = pickWorkSpot(world, district);
-                if (spot == null) spot = centroid;
+                if (want <= 0) break;
+                BlockPos spot = pickWorkSpot(world, district, null);
+                // No workable feature anywhere sampled -> don't hire into empty ground this pass
+                // (and don't spend a want slot on the miss).
+                if (spot == null) continue;
                 ASSIGNMENTS.put(worker.getUniqueID(),
                         new Assignment(district.uid, district.kind, district.depotPos, spot));
                 ensureWorkTask(worker);
                 staffed.merge(district.uid, 1, Integer::sum);
+                want--;
                 EpochRunnerMod.logger.info("[DistrictAI] hired " + worker.getName() + " ("
                         + Aw2Npc.fullType(worker) + ") -> " + CivilMarker.nameOf(district.kind)
                         + " district #" + (district.uid & 0xFFFF));
@@ -216,11 +240,15 @@ public final class DistrictWorkExecutor {
     // ==================================================================
 
     /**
-     * Sample candidate points inside the polygon and keep the best for the district's kind:
+     * Sample candidate points inside the polygon and keep a GOOD one for the district's kind:
      * fishermen want shoreline, lumberjacks logs, farmers crops, miners exposed stone, hunters
-     * open grass. Returns a surface position, or null when sampling found nothing inside.
+     * open grass. SPREAD RULES (fix for everyone stacking on the single best-scoring spot):
+     * candidates within 8 blocks of ANOTHER worker's current spot are rejected, re-rolls avoid
+     * the caller's own current spot, and the pick is random among the top three scorers instead
+     * of deterministic-best. Returns a surface position, or null when sampling found nothing.
      */
-    public static BlockPos pickWorkSpot(WorldServer world, CivilMarker district) {
+    public static BlockPos pickWorkSpot(WorldServer world, CivilMarker district, BlockPos avoidOwn) {
+        if (district == null) return null;
         int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
         int minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
         for (BlockPos p : district.points) {
@@ -229,9 +257,18 @@ public final class DistrictWorkExecutor {
         }
         if (minX > maxX) return null;
 
-        BlockPos best = null;
-        int bestScore = -1;
-        for (int i = 0; i < 12; i++) {
+        // Other workers' claimed spots in this district (spread exclusion zones).
+        List<BlockPos> taken = new ArrayList<>();
+        for (Assignment other : ASSIGNMENTS.values()) {
+            if (other.districtUid == district.uid && other.workSpot != null
+                    && !other.workSpot.equals(avoidOwn)) {
+                taken.add(other.workSpot);
+            }
+        }
+
+        List<BlockPos> spots = new ArrayList<>();
+        List<Integer> scores = new ArrayList<>();
+        for (int i = 0; i < 16; i++) {
             int x = minX + RNG.nextInt(Math.max(1, maxX - minX + 1));
             int z = minZ + RNG.nextInt(Math.max(1, maxZ - minZ + 1));
             if (!district.contains(x, z)) continue;
@@ -244,10 +281,34 @@ public final class DistrictWorkExecutor {
                 if (dry == null) continue;
                 surface = dry;
             }
-            int score = scoreSpot(world, surface, district.kind);
-            if (score > bestScore) { bestScore = score; best = surface; }
+            if (tooClose(surface, taken, 8.0) || (avoidOwn != null && tooClose(surface, avoidOwn, 6.0))) {
+                continue;
+            }
+            // NO FEATURE, NO SPOT: a fishing spot needs water, a farm tilled soil, etc. Spots with
+            // nothing to work are rejected outright so workers don't wander to empty ground.
+            int fs = pickFeatureScore(world, surface, district.kind);
+            if (fs <= 0) continue;
+            spots.add(surface);
+            scores.add(fs);
         }
-        return best;
+        if (spots.isEmpty()) return null;
+
+        // Random pick among the top three scorers — variety over a single magnet spot.
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < spots.size(); i++) order.add(i);
+        order.sort((a, b) -> scores.get(b) - scores.get(a));
+        int topN = Math.min(3, order.size());
+        return spots.get(order.get(RNG.nextInt(topN)));
+    }
+
+    private static boolean tooClose(BlockPos p, List<BlockPos> others, double dist) {
+        for (BlockPos o : others) if (tooClose(p, o, dist)) return true;
+        return false;
+    }
+
+    private static boolean tooClose(BlockPos p, BlockPos o, double dist) {
+        double dx = p.getX() - o.getX(), dz = p.getZ() - o.getZ();
+        return dx * dx + dz * dz < dist * dist;
     }
 
     /** Walk outward a few blocks to the nearest non-liquid column (shoreline stance). */
@@ -262,33 +323,42 @@ public final class DistrictWorkExecutor {
         return null;
     }
 
-    private static int scoreSpot(WorldServer world, BlockPos surface, int kind) {
-        int score = RNG.nextInt(3); // tiebreak jitter so workers spread out
+    /**
+     * How many WORK-FEATURE blocks sit around this surface spot, for the district's kind — the
+     * "is there anything to work here" score used to accept/reject and rank spots. ZERO means
+     * empty ground: no water to fish, no logs to fell, no tilled soil to tend, no rock to mine.
+     * HUNTING scores by grass (hunters roam grassland); the actual kill is gated on live animals
+     * in {@link #featurePresent}. Non-natural kinds return 1 (never feature-gated).
+     */
+    private static int pickFeatureScore(WorldServer world, BlockPos surface, int kind) {
+        if (kind < CivilMarker.FISHING) return 1; // config-driven districts aren't terrain-gated
+        int hits = 0;
         for (int dx = -3; dx <= 3; dx++) {
             for (int dz = -3; dz <= 3; dz++) {
                 for (int dy = -2; dy <= 2; dy++) {
                     BlockPos p = surface.add(dx, dy, dz);
+                    if (!world.isBlockLoaded(p, false)) continue;
                     net.minecraft.block.state.IBlockState st = world.getBlockState(p);
                     Material mat = st.getMaterial();
                     switch (kind) {
                         case CivilMarker.FISHING:
-                            if (mat == Material.WATER) score += 2;
+                            if (mat == Material.WATER) hits += 2;
                             break;
                         case CivilMarker.LUMBER:
-                            if (mat == Material.WOOD) score += 2;
-                            if (mat == Material.LEAVES) score += 1;
+                            if (mat == Material.WOOD) hits += 2;
+                            else if (mat == Material.LEAVES) hits += 1;
                             break;
                         case CivilMarker.FARM:
+                            // Tilled soil or crops ONLY — wild grass/flowers are not farm work.
                             if (st.getBlock() instanceof net.minecraft.block.BlockCrops
-                                    || st.getBlock() == net.minecraft.init.Blocks.FARMLAND) score += 2;
-                            if (mat == Material.PLANTS) score += 1;
+                                    || st.getBlock() == net.minecraft.init.Blocks.FARMLAND) hits += 2;
                             break;
                         case CivilMarker.MINING:
-                            if (mat == Material.ROCK) score += 1;
-                            if (st.getBlock() instanceof net.minecraft.block.BlockOre) score += 4;
+                            if (st.getBlock() instanceof net.minecraft.block.BlockOre) hits += 4;
+                            else if (mat == Material.ROCK) hits += 1;
                             break;
                         case CivilMarker.HUNTING:
-                            if (mat == Material.GRASS) score += 1;
+                            if (mat == Material.GRASS) hits += 1;
                             break;
                         default:
                             break;
@@ -296,7 +366,29 @@ public final class DistrictWorkExecutor {
                 }
             }
         }
-        return score;
+        return hits;
+    }
+
+    /**
+     * THE YIELD GATE — is the required resource actually present at the worker's current position
+     * RIGHT NOW? You can't fish from nothing. Checked at production time (not just spot-pick time)
+     * because terrain/animals change: water needs water, farm needs tilled soil/crops, lumber
+     * logs, mining exposed rock/ore, hunting a LIVE animal within range. Non-natural districts
+     * (config tables on RESIDENTIAL/WAREHOUSE/etc.) are never gated.
+     */
+    public static boolean featurePresent(WorldServer world, BlockPos pos, int kind) {
+        switch (kind) {
+            case CivilMarker.FISHING:
+            case CivilMarker.LUMBER:
+            case CivilMarker.FARM:
+            case CivilMarker.MINING:
+                return pickFeatureScore(world, pos, kind) > 0;
+            case CivilMarker.HUNTING:
+                return !world.getEntitiesWithinAABB(net.minecraft.entity.passive.EntityAnimal.class,
+                        new AxisAlignedBB(pos).grow(10.0)).isEmpty();
+            default:
+                return true;
+        }
     }
 
     // ==================================================================
@@ -307,14 +399,28 @@ public final class DistrictWorkExecutor {
     public static void onWorkCycleComplete(WorldServer world, EntityCreature worker, Assignment a) {
         CivilMarker district = DistrictRegistry.byUid(world, a.districtUid);
         if (district == null) return;
+
+        // NO FEATURE, NO WORK — gate on what's actually under the worker right now. A fishing
+        // district over dry land, a farm with no tilled soil, a mine with no exposed rock: no yield.
+        if (!featurePresent(world, worker.getPosition(), district.kind)) return;
+
         String key = district.configKey();
         if (RNG.nextDouble() >= DistrictOutputConfig.rateCoefficient(key)) return;
 
-        ItemStack yield = DistrictOutputConfig.rollOutput(key, DistrictRegistry.rivalLevel(world));
+        // TOOL BONUS: the best configured tool stocked in the depot lifts the effective rival level
+        // for this roll (better gear unlocks better rows early) and wears a little each yield.
+        int level = DistrictRegistry.rivalLevel(world);
+        TileEntityDistrictMarker depot = DistrictRegistry.depotOf(world, district);
+        int[] tool = depot != null ? DistrictOutputConfig.findBestTool(key, depot.depot) : null;
+        int effectiveLevel = level + (tool != null ? tool[1] : 0);
+
+        ItemStack yield = DistrictOutputConfig.rollOutput(key, effectiveLevel);
         if (yield.isEmpty()) return;
+        if (tool != null && depot != null) DistrictOutputConfig.wearTool(depot.depot, tool[0]);
         CARRIED.computeIfAbsent(worker.getUniqueID(), u -> new ArrayList<>()).add(yield);
         if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName() + " produced "
-                + yield.getCount() + "x " + yield.getDisplayName());
+                + yield.getCount() + "x " + yield.getDisplayName()
+                + (tool != null ? " (tool +" + tool[1] + ")" : ""));
     }
 
     public static int carriedCount(EntityCreature worker) {

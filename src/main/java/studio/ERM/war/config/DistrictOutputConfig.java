@@ -64,16 +64,40 @@ public final class DistrictOutputConfig {
         }
     }
 
+    /**
+     * A tool the district CONSUMES from its depot. While one is stocked, workers roll the output
+     * table at (rival level + levelBonus) — better gear unlocks better rows early. The best
+     * (highest-bonus) tool present is used and wears: damageable tools take 1 damage per work
+     * cycle and break; non-damageable ones have a small chance to be consumed outright.
+     */
+    public static class ToolEntry {
+        public String item = "";
+        public int levelBonus = 1;
+
+        public ToolEntry() {}
+
+        public ToolEntry(String item, int levelBonus) {
+            this.item = item; this.levelBonus = levelBonus;
+        }
+    }
+
     public static class DistrictTable {
         /** Scales how often a worker's work-tick actually yields an item (1.0 = baseline). */
         public double rateCoefficient = 1.0;
         public List<OutputEntry> outputs = new ArrayList<>();
+        /** Tools this district can consume from the depot for a rival-level bonus on rolls. */
+        public List<ToolEntry> tools = new ArrayList<>();
 
         public DistrictTable() {}
 
         public DistrictTable(double rate, OutputEntry... rows) {
             this.rateCoefficient = rate;
             for (OutputEntry r : rows) outputs.add(r);
+        }
+
+        public DistrictTable withTools(ToolEntry... entries) {
+            for (ToolEntry t : entries) tools.add(t);
+            return this;
         }
     }
 
@@ -85,11 +109,16 @@ public final class DistrictOutputConfig {
             if (districts == null || districts.isEmpty()) districts = defaults();
             for (DistrictTable t : districts.values()) {
                 if (t.outputs == null) t.outputs = new ArrayList<>();
+                if (t.tools == null) t.tools = new ArrayList<>();
                 if (t.rateCoefficient <= 0) t.rateCoefficient = 1.0;
                 t.outputs.removeIf(e -> e == null || e.item == null || e.item.isEmpty());
+                t.tools.removeIf(e -> e == null || e.item == null || e.item.isEmpty());
                 for (OutputEntry e : t.outputs) {
                     if (e.weight < 1) e.weight = 1;
                     if (e.level < 0) e.level = 0;
+                }
+                for (ToolEntry e : t.tools) {
+                    if (e.levelBonus < 0) e.levelBonus = 0;
                 }
             }
         }
@@ -105,7 +134,8 @@ public final class DistrictOutputConfig {
                 new OutputEntry(0, "minecraft:fish", 100),
                 new OutputEntry(1, "minecraft:fish:1", 25),   // salmon
                 new OutputEntry(2, "minecraft:fish:2", 10),   // clownfish
-                new OutputEntry(3, "minecraft:fish:3", 5)));  // pufferfish
+                new OutputEntry(3, "minecraft:fish:3", 5))    // pufferfish
+                .withTools(new ToolEntry("minecraft:fishing_rod", 1)));
         d.put("mining", new DistrictTable(0.35,
                 new OutputEntry(0, "minecraft:cobblestone", 100),
                 new OutputEntry(0, "minecraft:coal", 35),
@@ -113,27 +143,37 @@ public final class DistrictOutputConfig {
                 new OutputEntry(2, "minecraft:redstone", 15),
                 new OutputEntry(2, "minecraft:gold_ore", 10),
                 new OutputEntry(3, "minecraft:diamond", 3),
-                new OutputEntry(4, "immersiveengineering:ore:0", 8)));
+                new OutputEntry(4, "immersiveengineering:ore:0", 8))
+                .withTools(new ToolEntry("minecraft:stone_pickaxe", 1),
+                           new ToolEntry("minecraft:iron_pickaxe", 2),
+                           new ToolEntry("minecraft:diamond_pickaxe", 3)));
         d.put("lumber", new DistrictTable(0.8,
                 new OutputEntry(0, "minecraft:log", 100),
                 new OutputEntry(0, "minecraft:sapling", 20),
                 new OutputEntry(0, "minecraft:apple", 8),
                 new OutputEntry(1, "minecraft:log:1", 40),    // spruce
-                new OutputEntry(2, "minecraft:log2", 15)));   // acacia
+                new OutputEntry(2, "minecraft:log2", 15))     // acacia
+                .withTools(new ToolEntry("minecraft:stone_axe", 1),
+                           new ToolEntry("minecraft:iron_axe", 2),
+                           new ToolEntry("minecraft:diamond_axe", 3)));
         d.put("farm", new DistrictTable(0.9,
                 new OutputEntry(0, "minecraft:wheat", 100),
                 new OutputEntry(0, "minecraft:carrot", 40),
                 new OutputEntry(0, "minecraft:potato", 40),
                 new OutputEntry(1, "minecraft:beetroot", 25),
                 new OutputEntry(2, "minecraft:pumpkin", 12),
-                new OutputEntry(3, "minecraft:melon", 12)));
+                new OutputEntry(3, "minecraft:melon", 12))
+                .withTools(new ToolEntry("minecraft:stone_hoe", 1),
+                           new ToolEntry("minecraft:iron_hoe", 2),
+                           new ToolEntry("minecraft:diamond_hoe", 3)));
         d.put("hunting", new DistrictTable(0.6,
                 new OutputEntry(0, "minecraft:leather", 60),
                 new OutputEntry(0, "minecraft:beef", 100),
                 new OutputEntry(0, "minecraft:porkchop", 80),
                 new OutputEntry(0, "minecraft:feather", 40),
                 new OutputEntry(1, "minecraft:rabbit", 30),
-                new OutputEntry(2, "minecraft:mutton", 30)));
+                new OutputEntry(2, "minecraft:mutton", 30))
+                .withTools(new ToolEntry("minecraft:bow", 2)));
         return d;
     }
 
@@ -223,6 +263,46 @@ public final class DistrictOutputConfig {
             if (pick < 0) return resolve(e.item);
         }
         return ItemStack.EMPTY;
+    }
+
+    /**
+     * Best (highest levelBonus) configured tool currently stocked in the depot for this district
+     * kind. Returns {slot, bonus} or null. Damageable tools match by item alone (meta = wear).
+     */
+    public static int[] findBestTool(String key, net.minecraftforge.items.IItemHandler depot) {
+        DistrictTable t = table(key);
+        if (t == null || t.tools.isEmpty() || depot == null) return null;
+        int bestSlot = -1, bestBonus = -1;
+        for (int slot = 0; slot < depot.getSlots(); slot++) {
+            ItemStack s = depot.getStackInSlot(slot);
+            if (s.isEmpty()) continue;
+            for (ToolEntry e : t.tools) {
+                ItemStack want = resolve(e.item);
+                if (want.isEmpty() || s.getItem() != want.getItem()) continue;
+                if (!s.getItem().isDamageable() && s.getItem().getHasSubtypes()
+                        && s.getMetadata() != want.getMetadata()) continue;
+                if (e.levelBonus > bestBonus) { bestBonus = e.levelBonus; bestSlot = slot; }
+            }
+        }
+        return bestSlot >= 0 ? new int[]{bestSlot, bestBonus} : null;
+    }
+
+    /**
+     * One work-cycle of wear on the tool in {@code slot}: damageable tools take 1 damage and
+     * break at max; non-damageable ones are consumed outright ~2% of cycles.
+     */
+    public static void wearTool(net.minecraftforge.items.IItemHandlerModifiable depot, int slot) {
+        ItemStack s = depot.getStackInSlot(slot);
+        if (s.isEmpty()) return;
+        if (s.getItem().isDamageable()) {
+            ItemStack worn = s.copy();
+            worn.setItemDamage(worn.getItemDamage() + 1);
+            depot.setStackInSlot(slot, worn.getItemDamage() > worn.getMaxDamage() ? ItemStack.EMPTY : worn);
+        } else if (RNG.nextInt(50) == 0) {
+            ItemStack fewer = s.copy();
+            fewer.shrink(1);
+            depot.setStackInSlot(slot, fewer.isEmpty() ? ItemStack.EMPTY : fewer);
+        }
     }
 
     /** "modid:name" or "modid:name:meta" -> stack of 1, or EMPTY if unresolvable. */

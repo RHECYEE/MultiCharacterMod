@@ -136,6 +136,10 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int panelUid = -1;
     private int panelX, panelY;
 
+    // CIVILIAN district panel (Civilian tab, Inspect tool): Workers X/Y +/- (shift=10) + delete.
+    private int civPanelUid = -1;
+    private int civPanelX, civPanelY;
+
     // ==================== Status Messages ====================
     private String statusMessage = "";
     private long statusExpiry = 0;
@@ -276,8 +280,8 @@ public class GuiTacticalWarMap extends GuiScreen {
                 if (mouseX >= b[0] && mouseX < b[2] && mouseY >= b[1] && mouseY < b[3]) {
                     if (activeTab != i) {
                         // Leaving a drawing tab commits (or discards) whatever is mid-draw.
-                        if (activeTab == 2) { commitPendingPolyline(); planMode = -1; }
-                        if (activeTab == 1) { commitPendingCivil(); civilMode = -1; }
+                        if (activeTab == 2) { commitPendingPolyline(); planMode = -1; panelUid = -1; }
+                        if (activeTab == 1) { commitPendingCivil(); civilMode = -1; civPanelUid = -1; }
                     }
                     activeTab = i;
                     setStatus(TextFormatting.AQUA + TABS[i] + " tab"
@@ -306,10 +310,11 @@ public class GuiTacticalWarMap extends GuiScreen {
                               + TextFormatting.GRAY + "  (click to place, right-click removes/commits)");
                 } else {
                     commitPendingCivil();
+                    civPanelUid = -1; // picking a tool ends any district editing
                     civilMode = row - 1;
                     setStatus(civilMode < 0
                             ? TextFormatting.GOLD + "TOOL: Inspect" + TextFormatting.GRAY
-                              + "  (click a road/district for details)"
+                              + "  (click a district to manage workers)"
                             : TextFormatting.AQUA + "TOOL: "
                               + studio.ERM.strategic.civil.CivilMarker.nameOf(civilMode)
                               + TextFormatting.GRAY + (civilMode == studio.ERM.strategic.civil.CivilMarker.ROAD
@@ -419,15 +424,27 @@ public class GuiTacticalWarMap extends GuiScreen {
             return;
         }
 
-        // INSPECT (Civilian tab, no drawing tool): click a road/district for a quick readout.
-        // Falls through to panning when nothing is under the cursor.
+        // CIVILIAN DISTRICT PANEL: while open it eats clicks; clicking outside closes it.
+        if (activeTab == 1 && civilMode < 0 && civPanelUid != -1) {
+            if (handleCivPanelClick(mouseX, mouseY)) return;
+            civPanelUid = -1;
+            return;
+        }
+
+        // INSPECT (Civilian tab, no drawing tool): click a district to open its panel (Workers +/-,
+        // delete); roads just print a readout. Falls through to panning when nothing is under it.
         if (activeTab == 1 && civilMode < 0 && mouseButton == 0) {
             studio.ERM.strategic.civil.CivilMarker hit = civilMarkerAt(mouseX, mouseY);
             if (hit != null) {
-                net.minecraft.util.math.BlockPos c = hit.center();
-                setStatus(TextFormatting.AQUA + studio.ERM.strategic.civil.CivilMarker.nameOf(hit.kind)
-                        + (hit.isRoad() ? "" : " District") + TextFormatting.GRAY + "  "
-                        + hit.points.size() + " pts, centre " + c.getX() + ", " + c.getZ());
+                if (hit.isRoad()) {
+                    net.minecraft.util.math.BlockPos c = hit.center();
+                    setStatus(TextFormatting.AQUA + "Road" + TextFormatting.GRAY + "  "
+                            + hit.points.size() + " pts, centre " + c.getX() + ", " + c.getZ());
+                } else {
+                    civPanelUid = hit.uid;
+                    civPanelX = Math.min(mouseX, canvasLeft + canvasSize - 124);
+                    civPanelY = Math.min(mouseY, canvasTop + canvasSize - 92);
+                }
                 return;
             }
         }
@@ -735,6 +752,8 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // Marker properties panel (drawn on top of everything on the Military tab).
         if (activeTab == 2 && panelUid != -1) drawMarkerPanel();
+        // District panel (Civilian tab, Inspect tool).
+        if (activeTab == 1 && civilMode < 0 && civPanelUid != -1) drawCivPanel();
 
         // Draw status message
         drawStatusMessage();
@@ -1373,6 +1392,93 @@ public class GuiTacticalWarMap extends GuiScreen {
         fontRenderer.drawStringWithShadow("DELETE MARKER", x0 + 27, y0 + 87, 0xFFFF5252);
     }
 
+    // ==================== CIVILIAN DISTRICT PANEL ====================
+
+    private studio.ERM.strategic.civil.CivilMarker civPanelMarker() {
+        if (civPanelUid == -1) return null;
+        for (studio.ERM.strategic.civil.CivilMarker m
+                : studio.ERM.war.map.client.ClientCivilPlanCache.markers()) {
+            if (m.uid == civPanelUid && !m.isRoad()) return m;
+        }
+        return null;
+    }
+
+    /** District panel click: Workers -/+ (shift = 10) via the depot, or delete. */
+    private boolean handleCivPanelClick(int mx, int my) {
+        studio.ERM.strategic.civil.CivilMarker m = civPanelMarker();
+        if (m == null) { civPanelUid = -1; return true; }
+        int x0 = civPanelX, y0 = civPanelY;
+        if (!in(mx, my, x0, y0, x0 + 122, y0 + 92)) return false; // outside -> caller closes
+
+        int step = GuiScreen.isShiftKeyDown() ? 10 : 1;
+        // Close X
+        if (in(mx, my, x0 + 110, y0 + 2, x0 + 120, y0 + 12)) { civPanelUid = -1; return true; }
+
+        // Workers - / + (only when a depot is bound — worker count lives on the depot tile).
+        if (m.depotPos != null) {
+            if (in(mx, my, x0 + 52, y0 + 30, x0 + 64, y0 + 40)) { editWorkers(m, -step); return true; }
+            if (in(mx, my, x0 + 92, y0 + 30, x0 + 104, y0 + 40)) { editWorkers(m, step); return true; }
+        }
+        // Delete district
+        if (in(mx, my, x0 + 4, y0 + 74, x0 + 118, y0 + 86)) {
+            net.minecraft.util.math.BlockPos c = m.center();
+            TacticalWarMapNetwork.sendToServer(
+                    studio.ERM.war.map.net.C2SCivilPlanEdit.removeNearest(c.getX(), c.getZ()));
+            civPanelUid = -1;
+            setStatus(TextFormatting.YELLOW + "District deleted.");
+            return true;
+        }
+        return true; // inside the panel body: consume
+    }
+
+    private void editWorkers(studio.ERM.strategic.civil.CivilMarker m, int delta) {
+        TacticalWarMapNetwork.sendToServer(
+                new studio.ERM.war.map.net.C2SDistrictDepotEdit(m.depotPos, delta));
+        // Optimistic local echo; the follow-up sync request lands the authoritative value.
+        m.desiredWorkers = Math.max(0, Math.min(64, m.desiredWorkers + delta));
+        TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SCivilPlanEdit.requestSync());
+    }
+
+    private void drawCivPanel() {
+        studio.ERM.strategic.civil.CivilMarker m = civPanelMarker();
+        if (m == null) { civPanelUid = -1; return; }
+        int x0 = civPanelX, y0 = civPanelY;
+        int color = CIVIL_COLORS[Math.max(0, Math.min(m.kind, CIVIL_COLORS.length - 1))];
+
+        Gui.drawRect(x0, y0, x0 + 122, y0 + 92, 0xF2101018);
+        Gui.drawRect(x0, y0, x0 + 122, y0 + 13, 0xFF1F1F2E);
+        Gui.drawRect(x0, y0, x0 + 122, y0 + 1, color);
+        fontRenderer.drawStringWithShadow(
+                studio.ERM.strategic.civil.CivilMarker.nameOf(m.kind) + " District", x0 + 4, y0 + 3, color);
+        fontRenderer.drawStringWithShadow("x", x0 + 112, y0 + 3, 0xFFFF5252);
+
+        // Depot status.
+        boolean depot = m.depotPos != null;
+        fontRenderer.drawStringWithShadow(depot
+                        ? TextFormatting.GREEN + "Depot bound"
+                        : TextFormatting.YELLOW + "No depot placed",
+                x0 + 4, y0 + 17, 0xFFFFFFFF);
+
+        // Workers X / Y with -/+.
+        if (depot) {
+            fontRenderer.drawStringWithShadow("Workers:", x0 + 4, y0 + 31, 0xFFCCCCCC);
+            fontRenderer.drawStringWithShadow("-", x0 + 56, y0 + 31, 0xFFFF8A80);
+            String wc = m.assignedWorkers + "/" + m.desiredWorkers;
+            fontRenderer.drawStringWithShadow(wc, x0 + 70, y0 + 31, 0xFFFFD54F);
+            fontRenderer.drawStringWithShadow("+", x0 + 95, y0 + 31, 0xFF69F0AE);
+            fontRenderer.drawStringWithShadow(TextFormatting.DARK_GRAY + "shift ±10",
+                    x0 + 4, y0 + 45, 0xFF777777);
+        } else {
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Place a District Marker",
+                    x0 + 4, y0 + 31, 0xFFAAAAAA);
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "block inside, then tag it",
+                    x0 + 4, y0 + 43, 0xFFAAAAAA);
+        }
+
+        Gui.drawRect(x0 + 4, y0 + 74, x0 + 118, y0 + 86, 0xFF3E1010);
+        fontRenderer.drawStringWithShadow("DELETE DISTRICT", x0 + 22, y0 + 76, 0xFFFF5252);
+    }
+
     /** The one-click FALL BACK toggle, the CLEAR ALL button, and the planning-mode readout. */
     private void drawFallbackButton() {
         boolean fb = studio.ERM.war.map.client.ClientDefensePlanCache.isFallbackActive();
@@ -1853,6 +1959,25 @@ public class GuiTacticalWarMap extends GuiScreen {
         Gui.drawRect(sideX, sideY, sideX + 8, sideY + 8, 0xFF4488DD);
         fontRenderer.drawStringWithShadow(TextFormatting.BLUE + " Other Land", sideX + 10, sideY, 0xFFFFFFFF);
         sidebarEndY = sideY + 14; // where the chrome column ENDS -- the military panel anchors below this
+
+        // CIVILIAN tab: labor + housing supply under the Legend (populated by S2CCivilPlanSync).
+        if (activeTab == 1) {
+            sideY += 22;
+            fontRenderer.drawStringWithShadow(TextFormatting.GOLD + "" + TextFormatting.BOLD
+                    + "Settlement", sideX, sideY, 0xFFFFFFFF);
+            sideY += 13;
+            int aw = studio.ERM.war.map.client.ClientCivilPlanCache.availWorkers();
+            int tw = studio.ERM.war.map.client.ClientCivilPlanCache.totalWorkers();
+            int ab = studio.ERM.war.map.client.ClientCivilPlanCache.availBeds();
+            int tb = studio.ERM.war.map.client.ClientCivilPlanCache.totalBeds();
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Workers free: "
+                    + (aw > 0 ? TextFormatting.GREEN : TextFormatting.YELLOW) + aw
+                    + TextFormatting.GRAY + " / " + tw, sideX, sideY, 0xFFFFFFFF);
+            sideY += 12;
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Beds free: "
+                    + TextFormatting.AQUA + ab + TextFormatting.GRAY + " / " + tb, sideX, sideY, 0xFFFFFFFF);
+            sidebarEndY = sideY + 14;
+        }
 
         // Mode indicator if shift held
         if (GuiScreen.isShiftKeyDown()) {

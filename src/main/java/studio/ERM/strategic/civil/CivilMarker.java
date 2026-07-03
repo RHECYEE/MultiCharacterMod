@@ -58,6 +58,11 @@ public class CivilMarker {
      */
     public BlockPos depotPos = null;
 
+    // TRANSIENT map-display state (network only, never NBT): filled server-side at sync time so
+    // the Civilian tab's district panel can show "Workers X/Y" without opening the depot GUI.
+    public int assignedWorkers = 0;
+    public int desiredWorkers = 0;
+
     /** Roads draw as open polylines; every other kind closes into a polygon. */
     public boolean isRoad() {
         return kind == ROAD;
@@ -137,6 +142,8 @@ public class CivilMarker {
         if (depotPos != null) {
             buf.writeInt(depotPos.getX()); buf.writeInt(depotPos.getY()); buf.writeInt(depotPos.getZ());
         }
+        buf.writeShort(assignedWorkers);
+        buf.writeShort(desiredWorkers);
     }
 
     public static CivilMarker fromBytes(ByteBuf buf) {
@@ -146,6 +153,8 @@ public class CivilMarker {
         int n = buf.readShort();
         for (int i = 0; i < n; i++) m.points.add(new BlockPos(buf.readInt(), 0, buf.readInt()));
         if (buf.readBoolean()) m.depotPos = new BlockPos(buf.readInt(), buf.readInt(), buf.readInt());
+        m.assignedWorkers = buf.readShort();
+        m.desiredWorkers = buf.readShort();
         return m;
     }
 }
