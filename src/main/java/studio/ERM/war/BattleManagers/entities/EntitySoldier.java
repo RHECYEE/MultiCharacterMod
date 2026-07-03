@@ -270,12 +270,14 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         super.onUpdate();
         if (world.isRemote) return;
 
-        // Ranged combat logic
+        // Ranged combat logic. MILITIA gunners shoot out to ~44 blocks (a rifle's real reach --
+        // "shoot further, be more aggressive"); siege soldiers keep the shorter band.
         if (rangedCooldown > 0) rangedCooldown--;
         if (isRangedUnit() && getAttackTarget() != null) {
             EntityLivingBase target = getAttackTarget();
             double dist = getDistance(target);
-            if (dist > MELEE_ENGAGE_DIST && dist < RANGED_ENGAGE_DIST && rangedCooldown <= 0 && canEntityBeSeen(target)) {
+            double maxRange = isPlayerAligned() ? 44.0 : RANGED_ENGAGE_DIST;
+            if (dist > MELEE_ENGAGE_DIST && dist < maxRange && rangedCooldown <= 0 && canEntityBeSeen(target)) {
                 fireRangedAttack(target);
                 rangedCooldown = RANGED_COOLDOWN_TICKS;
             }

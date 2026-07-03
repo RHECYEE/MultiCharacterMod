@@ -97,6 +97,8 @@ public class GuiTacticalWarMap extends GuiScreen {
     };
     // Mouse position captured each frame for marker hover readouts.
     private int uiMouseX, uiMouseY;
+    // Bottom of the sidebar chrome (Stats/Controls/Legend) -- the military panel anchors BELOW it.
+    private int sidebarEndY = 0;
 
     // ==================== Marker PROPERTIES PANEL ====================
     // Clicking a marker (Military tab, planning off) opens this panel: units / priority / formation /
@@ -603,12 +605,12 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         disableCanvasScissor();
 
-        // The military side panel: units assigned X/Y + control reminders. Lives OUTSIDE the canvas in
-        // the sidebar column (below the stats), so the map itself stays clear.
-        if (activeTab == 2) drawMilitaryPanel();
-
         // Draw UI chrome (borders, labels, stats)
         drawUIChrome(mouseX, mouseY);
+
+        // The military side panel: units assigned X/Y + control reminders. Anchors BELOW the sidebar
+        // chrome (drawn after it so sidebarEndY is current-frame accurate -- no more Legend overlap).
+        if (activeTab == 2) drawMilitaryPanel();
 
         // Draw deploy menu
         deployMenu.draw(mouseX, mouseY, fontRenderer);
@@ -1030,8 +1032,8 @@ public class GuiTacticalWarMap extends GuiScreen {
                 TextFormatting.GRAY + "Zone: centre+edge",
         };
         int h = lines.length * 10 + 8;
-        int x0 = canvasLeft + canvasSize + 8;                  // the sidebar column
-        int y0 = canvasTop + canvasSize - h;                   // bottom-anchored under the legend
+        int x0 = canvasLeft + canvasSize + 6;                  // the sidebar column
+        int y0 = (sidebarEndY > 0 ? sidebarEndY : canvasTop + 240) + 8; // BELOW the Legend, never over it
         Gui.drawRect(x0 - 3, y0 - 3, x0 + SIDEBAR_WIDTH - 6, y0 + h - 3, 0x99000000);
         for (int i = 0; i < lines.length; i++) {
             fontRenderer.drawStringWithShadow(lines[i], x0, y0 + i * 10, 0xFFFFFFFF);
@@ -1479,6 +1481,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         sideY += 12;
         Gui.drawRect(sideX, sideY, sideX + 8, sideY + 8, 0xFF4488DD);
         fontRenderer.drawStringWithShadow(TextFormatting.BLUE + " Other Land", sideX + 10, sideY, 0xFFFFFFFF);
+        sidebarEndY = sideY + 14; // where the chrome column ENDS -- the military panel anchors below this
 
         // Mode indicator if shift held
         if (GuiScreen.isShiftKeyDown()) {

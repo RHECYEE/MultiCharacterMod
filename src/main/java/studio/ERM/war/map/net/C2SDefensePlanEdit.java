@@ -138,6 +138,9 @@ public class C2SDefensePlanEdit implements IMessage {
                     case OP_CLEAR:
                         plan.markers.clear();
                         plan.markDirty();
+                        // Release every transient hold (debug probes, carry pairs) so troops respond to
+                        // the NEXT plan immediately -- "clear all broke my troops" fix.
+                        studio.ERM.strategic.defense.DefensePlanExecutor.resetTransients();
                         break;
                     case OP_SET_FALLBACK:
                         plan.fallbackActive = msg.flag;

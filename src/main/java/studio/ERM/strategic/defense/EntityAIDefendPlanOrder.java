@@ -54,10 +54,10 @@ public class EntityAIDefendPlanOrder extends EntityAIBase {
         if (npc.getRevengeTarget() != null && npc.ticksExisted - npc.getRevengeTimer() < 160) return true;
         EntityLivingBase t = npc.getAttackTarget();
         if (t == null || t.isDead) return false;
-        // Engage while adhering to navigation: RANGED units yield within ~24 (they stand where they are
-        // and shoot until the threat is dealt with); MELEE units yield within ~16 (they may leave their
-        // navigation a good bit to attack, and are recalled by the executor beyond that).
-        double lim = isRangedNpc() ? 24.0 * 24.0 : 16.0 * 16.0;
+        // Engage while adhering to navigation -- AGGRESSIVELY: RANGED units yield within ~48 (a gun's
+        // real reach; they stand where they are and shoot until the threat is dealt with); MELEE units
+        // yield within ~20 (they may leave their navigation a good bit, recalled by the executor beyond).
+        double lim = isRangedNpc() ? 48.0 * 48.0 : 20.0 * 20.0;
         return npc.getDistanceSq(t) < lim;
     }
 

@@ -40,10 +40,26 @@ public final class DefensePlanExecutor {
     private static final java.util.Map<java.util.UUID, BlockPos> ORDERS =
             new java.util.concurrent.ConcurrentHashMap<>();
 
-    // Debug-locked orders (the /war strat test forced-movement probe): never cleared or overwritten by
-    // the plan pass, so the minimal test is isolated from assignment/cleanup bugs (protocol check J).
-    private static final java.util.Set<java.util.UUID> DEBUG_LOCK =
-            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+    // Debug-locked orders (the /war strat test forced-movement probe): not overwritten by the plan pass,
+    // so the minimal test is isolated from assignment/cleanup. TTL'd (60s) -- a probe must NEVER leave a
+    // soldier permanently deaf to the plan (that was the "clear all broke my troops" bug: probed guards
+    // stayed locked out of assignment forever). uuid -> expiry tick-time.
+    private static final java.util.Map<java.util.UUID, Long> DEBUG_LOCK =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static boolean isDebugLocked(java.util.UUID u) {
+        Long exp = DEBUG_LOCK.get(u);
+        if (exp == null) return false;
+        if (System.currentTimeMillis() > exp) { DEBUG_LOCK.remove(u); ORDERS.remove(u); return false; }
+        return true;
+    }
+
+    /** Release EVERYTHING transient (debug probes, carry pairs) -- called by the plan's CLEAR ALL. */
+    public static void resetTransients() {
+        for (java.util.UUID u : DEBUG_LOCK.keySet()) ORDERS.remove(u);
+        DEBUG_LOCK.clear();
+        CARRY.clear();
+    }
 
     private static int passCounter = 0;
 
@@ -62,7 +78,7 @@ public final class DefensePlanExecutor {
         ensureOrderTask(npc);
         BlockPos g = sanitizeSlot(world, pos);
         ORDERS.put(npc.getUniqueID(), g);
-        DEBUG_LOCK.add(npc.getUniqueID());
+        DEBUG_LOCK.put(npc.getUniqueID(), System.currentTimeMillis() + 60_000L); // 60s TTL
         studio.ERM.EpochRunnerMod.logger.info("[DefenseAI] DEBUG ORDER entity=" + npc.getUniqueID()
                 + " -> " + g.getX() + " " + g.getY() + " " + g.getZ()
                 + " dim(order)=" + world.provider.getDimension()
@@ -72,14 +88,13 @@ public final class DefensePlanExecutor {
 
     public static int clearDebugOrders() {
         int n = DEBUG_LOCK.size();
-        for (java.util.UUID u : DEBUG_LOCK) ORDERS.remove(u);
-        DEBUG_LOCK.clear();
+        resetTransients();
         return n;
     }
 
     /** Clear plan-issued orders but never the debug-locked probes. */
     private static void clearUnlocked() {
-        ORDERS.keySet().removeIf(u -> !DEBUG_LOCK.contains(u));
+        ORDERS.keySet().removeIf(u -> !isDebugLocked(u));
     }
 
     /**
@@ -172,7 +187,7 @@ public final class DefensePlanExecutor {
 
         // GREEDY ASSIGNMENT: each slot takes the nearest unassigned defender (debug-locked npcs skipped).
         List<EntityCreature> pool = new ArrayList<>(defenders);
-        pool.removeIf(d -> DEBUG_LOCK.contains(d.getUniqueID()));
+        pool.removeIf(d -> isDebugLocked(d.getUniqueID()));
         for (BlockPos slot : slots) {
             if (pool.isEmpty()) break;
             EntityCreature best = null;
@@ -516,7 +531,9 @@ public final class DefensePlanExecutor {
             if (tgt != null && !tgt.isDead) {
                 boolean underFire = d.getRevengeTarget() != null
                         && d.ticksExisted - d.getRevengeTimer() < 160;
-                double lim = isRanged(d) ? 28.0 * 28.0 : 18.0 * 18.0;
+                // AGGRESSIVE gunnery: ranged defenders keep any target within ~64 (real gun reach);
+                // melee may pursue ~24 before recall. Zone targets + under-fire keep the target always.
+                double lim = isRanged(d) ? 64.0 * 64.0 : 24.0 * 24.0;
                 if (!underFire && d.getDistanceSq(tgt) >= lim && !insideEngagementZone(plan, tgt)) {
                     d.setAttackTarget(null);
                     d.getNavigator().clearPath();
@@ -562,6 +579,11 @@ public final class DefensePlanExecutor {
             if (e.action instanceof EntityAIDefendPlanOrder) return;
         }
         d.tasks.addTask(0, new EntityAIDefendPlanOrder(d));
+        // AGGRESSION: FOLLOW_RANGE is what caps how far the vanilla target tasks will ACQUIRE at all
+        // (AW2 npcs default ~32) -- a gunner on a wall must see the whole approach.
+        try {
+            d.getEntityAttribute(net.minecraft.entity.SharedMonsterAttributes.FOLLOW_RANGE).setBaseValue(64.0D);
+        } catch (Throwable ignored) {}
         studio.ERM.EpochRunnerMod.logger.info("[Defense] took command of " + d.getName()
                 + " (" + Aw2Npc.fullType(d) + ")");
     }
@@ -653,18 +675,23 @@ public final class DefensePlanExecutor {
                 }
                 continue;
             }
+            // ANY defender can rescue (AW2 guards included) -- militia-only rescuers meant a guard army
+            // never sent anyone for its fallen.
             EntityCreature rescuer = null;
             double bd = Double.MAX_VALUE;
             for (EntityCreature d : defenders) {
-                if (!(d instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier)) continue;
                 if (CARRY.containsKey(d.getUniqueID())) continue;
+                if (d instanceof studio.ERM.war.BattleManagers.entities.EntitySoldier
+                        && ((studio.ERM.war.BattleManagers.entities.EntitySoldier) d).isDowned()) continue;
                 double dd = d.getDistanceSq(down);
                 if (dd < bd) { bd = dd; rescuer = d; }
             }
             if (rescuer != null) {
+                ensureOrderTask(rescuer);
                 CARRY.put(rescuer.getUniqueID(), down.getUniqueID());
                 ORDERS.put(rescuer.getUniqueID(), down.getPosition());
-                studio.ERM.EpochRunnerMod.logger.info("[Defense] rescuer dispatched to a downed soldier");
+                studio.ERM.EpochRunnerMod.logger.info("[Defense] rescuer " + rescuer.getName()
+                        + " dispatched to a downed soldier at " + down.getPosition());
             }
         }
     }
