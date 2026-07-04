@@ -861,6 +861,10 @@ public class EntityGhostAircraft extends EntityLiving {
         // Visible rocket streak from the aircraft to the impact (orange).
         emitTracer(groundPos.getX() + 0.5 + offsetX, groundPos.getY() + 0.5, groundPos.getZ() + 0.5 + offsetZ,
                 1.0f, 0.4f, 0.1f);
+        // SOUNDBOARD: rocket pair off the rails at the heli + the sharp blast/debris at the impact.
+        studio.ERM.war.sound.WarSoundboard.heliRocketFire(world, posX, posY, posZ);
+        studio.ERM.war.sound.WarSoundboard.rocketImpact(world,
+                groundPos.getX() + 0.5 + offsetX, groundPos.getY(), groundPos.getZ() + 0.5 + offsetZ);
     }
 
     // ===== WEAPONS =====
@@ -924,6 +928,11 @@ public class EntityGhostAircraft extends EntityLiving {
         BlockPos midG = world.getTopSolidOrLiquidBlock(new BlockPos(mx, 0, mz));
         emitTracer(mx, midG.getY() + 0.5, mz, 1.0f, 0.85f, 0.2f);
 
+        // THE SOUNDBOARD BRRRT: airframe swell at the plane, then the ground-ripping ram-hit ticks walk
+        // the strafe line (2 per tick), a near-miss thud every 4th, and the payoff blast at the end --
+        // an A10 is heard as the WORLD BEING HIT, never as a gunshot.
+        studio.ERM.war.sound.WarSoundboard.gau8Approach(world, posX, posY, posZ);
+
         for (int i = 0; i < points; i++) {
             double d = start + i * step;
             double cx = posX + fx * d, cz = posZ + fz * d;
@@ -933,8 +942,7 @@ public class EntityGhostAircraft extends EntityLiving {
                 ws.spawnParticle(net.minecraft.util.EnumParticleTypes.EXPLOSION_LARGE, cx, gy, cz, 1, 0.0, 0.0, 0.0, 0.0);
                 ws.spawnParticle(net.minecraft.util.EnumParticleTypes.EXPLOSION_NORMAL, cx, gy, cz, 5, 0.7, 0.35, 0.7, 0.02);
             }
-            world.playSound(null, new BlockPos(cx, gy, cz), net.minecraft.init.SoundEvents.ENTITY_GENERIC_EXPLODE,
-                    net.minecraft.util.SoundCategory.HOSTILE, 0.5f, 1.25f + rand.nextFloat() * 0.2f);
+            studio.ERM.war.sound.WarSoundboard.gau8Impact(world, cx, gy, cz, i, i == points - 1);
             // ENTITY DAMAGE ONLY: hit hostiles (the defenders / player) near this point; never the siege's own
             // army (skipped here + the friendly-fire handler cancels same-side damage as a backstop).
             net.minecraft.util.math.AxisAlignedBB box = new net.minecraft.util.math.AxisAlignedBB(

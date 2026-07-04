@@ -99,7 +99,8 @@ public class C2SCivilPlanEdit implements IMessage {
             return null;
         }
 
-        /** Populate each district's live worker counts + the settlement stats, then ship it. */
+        /** Populate each district's live worker counts + the settlement stats + the live courier
+         *  jobs, then ship it. Road segment material/condition ride along on the markers. */
         static void sendSync(EntityPlayerMP player, CivilPlanData plan) {
             for (studio.ERM.strategic.civil.CivilMarker m : plan.markers) {
                 if (m.isRoad()) continue;
@@ -110,8 +111,26 @@ public class C2SCivilPlanEdit implements IMessage {
             }
             studio.ERM.strategic.civil.CivilStats st =
                     studio.ERM.strategic.civil.CivilStats.compute(player.world);
+
+            java.util.List<S2CCivilPlanSync.JobLine> lines = new java.util.ArrayList<>();
+            for (studio.ERM.strategic.civil.logistics.CourierJob j
+                    : studio.ERM.strategic.civil.logistics.LogisticsData.get(player.world).jobs) {
+                if (j.done) continue;
+                S2CCivilPlanSync.JobLine l = new S2CCivilPlanSync.JobLine();
+                l.sx = j.src.getX(); l.sz = j.src.getZ();
+                l.dx = j.dst.getX(); l.dz = j.dst.getZ();
+                l.state = j.state;
+                l.label = studio.ERM.strategic.civil.logistics.CourierJob.TYPE_NAMES[
+                        Math.max(0, Math.min(j.type, 1))] + ": " + j.count + "x "
+                        + j.item.getDisplayName();
+                lines.add(l);
+            }
+            // Trade shipments ride the same channel: teal lines with REAL progress on the map.
+            lines.addAll(studio.ERM.strategic.civil.trade.TradeShipmentManager
+                    .shipmentLines((net.minecraft.world.WorldServer) player.world));
             TacticalWarMapNetwork.sendTo(new S2CCivilPlanSync(
-                    plan.markers, st.availWorkers, st.totalWorkers, st.availBeds, st.totalBeds), player);
+                    plan.markers, st.availWorkers, st.totalWorkers, st.availBeds, st.totalBeds)
+                    .withJobs(lines), player);
         }
 
         /** Null when the marker is allowed; otherwise the player-facing reason it was refused. */

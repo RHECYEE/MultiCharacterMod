@@ -179,6 +179,10 @@ public class EntityFormationCarrier extends EntityCreature {
         this.battleSite = battleSite;
     }
 
+    // Last director move order, for the re-path throttle below.
+    private BlockPos lastMoveTarget = null;
+    private int lastMoveIssueTick = -100;
+
     public void setMoveTarget(BlockPos target, double speed) {
         if (target == null || world.isRemote) return;
 
@@ -187,6 +191,19 @@ public class EntityFormationCarrier extends EntityCreature {
         // a phased director's "release the staging force" order would silently do nothing.
         this.orbitEnabled = false;
         this.orbitLockPuppets = false;
+
+        // RE-PATH THROTTLE. The director re-issues march orders every tick (advance loops, engineer
+        // walks, the assault column), and each tryMoveToXYZ forces a full A* RECALCULATION -- the
+        // carrier stuttered/stalled mid-stride, which read as rubber-banding/teleporting. If the order
+        // is essentially the SAME target and we're still walking a live path, keep walking; refresh
+        // periodically (or immediately when the path finished / the target genuinely moved).
+        boolean sameTarget = lastMoveTarget != null && target.distanceSq(lastMoveTarget) <= 2.25;
+        if (sameTarget && !this.getNavigator().noPath()
+                && this.ticksExisted - lastMoveIssueTick < 20) {
+            return;
+        }
+        lastMoveTarget = target;
+        lastMoveIssueTick = this.ticksExisted;
 
         this.getNavigator().tryMoveToXYZ(
             target.getX() + 0.5D,

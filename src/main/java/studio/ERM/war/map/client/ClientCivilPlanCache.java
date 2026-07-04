@@ -10,11 +10,20 @@ public final class ClientCivilPlanCache {
 
     private static volatile List<CivilMarker> markers = new ArrayList<>();
     private static volatile int availWorkers, totalWorkers, availBeds, totalBeds;
+    private static volatile List<studio.ERM.war.map.net.S2CCivilPlanSync.JobLine> jobs = new ArrayList<>();
 
     private ClientCivilPlanCache() {}
 
     public static void update(List<CivilMarker> list) {
         markers = (list != null) ? list : new ArrayList<>();
+    }
+
+    public static void updateJobs(List<studio.ERM.war.map.net.S2CCivilPlanSync.JobLine> list) {
+        jobs = (list != null) ? list : new ArrayList<>();
+    }
+
+    public static List<studio.ERM.war.map.net.S2CCivilPlanSync.JobLine> jobs() {
+        return jobs;
     }
 
     public static void updateStats(int availWorkers, int totalWorkers, int availBeds, int totalBeds) {

@@ -97,6 +97,45 @@ public final class DistrictRegistry {
     }
 
     /**
+     * Item handlers of every CONTAINER BLOCK inside a district polygon (chests, crates, anything
+     * exposing the item capability), EXCLUDING the depot itself. Bounded scan (max 4096 columns,
+     * surface ±10) with a handler cap — this is how "the Warehouse reads all inventories".
+     */
+    public static java.util.List<net.minecraftforge.items.IItemHandler> districtInventories(
+            World world, CivilMarker district) {
+        java.util.List<net.minecraftforge.items.IItemHandler> out = new java.util.ArrayList<>();
+        if (district == null || district.isRoad() || district.points.size() < 3) return out;
+        int minX = Integer.MAX_VALUE, maxX = Integer.MIN_VALUE;
+        int minZ = Integer.MAX_VALUE, maxZ = Integer.MIN_VALUE;
+        for (BlockPos p : district.points) {
+            minX = Math.min(minX, p.getX()); maxX = Math.max(maxX, p.getX());
+            minZ = Math.min(minZ, p.getZ()); maxZ = Math.max(maxZ, p.getZ());
+        }
+        int columns = 0;
+        for (int x = minX; x <= maxX && out.size() < 32; x++) {
+            for (int z = minZ; z <= maxZ && out.size() < 32; z++) {
+                if (!district.contains(x, z)) continue;
+                if (++columns > 4096) return out;
+                BlockPos probe = new BlockPos(x, 64, z);
+                if (!world.isBlockLoaded(probe, false)) continue;
+                int h = world.getHeight(x, z);
+                for (int y = Math.max(1, h - 10); y <= h + 6; y++) {
+                    BlockPos p = new BlockPos(x, y, z);
+                    if (p.equals(district.depotPos)) continue;
+                    TileEntity te = world.getTileEntity(p);
+                    if (te == null) continue;
+                    try {
+                        net.minecraftforge.items.IItemHandler inv = te.getCapability(
+                                net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, null);
+                        if (inv != null) out.add(inv);
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
      * THE master progression level gating district outputs: the highest RIVAL city level in this
      * dimension (1 when no rival exists yet — level-0 table rows are always unlocked anyway).
      */

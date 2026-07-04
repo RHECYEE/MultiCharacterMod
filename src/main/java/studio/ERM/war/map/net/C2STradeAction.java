@@ -17,10 +17,13 @@ import studio.ERM.war.world.WarWorldData;
 /** Trade Depot actions: BUY / SELL / REQUEST_SYNC. Every op replies with a fresh {@link S2CTradeSync}. */
 public class C2STradeAction implements IMessage {
 
-    public static final int BUY = 0, SELL = 1, REQUEST_SYNC = 2;
+    public static final int BUY = 0, SELL = 1, REQUEST_SYNC = 2, ORDER = 3;
 
     private int op, count, x, y, z;
     private String id = "";
+    // ORDER payload: the whole confirmed shopping list in one packet -> one merchant cart.
+    private java.util.List<String> orderIds = new java.util.ArrayList<>();
+    private java.util.List<Integer> orderCounts = new java.util.ArrayList<>();
 
     public C2STradeAction() {}
 
@@ -29,12 +32,28 @@ public class C2STradeAction implements IMessage {
         this.x = depot.getX(); this.y = depot.getY(); this.z = depot.getZ();
     }
 
+    /** A confirmed multi-line order. */
+    public static C2STradeAction order(java.util.Map<String, Integer> order, BlockPos depot) {
+        C2STradeAction p = new C2STradeAction(ORDER, "", 0, depot);
+        for (java.util.Map.Entry<String, Integer> e : order.entrySet()) {
+            p.orderIds.add(e.getKey());
+            p.orderCounts.add(e.getValue());
+        }
+        return p;
+    }
+
     @Override
     public void fromBytes(ByteBuf buf) {
         op = buf.readByte();
         count = buf.readInt();
         x = buf.readInt(); y = buf.readInt(); z = buf.readInt();
         id = ByteBufUtils.readUTF8String(buf);
+        orderIds.clear(); orderCounts.clear();
+        int n = buf.readShort();
+        for (int i = 0; i < n; i++) {
+            orderIds.add(ByteBufUtils.readUTF8String(buf));
+            orderCounts.add(buf.readInt());
+        }
     }
 
     @Override
@@ -43,6 +62,11 @@ public class C2STradeAction implements IMessage {
         buf.writeInt(count);
         buf.writeInt(x); buf.writeInt(y); buf.writeInt(z);
         ByteBufUtils.writeUTF8String(buf, id);
+        buf.writeShort(orderIds.size());
+        for (int i = 0; i < orderIds.size(); i++) {
+            ByteBufUtils.writeUTF8String(buf, orderIds.get(i));
+            buf.writeInt(orderCounts.get(i));
+        }
     }
 
     public static class Handler implements IMessageHandler<C2STradeAction, IMessage> {
@@ -54,6 +78,7 @@ public class C2STradeAction implements IMessage {
                 BlockPos depot = new BlockPos(msg.x, msg.y, msg.z);
                 if (msg.op == BUY) TradeShipmentManager.buy(world, player, msg.id, msg.count, depot);
                 else if (msg.op == SELL) TradeShipmentManager.sell(world, player, msg.id, msg.count, depot);
+                else if (msg.op == ORDER) TradeShipmentManager.buyOrder(world, player, msg.orderIds, msg.orderCounts, depot);
                 TacticalWarMapNetwork.sendTo(buildSync(world, player), player);
             });
             return null;

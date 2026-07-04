@@ -153,6 +153,19 @@ public final class LogisticsManager {
                     if (demands.stream().noneMatch(d -> d.getItem() == auto.getItem()
                             && d.getMetadata() == auto.getMetadata())) demands.add(auto);
                 }
+                // SALE ORDERS: the Trade Depot auto-demands whatever the player listed for sale,
+                // so couriers stock it ahead of the once-daily trader departure.
+                if (m.kind == CivilMarker.TRADE_DEPOT) {
+                    studio.ERM.strategic.civil.trade.TradeMarketData market =
+                            studio.ERM.strategic.civil.trade.TradeMarketData.get(world);
+                    for (java.util.Map.Entry<String, Integer> so : market.saleOrders.entrySet()) {
+                        if (so.getValue() <= 0) continue;
+                        ItemStack tpl = studio.ERM.war.config.TradePriceConfig.resolve(so.getKey());
+                        if (tpl.isEmpty()) continue;
+                        if (demands.stream().noneMatch(d -> d.getItem() == tpl.getItem()
+                                && d.getMetadata() == tpl.getMetadata())) demands.add(tpl);
+                    }
+                }
                 for (ItemStack tpl : demands) {
                     if (created >= MAX_NEW_PER_PASS || data.jobs.size() >= MAX_JOBS) break;
                     int have = countItem(te.depot, tpl);

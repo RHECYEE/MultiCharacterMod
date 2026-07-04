@@ -38,6 +38,9 @@ public class StrategicTrader extends StrategicObject {
 
     public int level = 3;
     public int escorts = 0;
+    // The cart's config cargo has been rolled+loaded once for this caravan's lifetime (persisted, so a
+    // robbed cart never restocks itself by dematerializing and coming back).
+    private boolean cargoFilled = false;
 
     public StrategicTrader() {
         speed = 1.8;      // a walking merchant pace while unloaded
@@ -69,7 +72,7 @@ public class StrategicTrader extends StrategicObject {
         // module stays a soft dependency) -> a leashed chest mule. AW2 carts aren't living entities, so
         // the merchant FAUX-PULLS them: driveLoaded drags the cart along behind him every tick.
         Entity cart = tryCreateAny(world, splitIds(studio.ERM.war.config.WarLevelsConfig.trafficCartId()));
-        if (cart == null) cart = tryCreateAw2Cart(world);
+        if (cart == null) cart = studio.ERM.war.BattleManagers.core.ChestCartHelper.createChestCart(world);
         if (cart == null) {
             EntityMule mule = new EntityMule(world);
             mule.setChested(true);
@@ -83,6 +86,13 @@ public class StrategicTrader extends StrategicObject {
         adopt(world, cart);
         if (cart instanceof EntityLiving) {
             try { ((EntityLiving) cart).setLeashHolder(trader, true); } catch (Throwable ignored) {}
+            tameCartPace((EntityLiving) cart);
+        }
+        // Stock the cart from the config cargo table -- ONCE per caravan (the flag persists, so a player
+        // who robs it and walks away doesn't find it magically restocked on re-materialization).
+        if (!cargoFilled) {
+            cargoFilled = true;
+            fillCartCargo(world, cart);
         }
 
         // 3) ESCORTS — flanking guards reusing the proven soldier march AI.
@@ -140,17 +150,40 @@ public class StrategicTrader extends StrategicObject {
         }
 
         // FAUX-PULL the cart: a non-living cart (the AW2 chest cart) has no leash physics, so drag it
-        // to a hitch point ~2.4 behind the merchant each tick (smooth lerp + kill residual motion so the
-        // vehicle physics doesn't fight the tow). A living cart (the mule) follows its leash instead.
-        if (cart != null && !(cart instanceof EntityLiving)) {
+        // to a hitch point ~2.4 behind the merchant each tick (step-CLAMPED lerp + kill residual motion,
+        // so the tow can never fling it at silly speeds). A LIVING cart (the mule) normally follows its
+        // leash -- but it also has its own legs and AI, which is how it "ran away 6x faster than the
+        // guys": shepherd it -- re-leash if the leash popped, and rein it back to the hitch if it strays.
+        if (cart != null) {
             double hx = trader.posX - Math.cos(facing) * 2.4;
             double hz = trader.posZ - Math.sin(facing) * 2.4;
-            double nx = cart.posX + (hx - cart.posX) * 0.22;
-            double nz = cart.posZ + (hz - cart.posZ) * 0.22;
-            BlockPos cg = surface(world, nx, nz);
-            float cartYaw = (float) Math.toDegrees(facing) - 90F;
-            cart.setPositionAndRotation(nx, cg.getY() + 0.05, nz, cartYaw, 0F);
-            cart.motionX = 0; cart.motionY = 0; cart.motionZ = 0;
+            if (!(cart instanceof EntityLiving)) {
+                double sx = (hx - cart.posX) * 0.22, sz = (hz - cart.posZ) * 0.22;
+                double slen = Math.sqrt(sx * sx + sz * sz);
+                if (slen > 0.45) { sx = sx / slen * 0.45; sz = sz / slen * 0.45; } // walking-pace tow, always
+                double nx = cart.posX + sx, nz = cart.posZ + sz;
+                BlockPos cg = surface(world, nx, nz);
+                float cartYaw = (float) Math.toDegrees(facing) - 90F;
+                cart.setPositionAndRotation(nx, cg.getY() + 0.05, nz, cartYaw, 0F);
+                cart.motionX = 0; cart.motionY = 0; cart.motionZ = 0;
+            } else {
+                EntityLiving live = (EntityLiving) cart;
+                try {
+                    if (live.getLeashHolder() != trader) live.setLeashHolder(trader, true); // leash popped -> re-hitch
+                } catch (Throwable ignored) {}
+                double dCart = live.getDistance(trader);
+                if (dCart > 24.0) { // hopelessly separated (materialization edge/panic burst): snap to the hitch
+                    BlockPos cg = surface(world, hx, hz);
+                    live.setPositionAndRotation(hx, cg.getY() + 0.1, hz, (float) Math.toDegrees(facing) - 90F, 0F);
+                    live.getNavigator().clearPath();
+                } else if (dCart > 6.0) { // straying: rein it back toward the hitch at a walking pace
+                    double sx = (hx - live.posX), sz = (hz - live.posZ);
+                    double slen = Math.max(0.001, Math.sqrt(sx * sx + sz * sz));
+                    live.setPositionAndRotation(live.posX + sx / slen * 0.3, live.posY, live.posZ + sz / slen * 0.3,
+                            (float) Math.toDegrees(Math.atan2(sz, sx)) - 90F, 0F);
+                    live.motionX *= 0.4; live.motionZ *= 0.4;
+                }
+            }
         }
 
         x = trader.posX;
@@ -190,40 +223,63 @@ public class StrategicTrader extends StrategicObject {
     }
 
     /**
-     * The REAL AW2 chest cart: spawn ancientwarfarevehicle:vehicle and apply the "chest_cart"
-     * VehicleType reflectively (same soft-dependency pattern as the siege machines). Returns null if
-     * the AW2 vehicle module isn't installed.
+     * A LIVING cart (chest mule / config entity) must move at CARAVAN pace, not its own: clamp its walk
+     * speed below the merchant's and strip the flighty AI (panic when hurt, run-around) that made it bolt
+     * "6x faster than the guys" and abandon the caravan. The leash + driveLoaded shepherd do the rest.
      */
-    private static Entity tryCreateAw2Cart(WorldServer world) {
+    private static void tameCartPace(EntityLiving cart) {
         try {
-            Entity v = EntityList.createEntityByIDFromName(
-                    new ResourceLocation("ancientwarfarevehicle", "vehicle"), world);
-            if (v == null) return null;
-            Class<?> vtClass = Class.forName("net.shadowmage.ancientwarfare.vehicle.entity.types.VehicleType");
-            java.lang.reflect.Field f = vtClass.getDeclaredField("vehicleTypes");
-            f.setAccessible(true);
-            Object reg = f.get(null);
-            Iterable<?> all;
-            if (reg instanceof Object[]) all = java.util.Arrays.asList((Object[]) reg);
-            else if (reg instanceof Iterable) all = (Iterable<?>) reg;
-            else if (reg instanceof java.util.Map) all = ((java.util.Map<?, ?>) reg).values();
-            else return null;
-            Object cartType = null;
-            for (Object vt : all) {
-                if (vt == null) continue;
-                try {
-                    Object cn = vt.getClass().getMethod("getConfigName").invoke(vt);
-                    if (cn != null && cn.toString().toLowerCase().contains("cart")) { cartType = vt; break; }
-                } catch (Throwable ignored) {}
+            net.minecraft.entity.ai.attributes.IAttributeInstance ms =
+                    cart.getEntityAttribute(net.minecraft.entity.SharedMonsterAttributes.MOVEMENT_SPEED);
+            if (ms != null && ms.getBaseValue() > 0.16) ms.setBaseValue(0.16);
+        } catch (Throwable ignored) {}
+        try {
+            java.util.List<net.minecraft.entity.ai.EntityAITasks.EntityAITaskEntry> drop = new ArrayList<>();
+            for (net.minecraft.entity.ai.EntityAITasks.EntityAITaskEntry e : cart.tasks.taskEntries) {
+                if (e == null || e.action == null) continue;
+                String n = e.action.getClass().getSimpleName().toLowerCase();
+                if (n.contains("panic") || n.contains("runaround") || n.contains("avoidentity")) drop.add(e);
             }
-            if (cartType == null) return null;
-            Class<?> iVehicleType = Class.forName("net.shadowmage.ancientwarfare.vehicle.entity.IVehicleType");
-            v.getClass().getMethod("setVehicleType", iVehicleType, int.class).invoke(v, cartType, 0);
-            return v;
+            for (net.minecraft.entity.ai.EntityAITasks.EntityAITaskEntry e : drop) cart.tasks.removeTask(e.action);
+        } catch (Throwable ignored) {}
+    }
+
+    /** Roll the config cargo table (WarLevelsConfig traffic.cartCargo) into the cart's inventory. */
+    private void fillCartCargo(WorldServer world, Entity cart) {
+        java.util.List<studio.ERM.war.config.WarLevelsConfig.CartCargoEntry> table =
+                studio.ERM.war.config.WarLevelsConfig.trafficCartCargo();
+        if (cart == null || table.isEmpty()) return;
+        java.util.Random rng = new java.util.Random(id.getMostSignificantBits() ^ world.getTotalWorldTime());
+        int stocked = 0;
+        for (studio.ERM.war.config.WarLevelsConfig.CartCargoEntry e : table) {
+            if (e == null || e.itemId == null || e.itemId.trim().isEmpty()) continue;
+            if (rng.nextDouble() >= e.chance) continue;
+            net.minecraft.item.ItemStack stack = parseItemStack(e.itemId.trim(),
+                    e.minCount + rng.nextInt(e.maxCount - e.minCount + 1));
+            if (stack.isEmpty()) continue;
+            net.minecraft.item.ItemStack rest =
+                    studio.ERM.war.BattleManagers.core.ChestCartHelper.insertIntoCart(cart, stack);
+            if (rest.getCount() < stack.getCount() || rest.isEmpty()) stocked++;
+        }
+        if (stocked > 0)
+            EpochRunnerMod.logger.info("[Strategic] trader cart stocked with " + stocked + " cargo roll(s)");
+    }
+
+    /** "modid:name" or "modid:name@meta" -> an ItemStack of {@code count} (EMPTY when the id is unknown). */
+    private static net.minecraft.item.ItemStack parseItemStack(String id, int count) {
+        try {
+            int meta = 0;
+            String name = id;
+            int at = id.indexOf('@');
+            if (at > 0) {
+                name = id.substring(0, at);
+                try { meta = Integer.parseInt(id.substring(at + 1)); } catch (NumberFormatException ignored) {}
+            }
+            net.minecraft.item.Item item = net.minecraft.item.Item.getByNameOrId(name);
+            if (item == null) return net.minecraft.item.ItemStack.EMPTY;
+            return new net.minecraft.item.ItemStack(item, Math.max(1, count), Math.max(0, meta));
         } catch (Throwable t) {
-            EpochRunnerMod.logger.info("[Strategic] AW2 chest cart unavailable (" + t.getClass().getSimpleName()
-                    + ") -> mule fallback");
-            return null;
+            return net.minecraft.item.ItemStack.EMPTY;
         }
     }
 
@@ -237,6 +293,7 @@ public class StrategicTrader extends StrategicObject {
         super.writeToNBT(tag);
         tag.setInteger("level", level);
         tag.setInteger("escorts", escorts);
+        tag.setBoolean("cargoFilled", cargoFilled);
         return tag;
     }
 
@@ -245,5 +302,6 @@ public class StrategicTrader extends StrategicObject {
         super.readFromNBT(tag);
         level = Math.max(1, Math.min(10, tag.getInteger("level") == 0 ? 3 : tag.getInteger("level")));
         escorts = Math.max(0, tag.getInteger("escorts"));
+        cargoFilled = tag.getBoolean("cargoFilled");
     }
 }

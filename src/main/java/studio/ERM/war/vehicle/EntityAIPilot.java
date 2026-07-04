@@ -1059,9 +1059,10 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
                 spawnCustomExplosion(vehicle, target, seat, dist);
 
                 if (!this.world.isRemote) {
-                    // Flan's vehicle firing path (EntityDriveable#shoot) already broadcasts the correct Flan
-                    // weapon sound via PacketPlaySound / Flan networking. Playing a vanilla explosion sound here
-                    // causes doubled / incorrect audio.
+                    // THE SOUNDBOARD: the layered medieval-recipe cannon report (giant trebuchet + gong +
+                    // iron ram crack for heavies) IS the tank's voice -- big, low, and heard across the field.
+                    studio.ERM.war.sound.WarSoundboard.tankCannon(
+                            world, seat.posX, seat.posY, seat.posZ, cannonWeightFor(vehicle));
                     spawnMuzzleFlash(seat);
 
                     if (shouldHaveSecondaryMG(vehicle)) {
@@ -1089,6 +1090,17 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
             this.ticksRemaining = 5 + new Random().nextInt(10);
             this.shotsLeft = 8 + new Random().nextInt(12);
         }
+    }
+
+    /** Soundboard cannon class: 0 = light/autocannon, 1 = medium, 2 = heavy/MBT (by Flan name lists). */
+    private int cannonWeightFor(EntityDriveable vehicle) {
+        try {
+            if (vehicle == null || vehicle.getDriveableType() == null) return 0;
+            String name = vehicle.getDriveableType().shortName.toLowerCase();
+            if (matches(name, HEAVY_TANKS) || matches(name, MODERN_MBT)) return 2;
+            if (matches(name, MEDIUM_TANKS)) return 1;
+        } catch (Throwable ignored) {}
+        return 0;
     }
 
     private boolean shouldHaveSecondaryMG(EntityDriveable vehicle) {
@@ -1401,9 +1413,10 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
 
         spawnImpactParticles(explosionX, explosionY, explosionZ);
 
-        this.world.playSound(null, explosionX, explosionY, explosionZ,
-                net.minecraft.init.SoundEvents.ENTITY_GENERIC_EXPLODE,
-                net.minecraft.util.SoundCategory.HOSTILE, 4.0F, 0.8F + rand.nextFloat() * 0.4F);
+        // THE SOUNDBOARD shell-impact recipe replaces the old generic-explode: wizard/volcano voice +
+        // material-matched ram-hit debris ticks at the point of impact.
+        studio.ERM.war.sound.WarSoundboard.shellImpact(world, explosionX, explosionY, explosionZ,
+                cannonWeightFor(vehicle) >= 2);
 
         // LAUNCH everything the blast catches (up + outward) so a tank shell reads as DEVASTATING.
         launchEntitiesFromBlast(explosionX, explosionY, explosionZ, explosionPower);

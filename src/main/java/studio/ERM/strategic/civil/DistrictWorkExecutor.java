@@ -45,7 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class DistrictWorkExecutor {
 
-    private static final double GATHER_RANGE = 192.0;
+    private static final double GATHER_RANGE = 384.0; // was 192: "workers free but not hired" fix
     private static final int PASS_INTERVAL = 60; // ticks between assignment passes
     public static boolean VERBOSE = false;
 
@@ -557,7 +557,7 @@ public final class DistrictWorkExecutor {
         // QUARRY: no output table — physically MINE one block per cycle (BuildCraft-style pit) and
         // carry the REAL drops. Wears a pickaxe stocked in the depot. Returns after mining.
         if (district.kind == CivilMarker.QUARRY) {
-            workQuarry(world, worker, DistrictRegistry.depotOf(world, district));
+            workQuarry(world, worker, district, DistrictRegistry.depotOf(world, district));
             return;
         }
 
@@ -647,6 +647,17 @@ public final class DistrictWorkExecutor {
             world.setBlockState(log, net.minecraft.init.Blocks.AIR.getDefaultState(), 3);
         }
         produceFromTable(world, worker, district, fruit ? "lumber_fruit" : "lumber");
+
+        // GROUND SWEEP: felling makes the canopy decay into REAL dropped saplings/apples/sticks
+        // that used to rot on the forest floor. Foresters pocket anything lying nearby; it rides
+        // the normal carried pile to the depot.
+        for (net.minecraft.entity.item.EntityItem it : world.getEntitiesWithinAABB(
+                net.minecraft.entity.item.EntityItem.class,
+                new AxisAlignedBB(feet).grow(6.0, 4.0, 6.0))) {
+            if (it.isDead || it.getItem().isEmpty()) continue;
+            CARRIED.computeIfAbsent(worker.getUniqueID(), u -> new ArrayList<>()).add(it.getItem().copy());
+            it.setDead();
+        }
     }
 
     /**
@@ -705,7 +716,8 @@ public final class DistrictWorkExecutor {
      *   - a stone pickaxe won't touch obsidian/diamond-hardness (needs iron+), matching vanilla tiers;
      *   - carries the block's REAL drops to the depot. Bedrock/liquids skipped.
      */
-    private static void workQuarry(WorldServer world, EntityCreature worker, TileEntityDistrictMarker depot) {
+    private static void workQuarry(WorldServer world, EntityCreature worker, CivilMarker district,
+                                   TileEntityDistrictMarker depot) {
         // TOOLS SUPPLIED: find the best pickaxe in the depot. Without one, the quarry can't work.
         int pickSlot = bestPickaxeSlot(depot);
         if (pickSlot < 0) return;
@@ -713,6 +725,17 @@ public final class DistrictWorkExecutor {
         int harvestLevel;
         try { harvestLevel = pick.getItem().getHarvestLevel(pick, "pickaxe", null, null); }
         catch (Throwable t) { harvestLevel = 0; }
+
+        // ACCESS SHAFT FIRST: the district marker is the pit head — a ladder shaft runs down its
+        // BACK face all the way to bedrock, extended one block per cycle before any pit digging.
+        List<ItemStack> shaftCarried = CARRIED.computeIfAbsent(worker.getUniqueID(), u -> new ArrayList<>());
+        if (district.depotPos != null && extendQuarryShaft(world, district, shaftCarried)) {
+            wearPickaxe(depot, pickSlot);
+            worker.swingArm(net.minecraft.util.EnumHand.MAIN_HAND);
+            return;
+        }
+        BlockPos shaftCol = district.depotPos != null
+                ? district.depotPos.offset(quarryShaftFacing(district)) : null;
 
         BlockPos feet = worker.getPosition();
         BlockPos ore = null, topRock = null;
@@ -722,7 +745,12 @@ public final class DistrictWorkExecutor {
                 for (int dy = 3; dy >= -4; dy--) { // topmost-first per column
                     BlockPos p = feet.add(dx, dy, dz);
                     if (!world.isBlockLoaded(p, false) || world.isAirBlock(p)) continue;
+                    // NEVER the pit head itself, its neighbours, or the ladder shaft column — the
+                    // marker is infrastructure, not ore ("they shouldn't be breaking the marker").
+                    if (district.depotPos != null && district.depotPos.distanceSq(p) <= 2.0) continue;
+                    if (shaftCol != null && p.getX() == shaftCol.getX() && p.getZ() == shaftCol.getZ()) continue;
                     net.minecraft.block.state.IBlockState st = world.getBlockState(p);
+                    if (st.getBlock() instanceof studio.ERM.war.districts.BlockDistrictMarker) continue;
                     net.minecraft.block.material.Material mat = st.getMaterial();
                     if (st.getBlock() == net.minecraft.init.Blocks.BEDROCK || mat.isLiquid()) continue;
                     if (st.getBlockHardness(world, p) < 0) continue; // unbreakable
@@ -746,6 +774,54 @@ public final class DistrictWorkExecutor {
         wearPickaxe(depot, pickSlot);
         if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName()
                 + " quarried " + st.getBlock().getLocalizedName());
+    }
+
+    /** The shaft hangs off the BACK of the marker: the horizontal face pointing AWAY from the
+     *  polygon centroid (the pit side is the front, where the digging happens). */
+    private static net.minecraft.util.EnumFacing quarryShaftFacing(CivilMarker district) {
+        BlockPos c = district.center();
+        BlockPos m = district.depotPos;
+        int dx = m.getX() - c.getX(), dz = m.getZ() - c.getZ();
+        if (dx == 0 && dz == 0) return net.minecraft.util.EnumFacing.NORTH;
+        return Math.abs(dx) >= Math.abs(dz)
+                ? (dx >= 0 ? net.minecraft.util.EnumFacing.EAST : net.minecraft.util.EnumFacing.WEST)
+                : (dz >= 0 ? net.minecraft.util.EnumFacing.SOUTH : net.minecraft.util.EnumFacing.NORTH);
+    }
+
+    /**
+     * Extend the pit-head LADDER SHAFT one block: the column behind the district marker is dug
+     * out (real drops carried) and laddered from the marker's level all the way down to bedrock.
+     * The wall the ladder hangs on is lined with cobblestone where the ground is soft. Returns
+     * true when a block of work was done this cycle; false = shaft complete, dig the pit instead.
+     */
+    private static boolean extendQuarryShaft(WorldServer world, CivilMarker district, List<ItemStack> carried) {
+        net.minecraft.util.EnumFacing back = quarryShaftFacing(district);
+        BlockPos head = district.depotPos.offset(back);
+        for (int y = district.depotPos.getY(); y >= 2; y--) {
+            BlockPos p = new BlockPos(head.getX(), y, head.getZ());
+            if (!world.isBlockLoaded(p, false)) return false;
+            net.minecraft.block.state.IBlockState st = world.getBlockState(p);
+            if (st.getBlock() == net.minecraft.init.Blocks.BEDROCK) return false; // reached bottom
+            if (st.getBlock() == net.minecraft.init.Blocks.LADDER) continue;      // this level is done
+
+            // Clear the cell (carrying its real drops)...
+            if (!world.isAirBlock(p) && st.getBlockHardness(world, p) >= 0 && !st.getMaterial().isLiquid()) {
+                net.minecraft.util.NonNullList<ItemStack> drops = net.minecraft.util.NonNullList.create();
+                try { st.getBlock().getDrops(drops, world, p, st, 0); } catch (Throwable ignored) {}
+                for (ItemStack d : drops) if (!d.isEmpty()) carried.add(d);
+                world.playEvent(2001, p, net.minecraft.block.Block.getStateId(st));
+            }
+            // ...line the wall the ladder needs (the column under the marker) if it's not solid...
+            BlockPos wall = p.offset(back.getOpposite());
+            if (!world.getBlockState(wall).getMaterial().isSolid()) {
+                world.setBlockState(wall, net.minecraft.init.Blocks.COBBLESTONE.getDefaultState(), 3);
+            }
+            // ...and hang the ladder (FACING points away from its wall).
+            world.setBlockState(p, net.minecraft.init.Blocks.LADDER.getDefaultState()
+                    .withProperty(net.minecraft.block.BlockLadder.FACING, back), 3);
+            return true;
+        }
+        return false;
     }
 
     /** Best (highest harvest level) pickaxe slot in the depot, or -1. */
@@ -786,6 +862,9 @@ public final class DistrictWorkExecutor {
      * aren't out on deliveries. No-op when there's nothing loose to gather.
      */
     private static void workWarehouse(WorldServer world, EntityCreature worker, CivilMarker district) {
+        // Depot full? Don't pull stock out of chests just to spill it back — skip the shuffle.
+        TileEntityDistrictMarker wd = DistrictRegistry.depotOf(world, district);
+        if (wd != null && !hasEmptySlot(wd.depot)) return;
         BlockPos feet = worker.getPosition();
         for (int dx = -4; dx <= 4; dx++) {
             for (int dz = -4; dz <= 4; dz++) {
@@ -859,6 +938,13 @@ public final class DistrictWorkExecutor {
         return null;
     }
 
+    private static boolean hasEmptySlot(net.minecraftforge.items.IItemHandler handler) {
+        for (int i = 0; i < handler.getSlots(); i++) {
+            if (handler.getStackInSlot(i).isEmpty()) return true;
+        }
+        return false;
+    }
+
     public static int carriedCount(EntityCreature worker) {
         List<ItemStack> list = CARRIED.get(worker.getUniqueID());
         return list == null ? 0 : list.size();
@@ -871,8 +957,19 @@ public final class DistrictWorkExecutor {
         CivilMarker district = DistrictRegistry.byUid(world, a.districtUid);
         TileEntityDistrictMarker depot = district != null ? DistrictRegistry.depotOf(world, district) : null;
         int deposited = 0;
+        // WAREHOUSES store into ALL inventories inside the polygon: depot first (the controller),
+        // then any chest/container the district contains, dropping only when everything is full.
+        java.util.List<net.minecraftforge.items.IItemHandler> spill =
+                (district != null && district.kind == CivilMarker.WAREHOUSE)
+                        ? DistrictRegistry.districtInventories(world, district) : null;
         for (ItemStack s : list) {
             ItemStack left = depot != null ? ItemHandlerHelper.insertItemStacked(depot.depot, s, false) : s;
+            if (!left.isEmpty() && spill != null) {
+                for (net.minecraftforge.items.IItemHandler h : spill) {
+                    left = ItemHandlerHelper.insertItemStacked(h, left, false);
+                    if (left.isEmpty()) break;
+                }
+            }
             if (!left.isEmpty()) {
                 net.minecraft.inventory.InventoryHelper.spawnItemStack(world,
                         worker.posX, worker.posY, worker.posZ, left);

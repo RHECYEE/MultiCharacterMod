@@ -67,6 +67,14 @@ public final class TradePriceConfig {
         public double rivalPriceBonusPerLevel = 0.05;
         /** Real-seconds a merchant takes to deliver an import / carry off an export. */
         public int shipmentSeconds = 90;
+        /** Daily export limit before diminishing returns kick in (refreshed each MC day). */
+        public int exportDailyBase = 64;
+        /** Each rival level above 1 raises the daily export cap by this fraction of the base. */
+        public double exportCapLevelMultiplier = 0.5;
+        /** TAXES: Command Bucks generated per housed citizen per night slept. */
+        public double taxPerSleep = 2.0;
+        /** Minimum hunger multiplier on taxes for a starving citizen (1.0 = well fed). */
+        public double taxHungerMin = 0.25;
 
         void sanitize() {
             if (categories == null || categories.isEmpty()) categories = defaults();
@@ -78,6 +86,10 @@ public final class TradePriceConfig {
             if (saturationPerSell < 0) saturationPerSell = 0.02;
             if (saturationDecayPerMin < 0) saturationDecayPerMin = 0.05;
             if (shipmentSeconds < 1) shipmentSeconds = 90;
+            if (exportDailyBase < 1) exportDailyBase = 64;
+            if (exportCapLevelMultiplier < 0) exportCapLevelMultiplier = 0.5;
+            if (taxPerSleep < 0) taxPerSleep = 2.0;
+            if (taxHungerMin < 0 || taxHungerMin > 1) taxHungerMin = 0.25;
         }
     }
 

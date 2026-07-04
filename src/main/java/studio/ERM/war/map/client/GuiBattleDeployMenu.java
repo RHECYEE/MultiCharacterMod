@@ -296,7 +296,7 @@ public class GuiBattleDeployMenu {
                 font.drawString(freeText, x0 + width - w - 8, ey + 3, 0xFFFFFFFF);
             } else {
                 TextFormatting cpColor = entry.canAfford ? TextFormatting.GREEN : TextFormatting.RED;
-                String cpText = cpColor + "" + entry.effectiveCpCost + " CP";
+                String cpText = cpColor + "" + entry.effectiveCpCost + " CB";
                 int cpWidth = font.getStringWidth(cpText);
                 font.drawString(cpText, x0 + width - cpWidth - 8, ey + 3, 0xFFFFFFFF);
             }
@@ -326,7 +326,7 @@ public class GuiBattleDeployMenu {
         // Footer - CP display
         int footerY = y0 + height - 18;
         Gui.drawRect(x0 + 4, footerY - 2, x0 + width - 4, footerY - 1, 0xFF3d3d5c);
-        String cpDisplay = TextFormatting.GRAY + "Your CP: " + TextFormatting.GOLD + playerCp;
+        String cpDisplay = TextFormatting.GRAY + "Your CB: " + TextFormatting.GOLD + playerCp;
         font.drawString(cpDisplay, x0 + 6, footerY + 2, 0xFFFFFFFF);
 
         String eraDisplay = TextFormatting.GRAY + "Era: " + TextFormatting.AQUA + playerEra;

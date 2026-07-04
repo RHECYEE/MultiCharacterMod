@@ -29,6 +29,29 @@ public class TradeMarketData extends WorldSavedData {
     public final Map<String, Double> saturation = new HashMap<>();
     private long lastDecayTick = 0;
 
+    /** STANDING SALE ORDERS (item id -> remaining count): couriers stock the Trade Depot with
+     *  these; the once-daily trader trip sells whatever is actually stocked and decrements. */
+    public final Map<String, Integer> saleOrders = new HashMap<>();
+    /** Items exported so far today — drives the diminishing-returns payout curve. */
+    public int exportedToday = 0;
+    /** The day (totalWorldTime/24000) the daily trader last departed / counter last reset. */
+    public long lastTradeDay = -1;
+
+    /** The daily export cap: starts at the config base (64) and rises per rival level. */
+    public static int dailyExportCap(World world) {
+        int level = DistrictRegistry.rivalLevel(world);
+        return (int) Math.max(1, TradePriceConfig.data.exportDailyBase
+                * (1.0 + TradePriceConfig.data.exportCapLevelMultiplier * Math.max(0, level - 1)));
+    }
+
+    /** Diminishing-returns payout factor for the NEXT {@code count} items exported today:
+     *  full price inside the cap, then cap/exported beyond it (asymptotically to zero). */
+    public double exportPayoutFactor(World world, int countAfter) {
+        int cap = dailyExportCap(world);
+        if (countAfter <= cap) return 1.0;
+        return cap / (double) countAfter;
+    }
+
     public TradeMarketData() { super(NAME); }
     public TradeMarketData(String name) { super(name); }
 
@@ -98,6 +121,11 @@ public class TradeMarketData extends WorldSavedData {
         NBTTagCompound s = nbt.getCompoundTag("sat");
         for (String k : s.getKeySet()) saturation.put(k, s.getDouble(k));
         lastDecayTick = nbt.getLong("lastDecay");
+        saleOrders.clear();
+        NBTTagCompound so = nbt.getCompoundTag("saleOrders");
+        for (String k : so.getKeySet()) saleOrders.put(k, so.getInteger(k));
+        exportedToday = nbt.getInteger("exportedToday");
+        lastTradeDay = nbt.hasKey("lastTradeDay") ? nbt.getLong("lastTradeDay") : -1;
     }
 
     @Override
@@ -106,6 +134,11 @@ public class TradeMarketData extends WorldSavedData {
         for (Map.Entry<String, Double> e : saturation.entrySet()) s.setDouble(e.getKey(), e.getValue());
         nbt.setTag("sat", s);
         nbt.setLong("lastDecay", lastDecayTick);
+        NBTTagCompound so = new NBTTagCompound();
+        for (Map.Entry<String, Integer> e : saleOrders.entrySet()) so.setInteger(e.getKey(), e.getValue());
+        nbt.setTag("saleOrders", so);
+        nbt.setInteger("exportedToday", exportedToday);
+        nbt.setLong("lastTradeDay", lastTradeDay);
         return nbt;
     }
 }

@@ -41,6 +41,19 @@ public class EntityAICitizenLife extends EntityAIBase {
         return npc.getRevengeTarget() != null && npc.ticksExisted - npc.getRevengeTimer() < 120;
     }
 
+    /** A soldier holding a defense-plan order (or a live target) is ON DUTY: he stands his post
+     *  through the night and never walks off to eat — garrisons get fed by kitchen logistics, not
+     *  by deserting the line. Civilians are never on duty. */
+    private boolean onDuty() {
+        if (npc.getAttackTarget() != null) return true;
+        try {
+            return studio.ERM.strategic.defense.Aw2Npc.isPlayerOwnedCombat(npc)
+                    && studio.ERM.strategic.defense.DefensePlanExecutor.orderFor(npc) != null;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private boolean isNight() {
         return npc.world instanceof WorldServer && !npc.world.isDaytime();
     }
@@ -58,7 +71,7 @@ public class EntityAICitizenLife extends EntityAIBase {
 
     @Override
     public boolean shouldExecute() {
-        if (npc.isDead || underAttack()) return false;
+        if (npc.isDead || underAttack() || onDuty()) return false;
         if (isNight()) return bed() != null;
         return isHungry() && nearestKitchen() != null;
     }

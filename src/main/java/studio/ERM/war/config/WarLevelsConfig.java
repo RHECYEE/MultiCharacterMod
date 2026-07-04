@@ -80,6 +80,11 @@ public final class WarLevelsConfig {
         return (data != null && data.traffic != null && data.traffic.cartEntityId != null)
                 ? data.traffic.cartEntityId : "";
     }
+    /** The trader cart's CARGO table (each entry rolled once per caravan). Blank by default. */
+    public static List<CartCargoEntry> trafficCartCargo() {
+        return (data != null && data.traffic != null && data.traffic.cartCargo != null)
+                ? data.traffic.cartCargo : java.util.Collections.<CartCargoEntry>emptyList();
+    }
 
     // ── PHASE 2: recruitment knobs ──
     public static int recruitPermanentCost() {
@@ -385,12 +390,54 @@ public final class WarLevelsConfig {
         public double densityMultiplier = 1.0;
         /** Comma-separated entity ids for the trader's CART (e.g. "astikorcarts:cargo_cart"); empty = chest mule. */
         public String cartEntityId = "";
+        /**
+         * WHAT SPAWNS IN THE TRADER'S CART (rolled once per caravan, filled at spawn). BLANK by default --
+         * author entries here to stock the caravans. The seeded example (chance 0.0) documents the shape
+         * without spawning anything: itemId supports "modid:name" or "modid:name@meta".
+         */
+        public List<CartCargoEntry> cartCargo = defaultCartCargo();
+
+        private static List<CartCargoEntry> defaultCartCargo() {
+            List<CartCargoEntry> l = new ArrayList<>();
+            CartCargoEntry example = new CartCargoEntry();
+            example.itemId = "minecraft:bread";
+            example.minCount = 2;
+            example.maxCount = 6;
+            example.chance = 0.0; // EXAMPLE ONLY: chance 0 never spawns; raise it (0..1) to enable
+            l.add(example);
+            return l;
+        }
 
         public void sanitize() {
             if (ensureIntervalSeconds < 10) ensureIntervalSeconds = 10;
             if (!(densityMultiplier >= 0)) densityMultiplier = 1.0; // catches NaN/negatives
             if (densityMultiplier > 8.0) densityMultiplier = 8.0;
             if (cartEntityId == null) cartEntityId = "";
+            if (cartCargo == null) cartCargo = defaultCartCargo();
+            for (int i = cartCargo.size() - 1; i >= 0; i--) {
+                CartCargoEntry e = cartCargo.get(i);
+                if (e == null) { cartCargo.remove(i); continue; }
+                e.sanitize();
+            }
+        }
+    }
+
+    /** ONE line of the trader-cart cargo table: an item, a count range, and a per-caravan roll chance. */
+    public static final class CartCargoEntry {
+        /** Item registry id, "modid:name" or "modid:name@meta" (e.g. "minecraft:wool@14"). */
+        public String itemId = "";
+        public int minCount = 1;
+        public int maxCount = 1;
+        /** 0..1 probability this entry appears in a given caravan's cart. */
+        public double chance = 1.0;
+
+        public void sanitize() {
+            if (itemId == null) itemId = "";
+            if (minCount < 1) minCount = 1;
+            if (maxCount < minCount) maxCount = minCount;
+            if (maxCount > 64 * 9) maxCount = 64 * 9;
+            if (!(chance >= 0.0)) chance = 0.0; // catches NaN
+            if (chance > 1.0) chance = 1.0;
         }
     }
 

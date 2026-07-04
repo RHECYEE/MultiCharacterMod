@@ -55,11 +55,18 @@ public final class BedAssignmentManager {
         if (++passCounter % PASS_INTERVAL != 0) return;
         WorldServer world = (WorldServer) e.world;
 
-        // Ensure every loaded player-owned WORKER carries the citizen-life task (night bed-seeking +
-        // hunger). Independent of housing so a citizen still gets fed with no beds around.
+        // SLEEP TAXES: each dawn every housed citizen pays up (see collectTaxes).
+        collectTaxes(world);
+
+        // Ensure every loaded player-owned citizen carries the citizen-life task (night bed-seeking
+        // + hunger) — WORKERS unconditionally, and SOLDIERS too: Barracks is military housing, so
+        // off-duty soldiers sleep there. The task itself refuses to move a soldier who currently
+        // holds a defense-plan order (or a live target) — posts are never deserted for a bed.
         for (Object o : world.loadedEntityList) {
-            if (o instanceof EntityCreature && DistrictWorkExecutor.isAnyWorker((EntityCreature) o)) {
-                DistrictWorkExecutor.ensureLifeTask((EntityCreature) o);
+            if (!(o instanceof EntityCreature)) continue;
+            EntityCreature c = (EntityCreature) o;
+            if (DistrictWorkExecutor.isAnyWorker(c) || Aw2Npc.isPlayerOwnedCombat(c)) {
+                DistrictWorkExecutor.ensureLifeTask(c);
             }
         }
 
@@ -120,6 +127,55 @@ public final class BedAssignmentManager {
                     + (wantsMilitary ? "BARRACKS" : "RESIDENTIAL") + " bed @ "
                     + best.getX() + "," + best.getY() + "," + best.getZ());
         }
+    }
+
+    private static final Map<Integer, Long> LAST_TAX_DAY = new HashMap<>();
+
+    /**
+     * SLEEP TAXES — every citizen with a claimed bed generates Command Bucks each night slept
+     * (config taxPerSleep), multiplied by how well-fed they are: a citizen who hasn't eaten loses
+     * up to (1 - taxHungerMin) of their contribution. UNLOADED citizens keep their bed and pay a
+     * simulated-meal rate (0.75) — the settlement earns even when the player is off at war.
+     * Credited at dawn to the (single-player) settlement owner's faction bucket.
+     */
+    private static void collectTaxes(WorldServer world) {
+        int dim = world.provider.getDimension();
+        long day = world.getTotalWorldTime() / 24000L;
+        Long last = LAST_TAX_DAY.get(dim);
+        if (last == null) { LAST_TAX_DAY.put(dim, day); return; }
+        if (day <= last || !world.isDaytime()) return;
+        LAST_TAX_DAY.put(dim, day);
+
+        BedAssignmentData data = BedAssignmentData.get(world);
+        if (data.claims.isEmpty() || world.playerEntities.isEmpty()) return;
+        double per = studio.ERM.war.config.TradePriceConfig.data.taxPerSleep;
+        double floor = studio.ERM.war.config.TradePriceConfig.data.taxHungerMin;
+        long now = world.getTotalWorldTime();
+        double total = 0;
+        int housed = 0;
+        for (Map.Entry<UUID, BedAssignmentData.Claim> en : data.claims.entrySet()) {
+            net.minecraft.entity.Entity ent = world.getEntityFromUuid(en.getKey());
+            double fed;
+            if (ent instanceof EntityCreature) {
+                long fedUntil = ((EntityCreature) ent).getEntityData().getLong("erm_fed_until");
+                // Fed recently = full rate; every missed day halves toward the floor.
+                fed = fedUntil >= now ? 1.0
+                        : Math.max(floor, 1.0 - ((now - fedUntil) / 24000.0) * 0.5);
+            } else {
+                fed = 0.75; // unloaded: simulated meals
+            }
+            total += per * fed;
+            housed++;
+        }
+        if (housed == 0 || total < 1) return;
+        net.minecraft.entity.player.EntityPlayer owner = world.playerEntities.get(0);
+        studio.ERM.war.world.WarWorldData wd = studio.ERM.war.world.WarWorldData.get(world);
+        wd.getStats(owner.getUniqueID().toString()).commandPoints += (int) Math.floor(total);
+        wd.markDirty();
+        owner.sendMessage(new net.minecraft.util.text.TextComponentString(
+                net.minecraft.util.text.TextFormatting.GOLD + "Taxes collected: +" + (int) Math.floor(total)
+                + " CB from " + housed + " housed citizen" + (housed == 1 ? "" : "s") + "."));
+        EpochRunnerMod.logger.info("[Beds] taxes: +" + (int) Math.floor(total) + " CB from " + housed);
     }
 
     /** A citizen's death frees its bed immediately. */

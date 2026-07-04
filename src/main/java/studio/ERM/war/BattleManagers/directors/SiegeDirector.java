@@ -107,6 +107,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
     private final java.util.Set<BlockPos> capturedSpots = new java.util.HashSet<>();
     private final List<BlockPos> lootChests = new ArrayList<>();
     private BlockPos lootDepot = null;
+    // THE LOOT TRAIN: the depot is a row of INDESTRUCTIBLE chest carts under an armed protection team
+    // (not a chest grid) -- the army's haul physically sits in wagons the player must fight the guards
+    // to reclaim. Falls back to the old chest grid when the AW2 vehicle module is missing.
+    private final List<Entity> lootCarts = new ArrayList<>();
     // PHYSICAL HAULING: a soldier that REACHES a chest grabs its items and carries them back to the depot
     // (instead of the loot teleporting on proximity). Maps the courier soldier -> the stacks it is carrying.
     private final java.util.Map<EntitySoldier, java.util.List<net.minecraft.item.ItemStack>> couriers = new java.util.HashMap<>();
@@ -943,6 +947,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
         if (!anyPending)      routeStatus = engQueue.isEmpty() ? RouteStatus.OPEN : RouteStatus.CLEARED;
         else if (anyUnclaimed) routeStatus = RouteStatus.NEEDS_ENGINEER;
         else                   routeStatus = RouteStatus.BEING_CLEARED;
+    }
+
+    /** True when the EXTERNAL approach work is finished -- every bridge/ramp/head-clear on the route plus
+     *  the wall breach itself. The moment this flips (with {@link #breachOpened}), the interior tunnel dig
+     *  can begin; WIDEN/CORRIDOR polish continues in parallel on whichever crews are already on it. */
+    private boolean externalRouteWorkDone() {
+        for (EngTask t : engQueue) {
+            if (t.done) continue;
+            if (t.work == EngWork.BRIDGE || t.work == EngWork.RAMP
+                    || t.work == EngWork.CLEAR || t.work == EngWork.BREACH) return false;
+        }
+        return true;
     }
 
     /** Read-only view of the assault route's state (the engineer<->vehicle shared signal). */
@@ -1808,7 +1824,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
             breachOpened = true;
             enqueueBreachFollowups(world);
         } else if (t.work == EngWork.TUNNEL) {          // this squad's staircase reached its heat spot
-            BlockPos spot = crewHeatSpot.get(crew);
+            // The destination rides on the TASK (shaftSpot) -- a crew that picked up another squad's
+            // tunnel after a death/handoff still credits the RIGHT spot; crewHeatSpot is the fallback.
+            BlockPos spot = (t.shaftSpot != null) ? t.shaftSpot : crewHeatSpot.get(crew);
             if (spot != null) {
                 completedHeatSpots.add(spot);
                 interiorObjective = spot;              // the push now has an interior goal to flow to
@@ -2416,12 +2434,37 @@ public class SiegeDirector implements IPhasedBattleDirector {
      */
     private void buildLootDepot(World world) {
         lootChests.clear();
+        lootCarts.clear();
         // Put the depot DOWN ON THE GROUND at the deployment camp (where the army staged), not floating in
         // the middle of the rubble -- the loot is teleported to camp, so the distance is irrelevant.
         BlockPos c = (stagingCenter != null) ? stagingCenter
                 : (interiorObjective != null) ? interiorObjective : breachCorridor;
         int y = surfaceY(world, c.getX(), c.getZ());
         lootDepot = new BlockPos(c.getX(), y, c.getZ());
+
+        // THE LOOT TRAIN (preferred): a row of INDESTRUCTIBLE AW2 chest carts parked along the line at
+        // the camp, guarded by an armed protection team. The couriers' haul goes INTO the wagons; the
+        // player gets it back by breaking the guard, not by creeping a TNT block under a chest grid.
+        int wantCarts = Math.max(3, Math.min(5, 2 + heatspots.size() / 16 + warLevel / 4));
+        double lx = -Math.sin(frontBearing), lz = Math.cos(frontBearing); // lateral axis along the line
+        int parked = 0;
+        for (int i = 0; i < wantCarts; i++) {
+            double lat = (i - (wantCarts - 1) / 2.0) * 3.5;
+            double cx = c.getX() + 0.5 + lx * lat, cz = c.getZ() + 0.5 + lz * lat;
+            int gy = surfaceY(world, cx, cz);
+            Entity cart = studio.ERM.war.BattleManagers.core.ChestCartHelper.createChestCart(world);
+            if (cart == null) break; // AW2 vehicle module missing -> chest-grid fallback below
+            cart.setLocationAndAngles(cx, gy + 1.0, cz, (float) Math.toDegrees(frontBearing) + 90F, 0F);
+            studio.ERM.war.BattleManagers.core.ChestCartHelper.makeInvulnerable(cart);
+            cart.getEntityData().setBoolean("erm_loot_cart", true);
+            if (world.spawnEntity(cart)) { lootCarts.add(cart); parked++; }
+        }
+        if (parked > 0) {
+            spawnLootTrainGuards(world, lootDepot);
+            EpochRunnerMod.logger.info("[Siege] LOOT TRAIN @ " + xyz(lootDepot) + ": " + parked
+                    + " indestructible chest cart(s) under guard");
+            return; // the wagons ARE the depot; no chest grid
+        }
 
         int want = Math.max(6, Math.min(24, heatspots.size() + 2 + warLevel)); // scale to the haul
         final int cols = 4;
@@ -2448,6 +2491,34 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
         EpochRunnerMod.logger.info("[Siege] loot depot @ " + xyz(lootDepot) + " with " + lootChests.size()
                 + " spaced chest(s) (cap " + want + ")");
+    }
+
+    /**
+     * The loot train's ARMED PROTECTION TEAM: heavy soldiers ringed around the wagons, holding station
+     * (marchObjective = the depot, so they stand their post and engage anyone who closes in rather than
+     * free-hunting across the map). Deliberately NOT tracked for cleanup: like the old depot chests, the
+     * train + its guard persist after the siege as the fight-for-the-spoils encounter.
+     */
+    private void spawnLootTrainGuards(World world, BlockPos depot) {
+        int guards = Math.max(3, 2 + warLevel / 3);
+        java.util.Random rng = new java.util.Random(depot.toLong());
+        int up = 0;
+        for (int i = 0; i < guards; i++) {
+            double ang = (Math.PI * 2 * i) / guards;
+            double gx = depot.getX() + 0.5 + Math.cos(ang) * 4.5;
+            double gz = depot.getZ() + 0.5 + Math.sin(ang) * 4.5;
+            int gy = surfaceY(world, gx, gz);
+            try {
+                EntitySoldier s = new EntitySoldier(world);
+                s.setLocationAndAngles(gx, gy + 1.0, gz, (float) Math.toDegrees(ang) + 90F, 0F);
+                s.setTeam_("empire");
+                s.configure(warLevel, "HEAVY", "");
+                try { studio.ERM.war.skins.SkinPoolManager.applySkinForRivalLevel(s, warLevel, rng); } catch (Throwable ignored) {}
+                s.setMarchObjective(depot); // hold the wagons
+                if (world.spawnEntity(s)) up++;
+            } catch (Throwable ignored) {}
+        }
+        EpochRunnerMod.logger.info("[Siege] loot train protection team: " + up + " guard(s)");
     }
 
     /**
@@ -2870,7 +2941,8 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.beam(lootDepot, 1f, 0.85f, 0f, 14));
                 mk.add(studio.ERM.war.strategy.WarHeatDebug.Marker.box(lootDepot, 1f, 0.85f, 0f, 3));
                 lb.add(new studio.ERM.war.strategy.WarHeatDebug.Label(lootDepot.up(15),
-                        "LOOT DEPOT (" + lootChests.size() + " chests)"));
+                        lootCarts.isEmpty() ? "LOOT DEPOT (" + lootChests.size() + " chests)"
+                                : "LOOT TRAIN (" + lootCarts.size() + " guarded wagons)"));
             }
             for (BlockPos sp : heatspots) {
                 boolean done = capturedSpots.contains(sp);
@@ -2921,6 +2993,12 @@ public class SiegeDirector implements IPhasedBattleDirector {
     /** Put a stack into the first depot chest with room; drop at the depot if every chest is full. */
     private void depositToDepot(World world, net.minecraft.item.ItemStack stack) {
         if (stack == null || stack.isEmpty()) return;
+        // Loot train first: the haul goes into the guarded wagons.
+        for (Entity cart : lootCarts) {
+            if (cart == null || cart.isDead) continue;
+            stack = studio.ERM.war.BattleManagers.core.ChestCartHelper.insertIntoCart(cart, stack);
+            if (stack.isEmpty()) return;
+        }
         for (BlockPos cp : lootChests) {
             net.minecraft.tileentity.TileEntity te = world.getTileEntity(cp);
             if (!(te instanceof net.minecraft.inventory.IInventory)) continue;
@@ -3003,10 +3081,11 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // Only advance early once the engineers GENUINELY finished (engineersComplete now means
                 // every task is done, not "all dead") AND a minimum dwell has passed, so they actually
                 // get seen laddering / mining / sapping.
-                // PHASE 1 -> PHASE 2 handoff: when the WALL breach (phase-1 tasks) is done, don't end the
-                // phase -- start the interior tunnel dig instead. Only AFTER the tunnels finish (or the
-                // phase timer runs out) do we surge.
-                if (engineersComplete && !tunnelPhase && tsp >= MIN_PHASE_DWELL) {
+                // PHASE 1 -> PHASE 2 handoff: as soon as the EXTERNAL approach work is done (bridges/ramps/
+                // clears + the wall breach itself), start the interior tunnel dig -- the WIDEN/CORRIDOR
+                // polish keeps running IN PARALLEL on the crews already working it, instead of every other
+                // crew idling at the breach while one crew cuts the corridor (why tunnels started too late).
+                if (!tunnelPhase && tsp >= MIN_PHASE_DWELL && breachOpened && externalRouteWorkDone()) {
                     beginEngineerTunnels(world);
                 }
                 boolean engineeringDone = engineersComplete && (tunnelPhase || engQueue.isEmpty());
@@ -3027,7 +3106,7 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // access stairs -- instead of freezing mid-swing at the phase flip. Late phase-1 completion
                 // still hands off to the interior tunnel dig, so the visible work chain never breaks.
                 tickEngineers(world);
-                if (engineersComplete && !tunnelPhase) beginEngineerTunnels(world);
+                if (!tunnelPhase && breachOpened && externalRouteWorkDone()) beginEngineerTunnels(world);
                 // THE DIRECTOR DIRECTS: drive each formation (carrier + puppet squad) through the breach to
                 // its assigned objective, and keep the released soldiers MARCHING to objectives (not chasing
                 // the player). Squads advance as units; by the assault they are well inside.
@@ -3132,8 +3211,18 @@ public class SiegeDirector implements IPhasedBattleDirector {
         }
     }
 
-    /** True when every depot chest is full -- "the chest carts are packed, time to go home". */
+    /** True when every depot container is full -- "the chest carts are packed, time to go home". */
     private boolean depotFull(World world) {
+        // Loot-train wagons: full only when EVERY live cart is packed (dead refs skipped; none live = false).
+        if (!lootCarts.isEmpty()) {
+            boolean anyLive = false;
+            for (Entity cart : lootCarts) {
+                if (cart == null || cart.isDead) continue;
+                anyLive = true;
+                if (!studio.ERM.war.BattleManagers.core.ChestCartHelper.isCartFull(cart)) return false;
+            }
+            return anyLive;
+        }
         if (lootChests.isEmpty()) return false;
         for (BlockPos cp : lootChests) {
             net.minecraft.tileentity.TileEntity te = world.getTileEntity(cp);
@@ -4394,11 +4483,13 @@ public class SiegeDirector implements IPhasedBattleDirector {
             if (e != null && !e.isDead) { try { e.setDead(); } catch (Throwable ignored) {} }
         }
         looseUnits.clear();
-        // Phase-2 tracking. The depot CHESTS + their loot are left standing (the spoils of the siege);
-        // only the access ramps revert (they went through setCampBlock -> restoreCamp).
+        // Phase-2 tracking. The depot -- loot-train WAGONS (and their guards) or fallback CHESTS -- is
+        // left STANDING with its loot (the spoils encounter); only the access ramps revert (they went
+        // through setCampBlock -> restoreCamp). Clear the refs, never setDead the carts.
         heatspots.clear();
         capturedSpots.clear();
         lootChests.clear();
+        lootCarts.clear();
         lootDepot = null;
         vehicles.clear();
         carriers.clear();

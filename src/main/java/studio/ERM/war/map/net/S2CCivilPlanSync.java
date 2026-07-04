@@ -18,8 +18,18 @@ import java.util.List;
  */
 public class S2CCivilPlanSync implements IMessage {
 
+    /** One live courier job / shipment, reduced to what the map draws: a src->dst line + label. */
+    public static class JobLine {
+        public int sx, sz, dx, dz;
+        public int state; // CourierJob.STATE_* ; 3 = trade SHIPMENT (teal, real progress)
+        public String label = "";
+        /** Real leg progress 0-100, or -1 = decorative loop animation (courier jobs). */
+        public byte progress = -1;
+    }
+
     private List<CivilMarker> markers = new ArrayList<>();
     private int availWorkers, totalWorkers, availBeds, totalBeds;
+    private List<JobLine> jobs = new ArrayList<>();
 
     public S2CCivilPlanSync() {}
 
@@ -36,6 +46,11 @@ public class S2CCivilPlanSync implements IMessage {
         this.totalBeds = totalBeds;
     }
 
+    public S2CCivilPlanSync withJobs(List<JobLine> jobLines) {
+        this.jobs = jobLines != null ? jobLines : new ArrayList<>();
+        return this;
+    }
+
     @Override
     public void fromBytes(ByteBuf buf) {
         markers.clear();
@@ -45,6 +60,17 @@ public class S2CCivilPlanSync implements IMessage {
         totalWorkers = buf.readInt();
         availBeds = buf.readInt();
         totalBeds = buf.readInt();
+        jobs.clear();
+        int jn = buf.readShort();
+        for (int i = 0; i < jn; i++) {
+            JobLine j = new JobLine();
+            j.sx = buf.readInt(); j.sz = buf.readInt();
+            j.dx = buf.readInt(); j.dz = buf.readInt();
+            j.state = buf.readByte();
+            j.progress = buf.readByte();
+            j.label = net.minecraftforge.fml.common.network.ByteBufUtils.readUTF8String(buf);
+            jobs.add(j);
+        }
     }
 
     @Override
@@ -55,6 +81,15 @@ public class S2CCivilPlanSync implements IMessage {
         buf.writeInt(totalWorkers);
         buf.writeInt(availBeds);
         buf.writeInt(totalBeds);
+        buf.writeShort(jobs.size());
+        for (JobLine j : jobs) {
+            buf.writeInt(j.sx); buf.writeInt(j.sz);
+            buf.writeInt(j.dx); buf.writeInt(j.dz);
+            buf.writeByte(j.state);
+            buf.writeByte(j.progress);
+            net.minecraftforge.fml.common.network.ByteBufUtils.writeUTF8String(
+                    buf, j.label == null ? "" : j.label);
+        }
     }
 
     public static class Handler implements IMessageHandler<S2CCivilPlanSync, IMessage> {
@@ -64,6 +99,7 @@ public class S2CCivilPlanSync implements IMessage {
                 ClientCivilPlanCache.update(msg.markers);
                 ClientCivilPlanCache.updateStats(
                         msg.availWorkers, msg.totalWorkers, msg.availBeds, msg.totalBeds);
+                ClientCivilPlanCache.updateJobs(msg.jobs);
             });
             return null;
         }

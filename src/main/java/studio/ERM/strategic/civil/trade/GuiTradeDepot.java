@@ -31,6 +31,8 @@ public class GuiTradeDepot extends GuiContainer {
     private int tab = 0;
     private int scroll = 0;
     private final List<Hit> hits = new ArrayList<>();
+    /** The pending shopping list: Add builds it up, CONFIRM sends it as ONE merchant cart. */
+    private final java.util.LinkedHashMap<String, Integer> order = new java.util.LinkedHashMap<>();
 
     private static final class Hit {
         final int x1, y1, x2, y2, op, count; final String id;
@@ -121,8 +123,12 @@ public class GuiTradeDepot extends GuiContainer {
                 if (r.available) {
                     int bx1 = L + 178, bx2 = L + 214;
                     drawRect(bx1, y, bx2, y + 12, 0xFF1B5E20);
-                    fontRenderer.drawString("Buy", bx1 + 10, y + 2, 0xFFFFFF);
+                    fontRenderer.drawString("Add", bx1 + 9, y + 2, 0xFFFFFF);
                     hits.add(new Hit(bx1, y, bx2, y + 12, C2STradeAction.BUY, 1, r.id));
+                    Integer inOrder = order.get(r.id);
+                    if (inOrder != null) {
+                        fontRenderer.drawString("§6x" + inOrder, bx2 + 4, y + 2, 0xFFC400);
+                    }
                 } else {
                     fontRenderer.drawString("Lv " + r.minLevel, L + 182, y + 2, 0xFF8A80);
                 }
@@ -130,8 +136,36 @@ public class GuiTradeDepot extends GuiContainer {
             y += ROW_H;
         }
         scrollHint(L, lines.size());
-        fontRenderer.drawString("§7Buy = 1 (Shift = 16). Merchants deliver on a delay.",
-                L + 8, guiTop + H - 12, 0x808080);
+
+        // ORDER FOOTER: the pending list -> CONFIRM = charge once, ONE merchant cart on the map.
+        if (order.isEmpty()) {
+            fontRenderer.drawString("§7Add = 1 (Shift = 16). CONFIRM sends one merchant cart.",
+                    L + 8, guiTop + H - 12, 0x808080);
+        } else {
+            int items = 0;
+            double cost = 0;
+            for (java.util.Map.Entry<String, Integer> e : order.entrySet()) {
+                items += e.getValue();
+                cost += priceOf(s, e.getKey()) * e.getValue();
+            }
+            fontRenderer.drawString("§6Order: §f" + items + " item(s) §6= §f" + fmt((float) cost) + " CB",
+                    L + 8, guiTop + H - 24, 0xFFD54F);
+            int cx1 = L + W - 118, cx2 = L + W - 64;
+            drawRect(cx1, guiTop + H - 26, cx2, guiTop + H - 14, 0xFF1B5E20);
+            fontRenderer.drawString("CONFIRM", cx1 + 5, guiTop + H - 24, 0xFFFFFF);
+            hits.add(new Hit(cx1, guiTop + H - 26, cx2, guiTop + H - 14, -2, 0, null));
+            int rx1 = L + W - 58, rx2 = L + W - 10;
+            drawRect(rx1, guiTop + H - 26, rx2, guiTop + H - 14, 0xFF4E1010);
+            fontRenderer.drawString("CLEAR", rx1 + 9, guiTop + H - 24, 0xFFAAAA);
+            hits.add(new Hit(rx1, guiTop + H - 26, rx2, guiTop + H - 14, -3, 0, null));
+            fontRenderer.drawString("§7Cart unloads into your warehouse; track it on the Civilian map.",
+                    L + 8, guiTop + H - 12, 0x808080);
+        }
+    }
+
+    private static float priceOf(S2CTradeSync s, String id) {
+        for (S2CTradeSync.Row r : s.rows) if (r.id.equals(id)) return r.price;
+        return 0;
     }
 
     private void drawSell(S2CTradeSync s, int L, int top) {
@@ -197,7 +231,8 @@ public class GuiTradeDepot extends GuiContainer {
     }
 
     private void scrollHint(int L, int total) {
-        if (total > VISIBLE) fontRenderer.drawString("§7scroll ▲▼", L + W - 56, guiTop + 20, 0x808080);
+        // Bottom-right, clear of the tab bar (it used to sit under the Agreements tab).
+        if (total > VISIBLE) fontRenderer.drawString("§7scroll ▲▼", L + W - 56, guiTop + H - 12, 0x808080);
     }
 
     private void icon(String id, int x, int y) {
@@ -233,8 +268,20 @@ public class GuiTradeDepot extends GuiContainer {
         for (Hit h : new ArrayList<>(hits)) {
             if (!h.in(mouseX, mouseY)) continue;
             if (h.op == -1) { tab = h.count; scroll = 0; return; }
+            if (h.op == -2) { // CONFIRM: the whole list, one packet, one cart
+                if (!order.isEmpty()) {
+                    TacticalWarMapNetwork.sendToServer(C2STradeAction.order(order, depot));
+                    order.clear();
+                }
+                return;
+            }
+            if (h.op == -3) { order.clear(); return; }
             int count = h.count;
             if (h.op == C2STradeAction.BUY && isShiftKeyDown()) count = 16;
+            if (h.op == C2STradeAction.BUY) {
+                order.merge(h.id, count, Integer::sum); // build the list; nothing is charged yet
+                return;
+            }
             TacticalWarMapNetwork.sendToServer(new C2STradeAction(h.op, h.id, count, depot));
             return; // server replies with a fresh sync
         }
