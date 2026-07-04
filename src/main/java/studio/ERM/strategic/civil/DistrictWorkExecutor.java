@@ -526,6 +526,13 @@ public final class DistrictWorkExecutor {
             return;
         }
 
+        // LUMBER (tree farm): keep the forest sustainable — plant a SAPLING from the depot on bare
+        // ground near the worker so the district reforests itself as it's felled. The produced logs
+        // are still the output table. (Fruit/tree mode toggle with distinct tables is a later pass.)
+        if (district.kind == CivilMarker.LUMBER) {
+            workLumberReplant(world, worker.getPosition(), DistrictRegistry.depotOf(world, district));
+        }
+
         String key = district.configKey();
         if (RNG.nextDouble() >= DistrictOutputConfig.rateCoefficient(key)) return;
 
@@ -675,6 +682,41 @@ public final class DistrictWorkExecutor {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Tree-farm replant: if bare grass/dirt sits near the worker and the depot holds a SAPLING, plant
+     * one (consuming it) so the wood district reseeds itself instead of clear-cutting to nothing.
+     * Purely for sustainability + the look of a managed forest; the yield is still the output table.
+     */
+    private static void workLumberReplant(WorldServer world, BlockPos feet, TileEntityDistrictMarker depot) {
+        if (depot == null) return;
+        BlockPos bare = null;
+        for (int dx = -3; dx <= 3 && bare == null; dx++) {
+            for (int dz = -3; dz <= 3 && bare == null; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    BlockPos g = feet.add(dx, dy, dz);
+                    if (!world.isBlockLoaded(g, false)) continue;
+                    net.minecraft.block.material.Material m = world.getBlockState(g).getMaterial();
+                    if ((m == net.minecraft.block.material.Material.GRASS
+                            || m == net.minecraft.block.material.Material.GROUND)
+                            && world.isAirBlock(g.up()) && world.getLight(g.up()) >= 8) {
+                        bare = g.up(); break;
+                    }
+                }
+            }
+        }
+        if (bare == null) return;
+        for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
+            ItemStack s = depot.depot.getStackInSlot(slot);
+            if (s.isEmpty()) continue;
+            net.minecraft.block.Block b = net.minecraft.block.Block.getBlockFromItem(s.getItem());
+            if (!(b instanceof net.minecraft.block.BlockSapling)) continue;
+            world.setBlockState(bare, b.getStateFromMeta(s.getMetadata()), 2);
+            s.shrink(1);
+            depot.depot.setStackInSlot(slot, s.isEmpty() ? ItemStack.EMPTY : s);
+            return;
         }
     }
 
