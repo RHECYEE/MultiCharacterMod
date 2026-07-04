@@ -145,6 +145,68 @@ public final class SkinPoolManager {
         }
     }
 
+    /**
+     * Wire the modern-era skin pools (WWI/WWII/modern) into the system at runtime, independent of any
+     * existing config file: registers the homosapien era skin source, defines the soldier/worker era
+     * pools, and re-points rival levels 6→WWI and 7→WWII for soldiers. Idempotent; call once in init.
+     * Curated + split by look: ww1sol/ww2sol (soldiers), ww2wrk/modwrk (workers).
+     */
+    public static void ensureEraSkins() {
+        SkinPoolConfig.additionalSkinSources = withEntry(SkinPoolConfig.additionalSkinSources,
+                "homosapien:textures/entity/skins/era");
+        SkinPoolConfig.pools = withPools(SkinPoolConfig.pools, new String[]{
+                "ww1sol=ww1sol_", "ww2sol=ww2sol_", "ww2wrk=ww2wrk_", "modwrk=modwrk_",
+                "era_soldiers=ww1sol_,ww2sol_", "era_workers=ww2wrk_,modwrk_"});
+        SkinPoolConfig.rivalLevelPools = withRival(SkinPoolConfig.rivalLevelPools, 6, "ww1sol");
+        SkinPoolConfig.rivalLevelPools = withRival(SkinPoolConfig.rivalLevelPools, 7, "ww2sol");
+        rebuildPools();
+        LOG.info("[ERM-Skins] Era skins wired (WWI L6 / WWII L7 soldiers; WWII+modern workers).");
+    }
+
+    /**
+     * The era-appropriate pool for a rival level, split by role: SOLDIERS get WWI (L6) / WWII (L7)
+     * military looks (fantasy soldiers otherwise, since no modern-soldier assets were provided);
+     * WORKERS get WWII (L7) / modern (L8+) civilian looks (fantasy civilians below L7).
+     */
+    public static String eraPoolFor(int level, boolean military) {
+        if (military) {
+            if (level == 6) return "ww1sol";
+            if (level == 7) return "ww2sol";
+            return "soldiers";
+        }
+        if (level == 7) return "ww2wrk";
+        if (level >= 8) return "modwrk";
+        return "civilians";
+    }
+
+    private static String[] withEntry(String[] arr, String entry) {
+        for (String e : arr) if (e != null && e.equalsIgnoreCase(entry)) return arr;
+        List<String> list = new ArrayList<>(Arrays.asList(arr));
+        list.add(entry);
+        return list.toArray(new String[0]);
+    }
+
+    private static String[] withPools(String[] arr, String[] adds) {
+        List<String> list = new ArrayList<>(Arrays.asList(arr));
+        for (String add : adds) {
+            String name = add.split("=", 2)[0].trim();
+            boolean present = false;
+            for (String e : list) if (e.split("=", 2)[0].trim().equalsIgnoreCase(name)) { present = true; break; }
+            if (!present) list.add(add);
+        }
+        return list.toArray(new String[0]);
+    }
+
+    private static String[] withRival(String[] arr, int level, String pool) {
+        List<String> list = new ArrayList<>(Arrays.asList(arr));
+        String prefix = level + "=";
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).trim().startsWith(prefix)) { list.set(i, level + "=" + pool); return list.toArray(new String[0]); }
+        }
+        list.add(level + "=" + pool);
+        return list.toArray(new String[0]);
+    }
+
     private static void buildPool(String poolName, String prefixesRaw) {
         List<SkinEntry> all = getAllSkins();
         List<SkinEntry> matching = new ArrayList<>();

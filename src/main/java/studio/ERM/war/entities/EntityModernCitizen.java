@@ -248,7 +248,13 @@ public class EntityModernCitizen extends EntityCreature implements ISkinnable {
 
     @Override
     public String getDefaultPoolName() {
-        return "soldiers";
+        // Split by role at the world's rival level: military citizens get the era SOLDIER look,
+        // everyone else the era WORKER look (WWI L6 / WWII L7 / modern L8+).
+        int level = 1;
+        try { level = studio.ERM.strategic.civil.DistrictRegistry.rivalLevel(world); } catch (Throwable ignored) {}
+        boolean military = currentJob == studio.ERM.war.districts.DistrictType.DEFENSE
+                || currentJob == studio.ERM.war.districts.DistrictType.MILITARY;
+        return studio.ERM.war.skins.SkinPoolManager.eraPoolFor(level, military);
     }
 
     @Override

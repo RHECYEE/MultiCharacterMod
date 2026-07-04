@@ -262,6 +262,10 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.evac.EvacuationManager.class);
             logger.info("[Strategic] evacuation manager registered");
 
+            // Modern-era worker/soldier skins (WWI L6 / WWII L7 / modern L8+), wired at runtime so it
+            // works regardless of any existing erm_skins.cfg.
+            studio.ERM.war.skins.SkinPoolManager.ensureEraSkins();
+
             // MODERN-WAR SOUNDBOARD — layered AW2 sound recipes for modern weapons (its tick scheduler
             // drives the delayed layers; every cue no-ops cleanly if AW2 is absent).
             MinecraftForge.EVENT_BUS.register(studio.ERM.war.sound.WarSoundboard.class);

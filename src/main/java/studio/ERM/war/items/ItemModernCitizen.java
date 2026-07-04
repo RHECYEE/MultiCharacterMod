@@ -29,10 +29,9 @@ public class ItemModernCitizen extends Item {
             citizen.setPosition(pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5);
             world.spawnEntity(citizen);
 
-            // Roll an AW2 skin so the citizen renders a real soldier/civilian texture
-            // instead of the default missing-texture biped. setSkinKey() is DataParameter-backed,
-            // so this propagates to every tracking client automatically.
-            studio.ERM.war.skins.SkinPoolManager.applySkinFromPool(citizen, "soldiers", world.rand);
+            // Roll a skin from the citizen's DEFAULT pool (era + role aware: worker vs soldier by job
+            // and rival level). setSkinKey() is DataParameter-backed, so it propagates to clients.
+            studio.ERM.war.skins.SkinPoolManager.applySkinFromPool(citizen, world.rand);
 
             if (!player.capabilities.isCreativeMode) {
                 player.getHeldItem(hand).shrink(1);
