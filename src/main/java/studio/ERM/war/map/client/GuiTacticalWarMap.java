@@ -149,6 +149,14 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int missionMenuX, missionMenuY, missionWorldX, missionWorldZ;
     private static final String[] MISSION_NAMES = {"Hunting Party"};
 
+    // NATION DIPLOMACY DROPDOWN (Claims tab): click a nation's land to open Send Envoy / Buy Claim /
+    // Purchase Trade Agreement.
+    private boolean diploMenuOpen = false;
+    private int diploMenuX, diploMenuY;
+    private String diploNation = "";
+    private static final String[] DIPLO_NAMES = {"Send Envoy", "Buy Claim", "Purchase Trade Agreement"};
+    private static final int DIPLO_W = 132;
+
     // ==================== Status Messages ====================
     private String statusMessage = "";
     private long statusExpiry = 0;
@@ -277,6 +285,17 @@ public class GuiTacticalWarMap extends GuiScreen {
 
     @Override
     protected void mouseClicked(int mouseX, int mouseY, int mouseButton) throws IOException {
+        // NATION DIPLOMACY DROPDOWN eats clicks while open.
+        if (diploMenuOpen) {
+            int row = diploRowAt(mouseX, mouseY);
+            if (mouseButton == 0 && row >= 0) {
+                TacticalWarMapNetwork.sendToServer(new studio.ERM.war.map.net.C2SDiplomacyAction(row, diploNation));
+                setStatus(TextFormatting.AQUA + DIPLO_NAMES[row] + " → " + diploNation + "…");
+            }
+            diploMenuOpen = false;
+            return;
+        }
+
         // Deploy menu intercepts first
         // STRATEGIC MISSION MENU eats clicks while open.
         if (missionMenuOpen) {
@@ -529,6 +548,20 @@ public class GuiTacticalWarMap extends GuiScreen {
                 selectCurrentMouseY = mouseY;
                 pendingSelection.clear();
                 updateSelectionPreview();
+                return;
+            }
+        }
+
+        // CLAIMS tab: a plain left-click on a NATION STATE's land opens the diplomacy dropdown.
+        if (activeTab == 0 && mouseButton == 0 && !GuiScreen.isShiftKeyDown() && isOnCanvas(mouseX, mouseY)) {
+            int[] w = screenToWorld(mouseX, mouseY);
+            String owner = studio.ERM.war.map.client.ClientTerritoryCache.getOwner(
+                    new net.minecraft.util.math.ChunkPos(w[0] >> 4, w[1] >> 4));
+            if (owner != null && owner.startsWith("NATION:")) {
+                diploNation = owner.substring("NATION:".length());
+                diploMenuX = Math.min(mouseX, canvasLeft + canvasSize - DIPLO_W);
+                diploMenuY = Math.min(mouseY, canvasTop + canvasSize - 60);
+                diploMenuOpen = true;
                 return;
             }
         }
@@ -805,6 +838,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         // Draw deploy menu
         deployMenu.draw(mouseX, mouseY, fontRenderer);
         drawMissionMenu(mouseX, mouseY);
+        drawDiploMenu(mouseX, mouseY);
 
         // Marker properties panel (drawn on top of everything on the Military tab).
         if (activeTab == 2 && panelUid != -1) drawMarkerPanel();
@@ -1670,6 +1704,37 @@ public class GuiTacticalWarMap extends GuiScreen {
                     (i == hover) ? 0xCC2C3A47 : 0x9910101E);
             fontRenderer.drawStringWithShadow(MISSION_NAMES[i], x0 + 5, ry + 3, 0xFFE0E0E0);
         }
+    }
+
+    // ==================== Nation diplomacy dropdown ====================
+
+    private int diploRowAt(int mx, int my) {
+        if (!diploMenuOpen) return -1;
+        int y0 = diploMenuY + 12;
+        if (mx < diploMenuX || mx >= diploMenuX + DIPLO_W) return -1;
+        int row = (my - y0) / MISSION_ROW_H;
+        return (row >= 0 && row < DIPLO_NAMES.length) ? row : -1;
+    }
+
+    private void drawDiploMenu(int mouseX, int mouseY) {
+        if (!diploMenuOpen) return;
+        int x0 = diploMenuX, y0 = diploMenuY;
+        int h = 12 + DIPLO_NAMES.length * MISSION_ROW_H + 2;
+        Gui.drawRect(x0, y0, x0 + DIPLO_W, y0 + h, 0xF2101018);
+        Gui.drawRect(x0, y0, x0 + DIPLO_W, y0 + 11, 0xFF1F2E3A);
+        Gui.drawRect(x0, y0, x0 + DIPLO_W, y0 + 1, 0xFF80D8FF);
+        fontRenderer.drawStringWithShadow(TextFormatting.AQUA + trimTo(diploNation, 20), x0 + 3, y0 + 2, 0xFF80D8FF);
+        int hover = diploRowAt(mouseX, mouseY);
+        for (int i = 0; i < DIPLO_NAMES.length; i++) {
+            int ry = y0 + 12 + i * MISSION_ROW_H;
+            Gui.drawRect(x0 + 1, ry, x0 + DIPLO_W - 1, ry + MISSION_ROW_H - 1,
+                    (i == hover) ? 0xCC2C3A47 : 0x9910101E);
+            fontRenderer.drawStringWithShadow(DIPLO_NAMES[i], x0 + 5, ry + 3, 0xFFE0E0E0);
+        }
+    }
+
+    private static String trimTo(String s, int max) {
+        return s != null && s.length() > max ? s.substring(0, max - 1) + "…" : (s == null ? "" : s);
     }
 
     private String[] toolNames() {

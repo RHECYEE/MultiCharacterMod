@@ -41,6 +41,8 @@ public final class TacticalWarMapNetwork {
                 C2SResearchAction.Handler.class, C2SResearchAction.class, nextId++, Side.SERVER);
         EpochRunnerMod.network.registerMessage(
                 C2SEvacuationToggle.Handler.class, C2SEvacuationToggle.class, nextId++, Side.SERVER);
+        EpochRunnerMod.network.registerMessage(
+                C2SDiplomacyAction.Handler.class, C2SDiplomacyAction.class, nextId++, Side.SERVER);
 
         // Server -> Client
         EpochRunnerMod.network.registerMessage(
