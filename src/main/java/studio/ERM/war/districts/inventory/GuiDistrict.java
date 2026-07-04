@@ -42,8 +42,10 @@ public class GuiDistrict extends GuiContainer {
         this.container = (ContainerDistrict) inventorySlots;
         this.pos = te.getPos();
         this.xSize = 196;
-        this.ySize = 278;
+        this.ySize = 294;
     }
+
+    private GuiButton lumberModeButton;
 
     @Override
     public void initGui() {
@@ -51,6 +53,13 @@ public class GuiDistrict extends GuiContainer {
         buttonList.clear();
         addButton(new GuiButton(0, guiLeft + xSize - 58, guiTop + 14, 14, 14, "-"));
         addButton(new GuiButton(1, guiLeft + xSize - 22, guiTop + 14, 14, 14, "+"));
+        // Lumber districts get a Tree Farm / Fruit Farm mode toggle.
+        lumberModeButton = addButton(new GuiButton(2, guiLeft + 8, guiTop + 28, xSize - 16, 14, lumberModeLabel()));
+    }
+
+    private String lumberModeLabel() {
+        return "Mode: " + (container.subMode == 1 ? "Fruit Farm (grows orchard, yields fruit)"
+                                                   : "Tree Farm (fells + replants for logs)");
     }
 
     @Override
@@ -60,6 +69,8 @@ public class GuiDistrict extends GuiContainer {
             TacticalWarMapNetwork.sendToServer(new C2SDistrictDepotEdit(pos, -step));
         } else if (button.id == 1) {
             TacticalWarMapNetwork.sendToServer(new C2SDistrictDepotEdit(pos, step));
+        } else if (button.id == 2) {
+            TacticalWarMapNetwork.sendToServer(C2SDistrictDepotEdit.toggleSubMode(pos, 2));
         }
     }
 
@@ -107,6 +118,11 @@ public class GuiDistrict extends GuiContainer {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        // The Tree/Fruit toggle only applies to Lumber districts; keep its label in sync.
+        if (lumberModeButton != null) {
+            lumberModeButton.visible = container.districtKind == CivilMarker.LUMBER;
+            lumberModeButton.displayString = lumberModeLabel();
+        }
         drawDefaultBackground();
         super.drawScreen(mouseX, mouseY, partialTicks);
         renderHoveredToolTip(mouseX, mouseY);

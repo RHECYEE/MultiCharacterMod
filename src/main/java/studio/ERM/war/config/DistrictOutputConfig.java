@@ -156,6 +156,15 @@ public final class DistrictOutputConfig {
                 .withTools(new ToolEntry("minecraft:stone_axe", 1),
                            new ToolEntry("minecraft:iron_axe", 2),
                            new ToolEntry("minecraft:diamond_axe", 3)));
+        // FRUIT FARM mode of a Lumber district (depot sub-mode 1): trees stay standing, yielding fruit.
+        d.put("lumber_fruit", new DistrictTable(0.7,
+                new OutputEntry(0, "minecraft:apple", 100),
+                new OutputEntry(0, "minecraft:sapling", 15),
+                new OutputEntry(1, "minecraft:chorus_fruit", 8),
+                new OutputEntry(2, "minecraft:melon", 20),
+                new OutputEntry(2, "minecraft:dye:3", 15))  // cocoa beans
+                .withTools(new ToolEntry("minecraft:iron_axe", 1),
+                           new ToolEntry("minecraft:diamond_axe", 2)));
         d.put("farm", new DistrictTable(0.9,
                 new OutputEntry(0, "minecraft:wheat", 100),
                 new OutputEntry(0, "minecraft:carrot", 40),

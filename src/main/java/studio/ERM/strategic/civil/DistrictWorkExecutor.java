@@ -446,8 +446,12 @@ public final class DistrictWorkExecutor {
                             if (mat == Material.WATER) hits += 2;
                             break;
                         case CivilMarker.LUMBER:
+                            // A tree farm works standing wood/leaves AND bare ground it can plant on,
+                            // so a fresh (treeless) district can still be forested from saplings.
                             if (mat == Material.WOOD) hits += 2;
                             else if (mat == Material.LEAVES) hits += 1;
+                            else if ((mat == Material.GRASS || mat == Material.GROUND)
+                                    && world.isAirBlock(p.up())) hits += 1;
                             break;
                         case CivilMarker.FARM:
                             // Tilled soil or crops ONLY — wild grass/flowers are not farm work.
@@ -533,23 +537,30 @@ public final class DistrictWorkExecutor {
             return;
         }
 
-        // LUMBER (tree farm): keep the forest sustainable — plant a SAPLING from the depot on bare
-        // ground near the worker so the district reforests itself as it's felled. The produced logs
-        // are still the output table. (Fruit/tree mode toggle with distinct tables is a later pass.)
+        // LUMBER: a managed TREE FARM or FRUIT FARM (depot sub-mode toggle). Both plant saplings from
+        // the depot to forest the interior; Tree Farm fells mature logs for the "lumber" table, Fruit
+        // Farm leaves the trees standing and harvests the "lumber_fruit" table.
         if (district.kind == CivilMarker.LUMBER) {
-            workLumberReplant(world, worker.getPosition(), DistrictRegistry.depotOf(world, district));
+            TileEntityDistrictMarker ld = DistrictRegistry.depotOf(world, district);
+            workLumber(world, worker, district, ld, ld != null && ld.getSubMode() == 1);
+            return;
         }
 
-        String key = district.configKey();
-        if (RNG.nextDouble() >= DistrictOutputConfig.rateCoefficient(key)) return;
+        produceFromTable(world, worker, district, district.configKey());
+    }
 
-        // TOOL BONUS: the best configured tool stocked in the depot lifts the effective rival level
-        // for this roll (better gear unlocks better rows early) and wears a little each yield.
+    /**
+     * Rate-gated roll of a district's output table into the worker's carried pile, with the depot's
+     * best configured tool lifting the effective rival level (and wearing a little). Shared by the
+     * generic districts and the mode-specific lumber path.
+     */
+    private static void produceFromTable(WorldServer world, EntityCreature worker,
+                                         CivilMarker district, String key) {
+        if (RNG.nextDouble() >= DistrictOutputConfig.rateCoefficient(key)) return;
         int level = DistrictRegistry.rivalLevel(world);
         TileEntityDistrictMarker depot = DistrictRegistry.depotOf(world, district);
         int[] tool = depot != null ? DistrictOutputConfig.findBestTool(key, depot.depot) : null;
         int effectiveLevel = level + (tool != null ? tool[1] : 0);
-
         ItemStack yield = DistrictOutputConfig.rollOutput(key, effectiveLevel);
         if (yield.isEmpty()) return;
         if (tool != null && depot != null) DistrictOutputConfig.wearTool(depot.depot, tool[0]);
@@ -557,6 +568,42 @@ public final class DistrictWorkExecutor {
         if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName() + " produced "
                 + yield.getCount() + "x " + yield.getDisplayName()
                 + (tool != null ? " (tool +" + tool[1] + ")" : ""));
+    }
+
+    /**
+     * The managed-forest loop. Always tries to PLANT a sapling from the depot on bare ground near the
+     * worker (foresting the interior). Then, only when a real tree is present:
+     *   TREE FARM  — fell one mature log (visible break) and roll the "lumber" table (logs).
+     *   FRUIT FARM — leave the tree standing and roll the "lumber_fruit" table (fruit).
+     * No tree nearby yet -> it just planted, no yield.
+     */
+    private static void workLumber(WorldServer world, EntityCreature worker, CivilMarker district,
+                                   TileEntityDistrictMarker depot, boolean fruit) {
+        BlockPos feet = worker.getPosition();
+        workLumberReplant(world, feet, depot); // forest the interior from depot saplings
+
+        BlockPos log = null;
+        boolean canopy = false;
+        for (int dx = -3; dx <= 3 && log == null; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                for (int dy = -1; dy <= 4; dy++) {
+                    BlockPos p = feet.add(dx, dy, dz);
+                    if (!world.isBlockLoaded(p, false)) continue;
+                    net.minecraft.block.material.Material m = world.getBlockState(p).getMaterial();
+                    if (m == net.minecraft.block.material.Material.WOOD) { log = p; break; }
+                    if (m == net.minecraft.block.material.Material.LEAVES) canopy = true;
+                }
+                if (log != null) break;
+            }
+        }
+        if (log == null && !canopy) return; // nothing grown yet — only planted this cycle
+
+        if (!fruit && log != null) {
+            // Tree farm fells a log (a sapling was just planted to replace it).
+            world.playEvent(2001, log, net.minecraft.block.Block.getStateId(world.getBlockState(log)));
+            world.setBlockState(log, net.minecraft.init.Blocks.AIR.getDefaultState(), 3);
+        }
+        produceFromTable(world, worker, district, fruit ? "lumber_fruit" : "lumber");
     }
 
     /**
@@ -608,31 +655,42 @@ public final class DistrictWorkExecutor {
     }
 
     /**
-     * QUARRY dig: mine ONE block per cycle near the worker — prefer ore, then rock — collecting the
-     * block's REAL drops into the carried list, and digging downward as upper blocks clear (the
-     * BuildCraft-style descending pit). Bedrock and liquids are skipped; a pickaxe in the depot wears
-     * a little per block. No-op with nothing to mine (featurePresent already gated on rock/ore).
+     * QUARRY dig — a BuildCraft-style descending pit worked one block per cycle, with SUPPLIED TOOLS:
+     *   - requires a pickaxe stocked in the depot (no pickaxe = no mining; the tool wears + can break);
+     *   - clears TOP-DOWN: mines the highest solid block in the worker's 3x3 column so the terrain
+     *     flattens then sinks into a clean pit, but jumps to any ORE in range first;
+     *   - a stone pickaxe won't touch obsidian/diamond-hardness (needs iron+), matching vanilla tiers;
+     *   - carries the block's REAL drops to the depot. Bedrock/liquids skipped.
      */
     private static void workQuarry(WorldServer world, EntityCreature worker, TileEntityDistrictMarker depot) {
+        // TOOLS SUPPLIED: find the best pickaxe in the depot. Without one, the quarry can't work.
+        int pickSlot = bestPickaxeSlot(depot);
+        if (pickSlot < 0) return;
+        net.minecraft.item.ItemStack pick = depot.depot.getStackInSlot(pickSlot);
+        int harvestLevel;
+        try { harvestLevel = pick.getItem().getHarvestLevel(pick, "pickaxe", null, null); }
+        catch (Throwable t) { harvestLevel = 0; }
+
         BlockPos feet = worker.getPosition();
-        BlockPos oreTarget = null, rockTarget = null;
-        // Scan a small column around the worker, topmost-first below the feet.
-        for (int dy = 0; dy >= -4 && oreTarget == null; dy--) {
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dz = -1; dz <= 1; dz++) {
+        BlockPos ore = null, topRock = null;
+        int bestY = Integer.MIN_VALUE;
+        for (int dx = -1; dx <= 1 && ore == null; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dy = 3; dy >= -4; dy--) { // topmost-first per column
                     BlockPos p = feet.add(dx, dy, dz);
-                    if (!world.isBlockLoaded(p, false)) continue;
+                    if (!world.isBlockLoaded(p, false) || world.isAirBlock(p)) continue;
                     net.minecraft.block.state.IBlockState st = world.getBlockState(p);
                     net.minecraft.block.material.Material mat = st.getMaterial();
-                    if (st.getBlock() == net.minecraft.init.Blocks.BEDROCK || mat.isLiquid()
-                            || world.isAirBlock(p)) continue;
-                    if (st.getBlock() instanceof net.minecraft.block.BlockOre) { oreTarget = p; break; }
-                    if (mat == net.minecraft.block.material.Material.ROCK && rockTarget == null) rockTarget = p;
+                    if (st.getBlock() == net.minecraft.init.Blocks.BEDROCK || mat.isLiquid()) continue;
+                    if (st.getBlockHardness(world, p) < 0) continue; // unbreakable
+                    if (!canHarvest(world, p, st, harvestLevel)) continue; // wrong tool tier
+                    if (st.getBlock() instanceof net.minecraft.block.BlockOre) { ore = p; break; }
+                    if (mat == Material.ROCK) { if (p.getY() > bestY) { bestY = p.getY(); topRock = p; } break; }
                 }
-                if (oreTarget != null) break;
+                if (ore != null) break;
             }
         }
-        BlockPos target = oreTarget != null ? oreTarget : rockTarget;
+        BlockPos target = ore != null ? ore : topRock;
         if (target == null) return;
 
         net.minecraft.block.state.IBlockState st = world.getBlockState(target);
@@ -642,22 +700,40 @@ public final class DistrictWorkExecutor {
         world.playEvent(2001, target, net.minecraft.block.Block.getStateId(st)); // break FX
         List<ItemStack> carried = CARRIED.computeIfAbsent(worker.getUniqueID(), u -> new ArrayList<>());
         for (ItemStack d : drops) if (!d.isEmpty()) carried.add(d);
-
-        // Wear a pickaxe from the depot (best-effort; no config table for quarry).
-        if (depot != null) {
-            for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
-                ItemStack s = depot.depot.getStackInSlot(slot);
-                if (!s.isEmpty() && s.getItem() instanceof net.minecraft.item.ItemPickaxe && s.getItem().isDamageable()) {
-                    ItemStack worn = s.copy();
-                    worn.setItemDamage(worn.getItemDamage() + 1);
-                    depot.depot.setStackInSlot(slot,
-                            worn.getItemDamage() > worn.getMaxDamage() ? ItemStack.EMPTY : worn);
-                    break;
-                }
-            }
-        }
+        wearPickaxe(depot, pickSlot);
         if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName()
                 + " quarried " + st.getBlock().getLocalizedName());
+    }
+
+    /** Best (highest harvest level) pickaxe slot in the depot, or -1. */
+    private static int bestPickaxeSlot(TileEntityDistrictMarker depot) {
+        if (depot == null) return -1;
+        int best = -1, bestLvl = -1;
+        for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
+            ItemStack s = depot.depot.getStackInSlot(slot);
+            if (s.isEmpty() || !(s.getItem() instanceof net.minecraft.item.ItemPickaxe)) continue;
+            int lvl;
+            try { lvl = s.getItem().getHarvestLevel(s, "pickaxe", null, null); } catch (Throwable t) { lvl = 0; }
+            if (lvl > bestLvl) { bestLvl = lvl; best = slot; }
+        }
+        return best;
+    }
+
+    private static boolean canHarvest(WorldServer world, BlockPos p,
+                                      net.minecraft.block.state.IBlockState st, int harvestLevel) {
+        try {
+            if (!st.getBlock().getDefaultState().getMaterial().isToolNotRequired()
+                    && st.getBlock().getHarvestLevel(st) > harvestLevel) return false;
+        } catch (Throwable ignored) {}
+        return true;
+    }
+
+    private static void wearPickaxe(TileEntityDistrictMarker depot, int slot) {
+        ItemStack s = depot.depot.getStackInSlot(slot);
+        if (s.isEmpty() || !s.getItem().isDamageable()) return;
+        ItemStack worn = s.copy();
+        worn.setItemDamage(worn.getItemDamage() + 1);
+        depot.depot.setStackInSlot(slot, worn.getItemDamage() > worn.getMaxDamage() ? ItemStack.EMPTY : worn);
     }
 
     /**

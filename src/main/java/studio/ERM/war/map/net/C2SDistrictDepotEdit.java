@@ -17,26 +17,40 @@ import studio.ERM.war.districts.TileEntityDistrictMarker;
  */
 public class C2SDistrictDepotEdit implements IMessage {
 
+    public static final int OP_WORKER_DELTA = 0;
+    public static final int OP_TOGGLE_SUBMODE = 1;
+
     private BlockPos pos = BlockPos.ORIGIN;
-    private int workerDelta;
+    private int op = OP_WORKER_DELTA;
+    private int value; // worker delta, or (for submode) the number of modes to cycle through
 
     public C2SDistrictDepotEdit() {}
 
     public C2SDistrictDepotEdit(BlockPos pos, int workerDelta) {
         this.pos = pos;
-        this.workerDelta = workerDelta;
+        this.op = OP_WORKER_DELTA;
+        this.value = workerDelta;
+    }
+
+    /** Cycle the district's sub-mode (Tree Farm <-> Fruit Farm) among {@code modeCount} modes. */
+    public static C2SDistrictDepotEdit toggleSubMode(BlockPos pos, int modeCount) {
+        C2SDistrictDepotEdit p = new C2SDistrictDepotEdit();
+        p.pos = pos; p.op = OP_TOGGLE_SUBMODE; p.value = modeCount;
+        return p;
     }
 
     @Override
     public void fromBytes(ByteBuf buf) {
         pos = BlockPos.fromLong(buf.readLong());
-        workerDelta = buf.readByte();
+        op = buf.readByte();
+        value = buf.readByte();
     }
 
     @Override
     public void toBytes(ByteBuf buf) {
         buf.writeLong(pos.toLong());
-        buf.writeByte(workerDelta);
+        buf.writeByte(op);
+        buf.writeByte(value);
     }
 
     public static class Handler implements IMessageHandler<C2SDistrictDepotEdit, IMessage> {
@@ -47,9 +61,13 @@ public class C2SDistrictDepotEdit implements IMessage {
                 if (player.getDistanceSq(msg.pos.getX() + 0.5, msg.pos.getY() + 0.5,
                         msg.pos.getZ() + 0.5) > 64.0) return;
                 TileEntity te = player.world.getTileEntity(msg.pos);
-                if (te instanceof TileEntityDistrictMarker) {
-                    TileEntityDistrictMarker depot = (TileEntityDistrictMarker) te;
-                    depot.setDesiredWorkers(depot.getDesiredWorkers() + msg.workerDelta);
+                if (!(te instanceof TileEntityDistrictMarker)) return;
+                TileEntityDistrictMarker depot = (TileEntityDistrictMarker) te;
+                if (msg.op == OP_TOGGLE_SUBMODE) {
+                    int modes = Math.max(1, msg.value);
+                    depot.setSubMode((depot.getSubMode() + 1) % modes);
+                } else {
+                    depot.setDesiredWorkers(depot.getDesiredWorkers() + msg.value);
                 }
             });
             return null;

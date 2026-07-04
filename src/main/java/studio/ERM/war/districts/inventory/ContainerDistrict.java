@@ -32,10 +32,11 @@ public class ContainerDistrict extends Container {
     public static final int PLAYER_START = DEPOT_START + TileEntityDistrictMarker.DEPOT_SLOTS; // 67
     public static final int PLAYER_END = PLAYER_START + 36;                                    // 103
 
-    // Pixel layout shared with GuiDistrict (xSize 196).
-    public static final int TPL_X = 8, IN_Y = 41, OUT_Y = 88;
-    public static final int DEPOT_X = 17, DEPOT_Y = 135;
-    public static final int INV_X = 17, INV_Y = 195, HOTBAR_Y = 253;
+    // Pixel layout shared with GuiDistrict (xSize 196). A 16px row under the worker counter holds the
+    // per-kind option toggle (e.g. Lumber's Tree/Fruit mode), so every section sits 16px lower.
+    public static final int TPL_X = 8, IN_Y = 57, OUT_Y = 104;
+    public static final int DEPOT_X = 17, DEPOT_Y = 151;
+    public static final int INV_X = 17, INV_Y = 211, HOTBAR_Y = 269;
 
     public final TileEntityDistrictMarker te;
     private final EntityPlayer player;
@@ -45,6 +46,7 @@ public class ContainerDistrict extends Container {
     public int districtKind = -1;
     public int districtUidDisplay = 0;
     public int rivalLevel = 1;
+    public int subMode = 0; // LUMBER: 0 = Tree Farm, 1 = Fruit Farm
 
     public ContainerDistrict(EntityPlayer player, TileEntityDistrictMarker te) {
         this.player = player;
@@ -154,16 +156,19 @@ public class ContainerDistrict extends Container {
         CivilMarker district = DistrictRegistry.byUid(player.world, te.getDistrictUid());
         if (district != null) { kind = district.kind; uidDisp = district.uid & 0xFFFF; }
         int rl = DistrictRegistry.rivalLevel(player.world);
+        int sm = te.getSubMode();
         for (IContainerListener l : listeners) {
             if (workers != desiredWorkers) l.sendWindowProperty(this, 0, workers);
             if (kind != districtKind) l.sendWindowProperty(this, 1, kind);
             if (uidDisp != districtUidDisplay) l.sendWindowProperty(this, 2, uidDisp);
             if (rl != rivalLevel) l.sendWindowProperty(this, 3, rl);
+            if (sm != subMode) l.sendWindowProperty(this, 4, sm);
         }
         desiredWorkers = workers;
         districtKind = kind;
         districtUidDisplay = uidDisp;
         rivalLevel = rl;
+        subMode = sm;
     }
 
     @Override
@@ -177,6 +182,7 @@ public class ContainerDistrict extends Container {
         listener.sendWindowProperty(this, 2, district != null ? district.uid & 0xFFFF : 0);
         listener.sendWindowProperty(this, 3,
                 player.world.isRemote ? 1 : DistrictRegistry.rivalLevel(player.world));
+        listener.sendWindowProperty(this, 4, te.getSubMode());
     }
 
     @Override
@@ -186,6 +192,7 @@ public class ContainerDistrict extends Container {
             case 1: districtKind = value; break;
             case 2: districtUidDisplay = value; break;
             case 3: rivalLevel = value; break;
+            case 4: subMode = value; break;
             default: break;
         }
     }

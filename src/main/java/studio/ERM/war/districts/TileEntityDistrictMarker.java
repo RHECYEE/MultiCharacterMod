@@ -45,6 +45,8 @@ public class TileEntityDistrictMarker extends TileEntity {
 
     private int desiredWorkers = 4;
     private int districtUid = -1;
+    /** District sub-mode toggle (currently: LUMBER 0 = Tree Farm, 1 = Fruit Farm). */
+    private int subMode = 0;
 
     public DistrictType getDistrictType() {
         return districtType;
@@ -77,6 +79,10 @@ public class TileEntityDistrictMarker extends TileEntity {
         return districtUid != -1;
     }
 
+    public int getSubMode() { return subMode; }
+
+    public void setSubMode(int m) { this.subMode = Math.max(0, m); markDirty(); }
+
     // ------------------------------------------------------------------
     // Capabilities: hoppers/pipes see ONLY the real depot inventory.
     // ------------------------------------------------------------------
@@ -107,6 +113,7 @@ public class TileEntityDistrictMarker extends TileEntity {
         compound.setTag("outTpl", outTemplates.serializeNBT());
         compound.setInteger("workers", desiredWorkers);
         compound.setInteger("districtUid", districtUid);
+        compound.setInteger("subMode", subMode);
         return compound;
     }
 
@@ -125,5 +132,6 @@ public class TileEntityDistrictMarker extends TileEntity {
         if (compound.hasKey("outTpl")) outTemplates.deserializeNBT(compound.getCompoundTag("outTpl"));
         if (compound.hasKey("workers")) desiredWorkers = compound.getInteger("workers");
         districtUid = compound.hasKey("districtUid") ? compound.getInteger("districtUid") : -1;
+        subMode = compound.getInteger("subMode");
     }
 }
