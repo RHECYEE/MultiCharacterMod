@@ -315,6 +315,15 @@ public class GuiTacticalWarMap extends GuiScreen {
             }
         }
 
+        // EVACUATE button (Civilian tab sidebar): toggle the civilian evacuation.
+        if (activeTab == 1 && mouseButton == 0 && isOnEvacButton(mouseX, mouseY)) {
+            TacticalWarMapNetwork.sendToServer(new studio.ERM.war.map.net.C2SEvacuationToggle());
+            boolean now = !studio.ERM.war.map.client.ClientStrategicCache.evacActive();
+            setStatus(now ? TextFormatting.RED + "EVACUATION ordered — civilians moving to shelter."
+                          : TextFormatting.GREEN + "Evacuation stood down.");
+            return;
+        }
+
         // TOOL LIST (left of the canvas, Military + Civilian tabs): click a row to select that
         // tool. Row 0 is the tab's "no tool" mode (Troop Allocation / Inspect); switching tools
         // commits anything mid-draw, same as the old P-cycle did.
@@ -755,6 +764,10 @@ public class GuiTacticalWarMap extends GuiScreen {
         }
         if (activeTab == 1) drawCivilPlan();
 
+        // CITIZEN DOTS (Civilian tab): every loaded civilian worker as a white fleck — the city's
+        // life, visible at a glance (mirror of the Military tab's green soldier dots).
+        if (activeTab == 1) drawCitizenDots();
+
         // LIVE UNIT DOTS (Military tab): every loaded friendly soldier + red enemy dots.
         if (activeTab == 2) drawUnitDots();
 
@@ -787,6 +800,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         // The military side panel: units assigned X/Y + control reminders. Anchors BELOW the sidebar
         // chrome (drawn after it so sidebarEndY is current-frame accurate -- no more Legend overlap).
         if (activeTab == 2) drawMilitaryPanel();
+        if (activeTab == 1) drawEvacPanel(mouseX, mouseY);
 
         // Draw deploy menu
         deployMenu.draw(mouseX, mouseY, fontRenderer);
@@ -1065,7 +1079,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         String label = (claimDragging ? "CLAIM: " : "UNCLAIM: ") + pendingSelection.size() + " chunks";
         if (claimDragging) {
             int cost = pendingSelection.size() * WarClaimHandler.CLAIM_COST_BASE;
-            label += " (" + cost + " CP)";
+            label += " (" + cost + " CB)";
         }
         fontRenderer.drawStringWithShadow(label, x1 + 2, y1 - 10, claimDragging ? 0xFF00FF00 : 0xFFFF4444);
     }
@@ -1217,6 +1231,37 @@ public class GuiTacticalWarMap extends GuiScreen {
         for (int i = 0; i < lines.length; i++) {
             fontRenderer.drawStringWithShadow(lines[i], x0, y0 + i * 10, 0xFFFFFFFF);
         }
+    }
+
+    /** Sidebar EVACUATE button bounds (Civilian tab), below the chrome column. */
+    private int[] evacButtonBounds() {
+        int x0 = canvasLeft + canvasSize + 6;
+        int y0 = (sidebarEndY > 0 ? sidebarEndY : canvasTop + 240) + 8;
+        return new int[]{x0 - 3, y0 - 3, x0 + SIDEBAR_WIDTH - 6, y0 + 25};
+    }
+
+    private boolean isOnEvacButton(int mx, int my) {
+        int[] b = evacButtonBounds();
+        return mx >= b[0] && mx < b[2] && my >= b[1] && my < b[3];
+    }
+
+    /** The Civilian-tab EVACUATION toggle: red when an evacuation is under way. */
+    private void drawEvacPanel(int mouseX, int mouseY) {
+        boolean evac = studio.ERM.war.map.client.ClientStrategicCache.evacActive();
+        int[] b = evacButtonBounds();
+        boolean hover = isOnEvacButton(mouseX, mouseY);
+        int bg = evac ? 0xEEB71C1C : (hover ? 0xEE37474F : 0xEE263238);
+        Gui.drawRect(b[0], b[1], b[2], b[3], bg);
+        Gui.drawRect(b[0], b[1], b[2], b[1] + 1, 0xFFFFFFFF);
+        Gui.drawRect(b[0], b[3] - 1, b[2], b[3], 0xFF000000);
+        String label = evac ? "EVACUATING!" : "EVACUATE";
+        int tw = fontRenderer.getStringWidth(label);
+        fontRenderer.drawStringWithShadow(label, b[0] + (b[2] - b[0] - tw) / 2f, b[1] + 4,
+                evac ? 0xFFFFCDD2 : 0xFFFF8A80);
+        String sub = evac ? "click to stand down" : "send civilians to shelter";
+        int sw = fontRenderer.getStringWidth(sub);
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + sub, b[0] + (b[2] - b[0] - sw) / 2f,
+                b[1] + 15, 0xFFAAAAAA);
     }
 
     private boolean onCanvasPoint(int[] scr) {
@@ -1557,6 +1602,16 @@ public class GuiTacticalWarMap extends GuiScreen {
         fontRenderer.drawStringWithShadow(tool, b[0], b[3] + 3, planMode < 0 ? 0xFFFFD54F : 0xFF00E5FF);
     }
 
+    /** White citizen dots: the player's civilian workers, live on the Civilian tab. */
+    private void drawCitizenDots() {
+        int[] cd = studio.ERM.war.map.client.ClientStrategicCache.citizenDots();
+        for (int i = 0; i + 1 < cd.length; i += 2) {
+            int[] scr = worldToScreen(cd[i], cd[i + 1]);
+            if (scr == null || !onCanvasPoint(scr)) continue;
+            Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 1, scr[1] + 1, 0xFFFFFFFF);
+        }
+    }
+
     /** Civilian tab's active-tool readout (top-left of the canvas, under the tab bar). */
     private void drawCivilToolReadout() {
         String tool = (civilMode < 0)
@@ -1671,7 +1726,10 @@ public class GuiTacticalWarMap extends GuiScreen {
                 if (scr != null && onCanvasPoint(scr)) {
                     drawItemIcon(civToolIcons[Math.min(m.kind + 1, civToolIcons.length - 1)],
                             scr[0], scr[1], 0);
-                    String label = studio.ERM.strategic.civil.CivilMarker.nameOf(m.kind);
+                    // A district without a bound District Marker block cannot hire ANY workers —
+                    // say so on the map instead of leaving "workers free but idle" a mystery.
+                    String label = studio.ERM.strategic.civil.CivilMarker.nameOf(m.kind)
+                            + (m.hasDepot() ? "" : " §c⚠ no depot");
                     int tw = fontRenderer.getStringWidth(label);
                     fontRenderer.drawStringWithShadow(label, scr[0] - tw / 2f, scr[1] + 8, color);
                 }
@@ -1728,16 +1786,18 @@ public class GuiTacticalWarMap extends GuiScreen {
             int[] s = worldToScreen(j.sx, j.sz);
             int[] d = worldToScreen(j.dx, j.dz);
             if (s == null || d == null) continue;
+            boolean shipment = j.state == 3; // trade cart: teal, REAL progress
             boolean assigned = j.state != 0; // CourierJob.STATE_PENDING
-            int color = assigned ? 0xCCFFC107 : 0x66B0BEC5;
+            int color = shipment ? 0xCC26A69A : assigned ? 0xCCFFC107 : 0x66B0BEC5;
             drawMapLine(s[0], s[1], d[0], d[1], color, assigned ? 2.0F : 1.0F);
             if (assigned) {
-                // The travelling dot: source -> destination on a shared clock, offset per job.
-                double t = ((System.currentTimeMillis() / 30 + i * 33) % 100) / 100.0;
+                // The travelling dot: real progress for shipments, shared-clock loop for couriers.
+                double t = (shipment && j.progress >= 0) ? j.progress / 100.0
+                        : ((System.currentTimeMillis() / 30 + i * 33) % 100) / 100.0;
                 int px = (int) (s[0] + (d[0] - s[0]) * t);
                 int py = (int) (s[1] + (d[1] - s[1]) * t);
                 if (onCanvasPoint(new int[]{px, py})) {
-                    Gui.drawRect(px - 1, py - 1, px + 2, py + 2, 0xFFFFE082);
+                    Gui.drawRect(px - 2, py - 2, px + 3, py + 3, shipment ? 0xFF80CBC4 : 0xFFFFE082);
                 }
             }
             if (hoverLabel == null
@@ -2089,7 +2149,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         sideY += 14;
 
         Integer cp = WarMapClientStats.getCommandPointsOrNull();
-        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "CP: " + TextFormatting.GOLD +
+        fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "CB: " + TextFormatting.GOLD +
                 (cp != null ? cp : "?"), sideX, sideY, 0xFFFFFFFF);
         sideY += 12;
 

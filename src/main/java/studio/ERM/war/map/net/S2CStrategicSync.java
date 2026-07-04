@@ -31,17 +31,22 @@ public class S2CStrategicSync implements IMessage {
     // besiegers; later narrowed to KNOWN/SEEN enemies). Flat x,z pairs, capped server-side.
     private int[] friendlyDots = new int[0];
     private int[] enemyDots = new int[0];
+    // CITIZEN DOTS: the player's civilian workers, white on the Civilian tab (the city's life).
+    private int[] citizenDots = new int[0];
     // SIEGE ALERT: "enemy camp gathering here" banner position while a battle is active.
     private boolean siegeActive = false;
     private int siegeX, siegeZ;
+    // EVACUATION: whether a civilian evacuation is currently ordered (drives the map's EVACUATE button).
+    public boolean evacActive = false;
 
     public S2CStrategicSync() {}
 
     public S2CStrategicSync(List<Data> objects, int[] friendlyDots, int[] enemyDots,
-                            boolean siegeActive, int siegeX, int siegeZ) {
+                            int[] citizenDots, boolean siegeActive, int siegeX, int siegeZ) {
         this.objects = objects != null ? objects : new ArrayList<>();
         this.friendlyDots = friendlyDots != null ? friendlyDots : new int[0];
         this.enemyDots = enemyDots != null ? enemyDots : new int[0];
+        this.citizenDots = citizenDots != null ? citizenDots : new int[0];
         this.siegeActive = siegeActive;
         this.siegeX = siegeX;
         this.siegeZ = siegeZ;
@@ -63,9 +68,11 @@ public class S2CStrategicSync implements IMessage {
         }
         friendlyDots = readIntArray(buf);
         enemyDots = readIntArray(buf);
+        citizenDots = readIntArray(buf);
         siegeActive = buf.readBoolean();
         siegeX = buf.readInt();
         siegeZ = buf.readInt();
+        evacActive = buf.readBoolean();
     }
 
     @Override
@@ -81,9 +88,11 @@ public class S2CStrategicSync implements IMessage {
         }
         writeIntArray(buf, friendlyDots);
         writeIntArray(buf, enemyDots);
+        writeIntArray(buf, citizenDots);
         buf.writeBoolean(siegeActive);
         buf.writeInt(siegeX);
         buf.writeInt(siegeZ);
+        buf.writeBoolean(evacActive);
     }
 
     private static void writeIntArray(ByteBuf buf, int[] a) {
@@ -102,8 +111,8 @@ public class S2CStrategicSync implements IMessage {
         @Override
         public IMessage onMessage(S2CStrategicSync message, MessageContext ctx) {
             Minecraft.getMinecraft().addScheduledTask(() -> ClientStrategicCache.update(
-                    message.objects, message.friendlyDots, message.enemyDots,
-                    message.siegeActive, message.siegeX, message.siegeZ));
+                    message.objects, message.friendlyDots, message.enemyDots, message.citizenDots,
+                    message.siegeActive, message.siegeX, message.siegeZ, message.evacActive));
             return null;
         }
     }

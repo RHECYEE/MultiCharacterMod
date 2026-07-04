@@ -140,7 +140,8 @@ public final class StrategicSimulator {
         }
 
         // LIVE UNIT DOTS around each player (capped; later narrowed to KNOWN/SEEN enemies).
-        java.util.List<Integer> fd = new ArrayList<>(), ed = new ArrayList<>();
+        // CITIZEN DOTS ride along: the player's civilian workers, white on the Civilian tab.
+        java.util.List<Integer> fd = new ArrayList<>(), ed = new ArrayList<>(), cd = new ArrayList<>();
         java.util.Set<Integer> seen = new java.util.HashSet<>();
         for (EntityPlayer p : world.playerEntities) {
             if (p == null || p.isDead) continue;
@@ -149,9 +150,13 @@ public final class StrategicSimulator {
                     : world.getEntitiesWithinAABB(net.minecraft.entity.EntityLivingBase.class, box)) {
                 if (e == null || e.isDead || e instanceof EntityPlayer) continue;
                 if (!seen.add(e.getEntityId())) continue;
-                if (fd.size() + ed.size() >= 700) break;
+                if (fd.size() + ed.size() + cd.size() >= 900) break;
                 if (studio.ERM.strategic.defense.Aw2Npc.isPlayerOwnedCombat(e)) {
                     fd.add((int) e.posX); fd.add((int) e.posZ);
+                } else if (e instanceof net.minecraft.entity.EntityCreature
+                        && studio.ERM.strategic.civil.DistrictWorkExecutor.isAnyWorker(
+                                (net.minecraft.entity.EntityCreature) e)) {
+                    cd.add((int) e.posX); cd.add((int) e.posZ);
                 } else if (isSiegeHostile(e)) {
                     ed.add((int) e.posX); ed.add((int) e.posZ);
                 }
@@ -175,7 +180,8 @@ public final class StrategicSimulator {
         } catch (Throwable ignored) {}
 
         studio.ERM.war.map.net.S2CStrategicSync pkt = new studio.ERM.war.map.net.S2CStrategicSync(
-                snap, toIntArray(fd), toIntArray(ed), siege, sx, sz);
+                snap, toIntArray(fd), toIntArray(ed), toIntArray(cd), siege, sx, sz);
+        pkt.evacActive = studio.ERM.strategic.civil.evac.EvacuationManager.isEvacuating(world);
         for (EntityPlayer p : world.playerEntities) {
             if (p instanceof net.minecraft.entity.player.EntityPlayerMP) {
                 studio.ERM.war.map.net.TacticalWarMapNetwork.sendTo(pkt,
