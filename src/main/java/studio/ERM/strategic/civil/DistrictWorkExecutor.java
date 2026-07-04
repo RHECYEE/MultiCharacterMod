@@ -131,7 +131,10 @@ public final class DistrictWorkExecutor {
         CivilPlanData plan = CivilPlanData.get(world);
         List<CivilMarker> districts = new ArrayList<>();
         for (CivilMarker m : plan.markers) {
-            if (!m.isRoad() && m.hasDepot() && DistrictOutputConfig.produces(m.configKey())) {
+            // Quarry produces by PHYSICALLY MINING (no output table), so it staffs without a table.
+            boolean workable = DistrictOutputConfig.produces(m.configKey())
+                    || m.kind == CivilMarker.QUARRY;
+            if (!m.isRoad() && m.hasDepot() && workable) {
                 districts.add(m);
             }
         }
@@ -442,6 +445,21 @@ public final class DistrictWorkExecutor {
         // district over dry land, a farm with no tilled soil, a mine with no exposed rock: no yield.
         if (!featurePresent(world, worker.getPosition(), district.kind)) return;
 
+        // FARM VISUAL: physically harvest a mature crop (reset to age 0) and, using SEEDS FROM THE
+        // DEPOT, plant bare tilled soil. The deposited YIELD still comes from the output table (the
+        // "set item per district"); this just makes the field a living patchwork of growth stages.
+        if (district.kind == CivilMarker.FARM) {
+            TileEntityDistrictMarker fd = DistrictRegistry.depotOf(world, district);
+            workFarmVisual(world, worker.getPosition(), fd);
+        }
+
+        // QUARRY: no output table — physically MINE one block per cycle (BuildCraft-style pit) and
+        // carry the REAL drops. Wears a pickaxe stocked in the depot. Returns after mining.
+        if (district.kind == CivilMarker.QUARRY) {
+            workQuarry(world, worker, DistrictRegistry.depotOf(world, district));
+            return;
+        }
+
         String key = district.configKey();
         if (RNG.nextDouble() >= DistrictOutputConfig.rateCoefficient(key)) return;
 
@@ -459,6 +477,107 @@ public final class DistrictWorkExecutor {
         if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName() + " produced "
                 + yield.getCount() + "x " + yield.getDisplayName()
                 + (tool != null ? " (tool +" + tool[1] + ")" : ""));
+    }
+
+    /**
+     * The visible farm loop, run once per work cycle at the worker's feet:
+     *   1) if a MATURE crop sits within reach, "harvest" it by resetting it to age 0 (the field
+     *      cycles through growth stages naturally as time passes);
+     *   2) else if bare tilled soil sits within reach, PLANT it from any seed in the depot.
+     * Purely cosmetic — the actual produced item is the district's output table. No-op when nothing
+     * is workable so a farmer standing on stone does nothing.
+     */
+    private static void workFarmVisual(WorldServer world, BlockPos feet, TileEntityDistrictMarker depot) {
+        BlockPos mature = null, bare = null;
+        for (int dx = -3; dx <= 3 && mature == null; dx++) {
+            for (int dz = -3; dz <= 3 && mature == null; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    BlockPos p = feet.add(dx, dy, dz);
+                    if (!world.isBlockLoaded(p, false)) continue;
+                    net.minecraft.block.state.IBlockState st = world.getBlockState(p);
+                    if (st.getBlock() instanceof net.minecraft.block.BlockCrops) {
+                        net.minecraft.block.BlockCrops crop = (net.minecraft.block.BlockCrops) st.getBlock();
+                        if (crop.isMaxAge(st)) { mature = p; break; }
+                    } else if (st.getBlock() == net.minecraft.init.Blocks.FARMLAND
+                            && world.isAirBlock(p.up())) {
+                        if (bare == null) bare = p.up();
+                    }
+                }
+            }
+        }
+        if (mature != null) {
+            net.minecraft.block.BlockCrops crop =
+                    (net.minecraft.block.BlockCrops) world.getBlockState(mature).getBlock();
+            world.setBlockState(mature, crop.withAge(0), 2); // harvest + replant, one visible motion
+            return;
+        }
+        if (bare != null && depot != null) {
+            for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
+                ItemStack s = depot.depot.getStackInSlot(slot);
+                if (s.isEmpty() || !(s.getItem() instanceof net.minecraft.item.ItemSeeds)) continue;
+                try {
+                    net.minecraft.block.state.IBlockState plant =
+                            ((net.minecraft.item.ItemSeeds) s.getItem()).getPlant(world, bare);
+                    world.setBlockState(bare, plant, 2);
+                    s.shrink(1);
+                    depot.depot.setStackInSlot(slot, s.isEmpty() ? ItemStack.EMPTY : s);
+                } catch (Throwable ignored) {}
+                return;
+            }
+        }
+    }
+
+    /**
+     * QUARRY dig: mine ONE block per cycle near the worker — prefer ore, then rock — collecting the
+     * block's REAL drops into the carried list, and digging downward as upper blocks clear (the
+     * BuildCraft-style descending pit). Bedrock and liquids are skipped; a pickaxe in the depot wears
+     * a little per block. No-op with nothing to mine (featurePresent already gated on rock/ore).
+     */
+    private static void workQuarry(WorldServer world, EntityCreature worker, TileEntityDistrictMarker depot) {
+        BlockPos feet = worker.getPosition();
+        BlockPos oreTarget = null, rockTarget = null;
+        // Scan a small column around the worker, topmost-first below the feet.
+        for (int dy = 0; dy >= -4 && oreTarget == null; dy--) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos p = feet.add(dx, dy, dz);
+                    if (!world.isBlockLoaded(p, false)) continue;
+                    net.minecraft.block.state.IBlockState st = world.getBlockState(p);
+                    net.minecraft.block.material.Material mat = st.getMaterial();
+                    if (st.getBlock() == net.minecraft.init.Blocks.BEDROCK || mat.isLiquid()
+                            || world.isAirBlock(p)) continue;
+                    if (st.getBlock() instanceof net.minecraft.block.BlockOre) { oreTarget = p; break; }
+                    if (mat == net.minecraft.block.material.Material.ROCK && rockTarget == null) rockTarget = p;
+                }
+                if (oreTarget != null) break;
+            }
+        }
+        BlockPos target = oreTarget != null ? oreTarget : rockTarget;
+        if (target == null) return;
+
+        net.minecraft.block.state.IBlockState st = world.getBlockState(target);
+        net.minecraft.util.NonNullList<ItemStack> drops = net.minecraft.util.NonNullList.create();
+        try { st.getBlock().getDrops(drops, world, target, st, 0); } catch (Throwable ignored) {}
+        world.setBlockState(target, net.minecraft.init.Blocks.AIR.getDefaultState(), 3);
+        world.playEvent(2001, target, net.minecraft.block.Block.getStateId(st)); // break FX
+        List<ItemStack> carried = CARRIED.computeIfAbsent(worker.getUniqueID(), u -> new ArrayList<>());
+        for (ItemStack d : drops) if (!d.isEmpty()) carried.add(d);
+
+        // Wear a pickaxe from the depot (best-effort; no config table for quarry).
+        if (depot != null) {
+            for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
+                ItemStack s = depot.depot.getStackInSlot(slot);
+                if (!s.isEmpty() && s.getItem() instanceof net.minecraft.item.ItemPickaxe && s.getItem().isDamageable()) {
+                    ItemStack worn = s.copy();
+                    worn.setItemDamage(worn.getItemDamage() + 1);
+                    depot.depot.setStackInSlot(slot,
+                            worn.getItemDamage() > worn.getMaxDamage() ? ItemStack.EMPTY : worn);
+                    break;
+                }
+            }
+        }
+        if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName()
+                + " quarried " + st.getBlock().getLocalizedName());
     }
 
     public static int carriedCount(EntityCreature worker) {

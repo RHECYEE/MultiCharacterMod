@@ -1581,7 +1581,7 @@ public class GuiTacticalWarMap extends GuiScreen {
             // so this list must stay a prefix of the kind order and Hunting (the last kind) drops off.
             "Inspect", "Road", "Residential", "Barracks", "Warehouse", "Armory",
             "Kitchen", "Hospital", "Factory", "Research", "Trade Depot",
-            "Fishing", "Lumber", "Farm", "Mining" };
+            "Fishing", "Lumber", "Farm", "Quarry" };
     private static net.minecraft.item.ItemStack[] milToolIcons, civToolIcons;
 
     private int toolbarX() {

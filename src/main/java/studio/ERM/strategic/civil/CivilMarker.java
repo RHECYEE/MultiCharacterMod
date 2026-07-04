@@ -37,13 +37,14 @@ public class CivilMarker {
     public static final int FISHING = 10;     // rivers/lakes inside the polygon
     public static final int LUMBER = 11;      // wooded areas
     public static final int FARM = 12;        // actual fields
-    public static final int MINING = 13;      // exposed veins/caves/marked zones
-    public static final int HUNTING = 14;     // open wilderness
+    public static final int MINING = 13;      // QUARRY: workers dig the marked zone one block at a time
+    public static final int QUARRY = 13;      // alias — MINING is the quarry now
+    public static final int HUNTING = 14;     // open wilderness (Strategic Mission, not a district)
 
     public static final String[] NAMES = {
             "Road", "Residential", "Barracks", "Warehouse", "Armory",
             "Kitchen", "Hospital", "Factory", "Research", "Trade Depot",
-            "Fishing", "Lumber", "Farm", "Mining", "Hunting" };
+            "Fishing", "Lumber", "Farm", "Quarry", "Hunting" };
 
     public int kind = ROAD;
     /** Polyline points (ROAD) or polygon vertices in draw order (districts). Y is ignored. */
@@ -62,6 +63,59 @@ public class CivilMarker {
     // the Civilian tab's district panel can show "Workers X/Y" without opening the depot GUI.
     public int assignedWorkers = 0;
     public int desiredWorkers = 0;
+
+    // ==================== ROAD-only per-SEGMENT state ====================
+    // Segment i = points[i] -> points[i+1]. Roads AUTODETECT their surface: RoadNetworkManager
+    // periodically samples the blocks beneath each loaded segment; the majority valid block
+    // becomes that segment's material, and the match fraction becomes its CONDITION. Explosions
+    // and combat lower condition simply by destroying surface blocks — no damage hook needed.
+    public static final int COND_EXCELLENT = 0;
+    public static final int COND_GOOD = 1;
+    public static final int COND_FAIR = 2;
+    public static final int COND_POOR = 3;
+    public static final int COND_DESTROYED = 4;
+    public static final int COND_UNSAMPLED = 5;
+    public static final String[] CONDITION_NAMES = {
+            "Excellent", "Good", "Fair", "Poor", "Destroyed", "Unsurveyed" };
+
+    /** Majority block registry name per segment ("" = unknown). SERVER truth; drives repair. */
+    public String[] segMaterial = new String[0];
+    /** Condition per segment (COND_*). Persisted so the map shows state for unloaded roads. */
+    public byte[] segCondition = new byte[0];
+    /** Synced-only map tint per segment (vanilla MapColor of the material; 0 = use default). */
+    public int[] segColor = new int[0];
+    /** Synced-only friendly material label per segment ("Gravel", "Stone Bricks", ...). */
+    public String[] segLabel = new String[0];
+
+    /** Number of segments this road has (0 for districts / degenerate roads). */
+    public int segmentCount() {
+        return isRoad() ? Math.max(0, points.size() - 1) : 0;
+    }
+
+    /** (Re)size the per-segment arrays to match the point list, preserving existing entries. */
+    public void ensureSegArrays() {
+        int n = segmentCount();
+        if (segMaterial.length != n) {
+            String[] mat = new String[n];
+            byte[] cond = new byte[n];
+            int[] col = new int[n];
+            String[] lab = new String[n];
+            for (int i = 0; i < n; i++) {
+                mat[i] = i < segMaterial.length ? segMaterial[i] : "";
+                cond[i] = i < segCondition.length ? segCondition[i] : (byte) COND_UNSAMPLED;
+                col[i] = i < segColor.length ? segColor[i] : 0;
+                lab[i] = i < segLabel.length ? segLabel[i] : "";
+            }
+            segMaterial = mat; segCondition = cond; segColor = col; segLabel = lab;
+        }
+    }
+
+    /** Worst (highest) condition value across sampled segments; UNSAMPLED when none sampled. */
+    public int worstCondition() {
+        int worst = -1;
+        for (byte c : segCondition) if (c != COND_UNSAMPLED) worst = Math.max(worst, c);
+        return worst == -1 ? COND_UNSAMPLED : worst;
+    }
 
     /** Roads draw as open polylines; every other kind closes into a polygon. */
     public boolean isRoad() {
@@ -120,6 +174,12 @@ public class CivilMarker {
         tag.setIntArray("pts", flat);
         if (depotPos != null) tag.setIntArray("depot",
                 new int[]{depotPos.getX(), depotPos.getY(), depotPos.getZ()});
+        if (isRoad() && segMaterial.length > 0) {
+            net.minecraft.nbt.NBTTagList mats = new net.minecraft.nbt.NBTTagList();
+            for (String s : segMaterial) mats.appendTag(new net.minecraft.nbt.NBTTagString(s == null ? "" : s));
+            tag.setTag("segMat", mats);
+            tag.setByteArray("segCond", segCondition.clone());
+        }
         return tag;
     }
 
@@ -131,6 +191,15 @@ public class CivilMarker {
         for (int i = 0; i + 1 < flat.length; i += 2) points.add(new BlockPos(flat[i], 0, flat[i + 1]));
         int[] dep = tag.getIntArray("depot");
         depotPos = dep.length == 3 ? new BlockPos(dep[0], dep[1], dep[2]) : null;
+        ensureSegArrays();
+        if (tag.hasKey("segMat")) {
+            net.minecraft.nbt.NBTTagList mats = tag.getTagList("segMat", 8);
+            byte[] cond = tag.getByteArray("segCond");
+            for (int i = 0; i < segMaterial.length && i < mats.tagCount(); i++) {
+                segMaterial[i] = mats.getStringTagAt(i);
+                if (i < cond.length) segCondition[i] = cond[i];
+            }
+        }
     }
 
     public void toBytes(ByteBuf buf) {
@@ -144,6 +213,16 @@ public class CivilMarker {
         }
         buf.writeShort(assignedWorkers);
         buf.writeShort(desiredWorkers);
+        if (isRoad()) {
+            ensureSegArrays();
+            buf.writeShort(segCondition.length);
+            for (int i = 0; i < segCondition.length; i++) {
+                buf.writeByte(segCondition[i]);
+                buf.writeInt(segColor[i]);
+                net.minecraftforge.fml.common.network.ByteBufUtils.writeUTF8String(
+                        buf, segLabel[i] == null ? "" : segLabel[i]);
+            }
+        }
     }
 
     public static CivilMarker fromBytes(ByteBuf buf) {
@@ -155,6 +234,20 @@ public class CivilMarker {
         if (buf.readBoolean()) m.depotPos = new BlockPos(buf.readInt(), buf.readInt(), buf.readInt());
         m.assignedWorkers = buf.readShort();
         m.desiredWorkers = buf.readShort();
+        if (m.isRoad()) {
+            m.ensureSegArrays();
+            int segs = buf.readShort();
+            for (int i = 0; i < segs; i++) {
+                byte cond = buf.readByte();
+                int color = buf.readInt();
+                String label = net.minecraftforge.fml.common.network.ByteBufUtils.readUTF8String(buf);
+                if (i < m.segCondition.length) {
+                    m.segCondition[i] = cond;
+                    m.segColor[i] = color;
+                    m.segLabel[i] = label;
+                }
+            }
+        }
         return m;
     }
 }
