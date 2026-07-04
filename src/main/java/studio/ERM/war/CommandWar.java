@@ -119,6 +119,20 @@ public class CommandWar extends CommandBase {
                 }
                 break;
             }
+            case "evac": {
+                EntityPlayerMP p = getCommandSenderAsPlayer(sender);
+                if (p.world instanceof net.minecraft.world.WorldServer) {
+                    net.minecraft.world.WorldServer ws = (net.minecraft.world.WorldServer) p.world;
+                    boolean on = !(args.length >= 2 && (args[1].equalsIgnoreCase("off")
+                            || args[1].equalsIgnoreCase("clear") || args[1].equalsIgnoreCase("end")));
+                    studio.ERM.strategic.civil.evac.EvacuationManager.setEvacuating(ws, on);
+                    if (on && studio.ERM.strategic.civil.evac.EvacuationData.get(ws).points.isEmpty()) {
+                        msg(sender, TextFormatting.YELLOW
+                                + "No Evacuation Points placed yet — civilians have nowhere to shelter.");
+                    }
+                }
+                break;
+            }
             case "fastrope":
             case "heli":
             case "insertion": insertion(sender, args.length >= 2 ? args[1] : "littlebird"); break;
@@ -592,6 +606,14 @@ public class CommandWar extends CommandBase {
                     msg(sender, TextFormatting.GREEN + "Seeded rival city L" + level + " at " + posStr(center)
                             + TextFormatting.YELLOW + " (" + dist + "m away)" + TextFormatting.GREEN
                             + ". Its claimed land now shows on the war map.");
+                    // The world gets POPULATED with the rival: nation states ring the player too
+                    // (tribal camps now; their one-shot permanent towns arrive at rival level 2).
+                    try {
+                        studio.ERM.strategic.nation.NationStateManager.spawnRing(
+                                (net.minecraft.world.WorldServer) world, player, center);
+                    } catch (Throwable t) {
+                        EpochRunnerMod.logger.error("[/war rival city] nation ring failed", t);
+                    }
                 } catch (Throwable t) {
                     msg(sender, TextFormatting.RED + "Rival city generation failed: " + t.getMessage());
                     EpochRunnerMod.logger.error("[/war rival city] failed", t);

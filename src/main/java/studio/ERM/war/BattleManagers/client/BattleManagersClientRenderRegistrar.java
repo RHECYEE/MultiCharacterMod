@@ -69,6 +69,7 @@ public final class BattleManagersClientRenderRegistrar {
         bindBlockItemModel(EpochRunnerMod.district_marker);
         bindBlockItemModel(EpochRunnerMod.assembly_seat);
         bindBlockItemModel(EpochRunnerMod.family_kitchen);
+        bindBlockItemModel(EpochRunnerMod.evacuation_point);
         // Scaffold is an invisible passable marker block, so it has no real model -> its ITEM showed the
         // purple missing-model cube in JEI/creative. Hijack the vanilla GLASS model so it reads as a clean
         // glass block icon instead. (It was never in the bind list at all.)

@@ -46,7 +46,7 @@ public class EpochRunnerMod {
     public static studio.ERM.proxy.CommonProxy proxy;
 
     public static Item entity_protector, sabotage_fixer, camp_setter, modern_citizen_item, air_target_designator;
-    public static Block citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen;
+    public static Block citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen, evacuation_point;
 
     // Job assignment items
     public static Item hammer, multimeter, blueprint, command_buck, gold_wrench;
@@ -258,6 +258,10 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.factory.FactoryManager.class);
             logger.info("[Strategic] factory manager registered (assembly seats are LIVE)");
 
+            // Evacuation: /war evac sends civilians to the nearest Evacuation Point (military ignores).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.evac.EvacuationManager.class);
+            logger.info("[Strategic] evacuation manager registered");
+
             // MODERN-WAR SOUNDBOARD — layered AW2 sound recipes for modern weapons (its tick scheduler
             // drives the delayed layers; every cue no-ops cleanly if AW2 is absent).
             MinecraftForge.EVENT_BUS.register(studio.ERM.war.sound.WarSoundboard.class);
@@ -371,9 +375,10 @@ public class EpochRunnerMod {
             scaffold = new studio.ERM.war.districts.BlockScaffold().setRegistryName("scaffold").setTranslationKey(MODID + ".scaffold");
             assembly_seat = new studio.ERM.war.districts.BlockAssemblySeat().setRegistryName("assembly_seat").setTranslationKey(MODID + ".assembly_seat");
             family_kitchen = new studio.ERM.war.districts.BlockFamilyKitchen().setRegistryName("family_kitchen").setTranslationKey(MODID + ".family_kitchen");
+            evacuation_point = new studio.ERM.war.districts.BlockEvacuationPoint().setRegistryName("evacuation_point").setTranslationKey(MODID + ".evacuation_point");
 
-            event.getRegistry().registerAll(citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen);
-            logger.info("[NUCLEAR-LOG] Blocks registered: citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen");
+            event.getRegistry().registerAll(citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen, evacuation_point);
+            logger.info("[NUCLEAR-LOG] Blocks registered: citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen, evacuation_point");
         }
 
         @SubscribeEvent
@@ -412,6 +417,7 @@ public class EpochRunnerMod {
             event.getRegistry().register(new ItemBlock(scaffold).setRegistryName("scaffold"));
             event.getRegistry().register(new ItemBlock(assembly_seat).setRegistryName("assembly_seat"));
             event.getRegistry().register(new ItemBlock(family_kitchen).setRegistryName("family_kitchen"));
+            event.getRegistry().register(new ItemBlock(evacuation_point).setRegistryName("evacuation_point"));
 
             logger.info("[NUCLEAR-LOG] Items registered: all items including job items (hammer, multimeter, blueprint, command_buck, gold_wrench)");
         }

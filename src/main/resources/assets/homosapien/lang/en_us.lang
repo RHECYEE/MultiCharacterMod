@@ -20,5 +20,6 @@ tile.homosapien.district_marker.name=District Marker
 tile.homosapien.scaffold.name=Scaffold
 tile.homosapien.assembly_seat.name=Assembly Seat
 tile.homosapien.family_kitchen.name=Family Kitchen
+tile.homosapien.evacuation_point.name=Evacuation Point
 
 entity.homosapien.modern_citizen.name=Modern Citizen

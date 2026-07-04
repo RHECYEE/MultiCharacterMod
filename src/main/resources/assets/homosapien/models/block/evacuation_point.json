@@ -1,0 +1,49 @@
+{
+  "__comment": "Evacuation Point: a stone base + a banner post, vanilla textures.",
+  "ambientocclusion": true,
+  "textures": {
+    "base": "blocks/stonebrick",
+    "post": "blocks/log_oak",
+    "flag": "blocks/wool_colored_lime",
+    "particle": "blocks/stonebrick"
+  },
+  "elements": [
+    {
+      "__comment": "Stone base.",
+      "from": [1, 0, 1],
+      "to": [15, 4, 15],
+      "faces": {
+        "down":  { "texture": "#base", "cullface": "down" },
+        "up":    { "texture": "#base" },
+        "north": { "texture": "#base" },
+        "south": { "texture": "#base" },
+        "west":  { "texture": "#base" },
+        "east":  { "texture": "#base" }
+      }
+    },
+    {
+      "__comment": "Post.",
+      "from": [7, 4, 7],
+      "to": [9, 16, 9],
+      "faces": {
+        "north": { "texture": "#post" },
+        "south": { "texture": "#post" },
+        "west":  { "texture": "#post" },
+        "east":  { "texture": "#post" }
+      }
+    },
+    {
+      "__comment": "Green safety flag.",
+      "from": [9, 10, 7.5],
+      "to": [15, 16, 8.5],
+      "faces": {
+        "north": { "texture": "#flag" },
+        "south": { "texture": "#flag" },
+        "west":  { "texture": "#flag" },
+        "east":  { "texture": "#flag" },
+        "up":    { "texture": "#flag" },
+        "down":  { "texture": "#flag" }
+      }
+    }
+  ]
+}
