@@ -17,6 +17,8 @@ public class ErmGuiHandler implements IGuiHandler {
     public static final int GUI_DISTRICT_DEPOT = 2;
     /** The Trade Depot market GUI: x/y/z = the trade-depot block's position. */
     public static final int GUI_TRADE_DEPOT = 3;
+    /** The Research tech-tree GUI: x/y/z = the research-depot block's position. */
+    public static final int GUI_RESEARCH = 4;
 
     @Override
     public Object getServerGuiElement(int id, EntityPlayer player, World world, int x, int y, int z) {
@@ -29,6 +31,9 @@ public class ErmGuiHandler implements IGuiHandler {
         }
         if (id == GUI_TRADE_DEPOT) {
             return new studio.ERM.strategic.civil.trade.ContainerTradeDepot(player, new BlockPos(x, y, z));
+        }
+        if (id == GUI_RESEARCH) {
+            return new studio.ERM.strategic.civil.research.ContainerResearch(player, new BlockPos(x, y, z));
         }
         return null;
     }
@@ -44,6 +49,9 @@ public class ErmGuiHandler implements IGuiHandler {
         }
         if (id == GUI_TRADE_DEPOT) {
             return new studio.ERM.strategic.civil.trade.GuiTradeDepot(player, new BlockPos(x, y, z));
+        }
+        if (id == GUI_RESEARCH) {
+            return new studio.ERM.strategic.civil.research.GuiResearchTree(player, new BlockPos(x, y, z));
         }
         return null;
     }

@@ -134,9 +134,10 @@ public final class DistrictWorkExecutor {
         CivilPlanData plan = CivilPlanData.get(world);
         List<CivilMarker> districts = new ArrayList<>();
         for (CivilMarker m : plan.markers) {
-            // Quarry mines physically; Warehouse organizes chests — both staff without an output table.
+            // Quarry mines, Warehouse organizes, Research generates points — all staff without a table.
             boolean workable = DistrictOutputConfig.produces(m.configKey())
-                    || m.kind == CivilMarker.QUARRY || m.kind == CivilMarker.WAREHOUSE;
+                    || m.kind == CivilMarker.QUARRY || m.kind == CivilMarker.WAREHOUSE
+                    || m.kind == CivilMarker.RESEARCH;
             if (!m.isRoad() && m.hasDepot() && workable) {
                 districts.add(m);
             }
@@ -523,6 +524,12 @@ public final class DistrictWorkExecutor {
         // chests into the carried pile, which the deposit run moves into the warehouse depot.
         if (district.kind == CivilMarker.WAREHOUSE) {
             workWarehouse(world, worker, district);
+            return;
+        }
+
+        // RESEARCH: no item output — the scientists just work the room; their COUNT drives research
+        // points in ResearchManager. Nothing to deposit.
+        if (district.kind == CivilMarker.RESEARCH) {
             return;
         }
 

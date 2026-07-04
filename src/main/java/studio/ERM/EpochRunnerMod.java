@@ -69,7 +69,8 @@ public class EpochRunnerMod {
                 studio.ERM.war.config.WarLevelsConfig.load(cfgDir);
                 studio.ERM.war.config.DistrictOutputConfig.load(cfgDir);
                 studio.ERM.war.config.TradePriceConfig.load(cfgDir);
-                logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice configs loaded from " + cfgDir);
+                studio.ERM.war.config.ResearchConfig.load(cfgDir);
+                logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice + Research configs loaded from " + cfgDir);
             } catch (Throwable t) {
                 logger.error("[Config] failed to load war configs", t);
             }
@@ -233,6 +234,10 @@ public class EpochRunnerMod {
             // Trade Depot shipments: buy = timed import delivery, sell = timed export payout + market decay.
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.trade.TradeShipmentManager.class);
             logger.info("[Strategic] trade shipment manager registered (Trade Depot is LIVE)");
+
+            // Research: scientists in a Research district grind the player's queued AW2 node to completion.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.research.ResearchManager.class);
+            logger.info("[Strategic] research manager registered (Research tree is LIVE)");
 
             // MODERN-WAR SOUNDBOARD — layered AW2 sound recipes for modern weapons (its tick scheduler
             // drives the delayed layers; every cue no-ops cleanly if AW2 is absent).

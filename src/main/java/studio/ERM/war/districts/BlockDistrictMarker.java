@@ -78,6 +78,8 @@ public class BlockDistrictMarker extends Block {
                         .byUid(world, ((TileEntityDistrictMarker) te).getDistrictUid());
                 if (d != null && d.kind == studio.ERM.strategic.civil.CivilMarker.TRADE_DEPOT)
                     gui = ErmGuiHandler.GUI_TRADE_DEPOT;
+                else if (d != null && d.kind == studio.ERM.strategic.civil.CivilMarker.RESEARCH)
+                    gui = ErmGuiHandler.GUI_RESEARCH;
             }
             player.openGui(EpochRunnerMod.instance, gui, world, pos.getX(), pos.getY(), pos.getZ());
         }
