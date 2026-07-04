@@ -46,7 +46,7 @@ public class EpochRunnerMod {
     public static studio.ERM.proxy.CommonProxy proxy;
 
     public static Item entity_protector, sabotage_fixer, camp_setter, modern_citizen_item, air_target_designator;
-    public static Block citizen_bed, district_marker, scaffold, assembly_seat;
+    public static Block citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen;
 
     // Job assignment items
     public static Item hammer, multimeter, blueprint, command_buck, gold_wrench;
@@ -69,6 +69,8 @@ public class EpochRunnerMod {
                 studio.ERM.war.config.WarLevelsConfig.load(cfgDir);
                 studio.ERM.war.config.DistrictOutputConfig.load(cfgDir);
                 studio.ERM.war.config.TradePriceConfig.load(cfgDir);
+                studio.ERM.war.config.SchematicCatalog.load(cfgDir);
+                studio.ERM.strategic.patrol.PatrolConfig.load(cfgDir);
                 studio.ERM.war.config.ResearchConfig.load(cfgDir);
                 studio.ERM.war.config.FactoryConfig.load(cfgDir);
                 logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice + Research + Factory configs loaded from " + cfgDir);
@@ -230,6 +232,16 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.logistics.LogisticsManager.class);
             logger.info("[Strategic] logistics manager registered (couriers are LIVE)");
 
+            // THE GENERIC PATROL ENGINE — wild level-0 threats now, nation/rival patrols, convoy
+            // escorts and scout parties later. Config-driven (patrols.json); unregistered = dead.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.patrol.PatrolFramework.class);
+            logger.info("[Strategic] patrol framework registered (the wilds are LIVE)");
+
+            // NATION STATES — the lightweight second AI civilization: static settlements + noise
+            // (patrols/traders). Spawned in a ring by /war rival city; tier-2 towns at rival L2.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.nation.NationStateManager.class);
+            logger.info("[Strategic] nation states registered (the world is INHABITED)");
+
             // Strategic Missions (Civilian map right-click): timed parties -> deliver a haul to a depot.
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.StrategicMissionManager.class);
             logger.info("[Strategic] mission manager registered (hunting party is LIVE)");
@@ -358,9 +370,10 @@ public class EpochRunnerMod {
             citizen_bed = new studio.ERM.war.districts.BlockCitizenBed().setRegistryName("citizen_bed").setTranslationKey(MODID + ".citizen_bed");
             scaffold = new studio.ERM.war.districts.BlockScaffold().setRegistryName("scaffold").setTranslationKey(MODID + ".scaffold");
             assembly_seat = new studio.ERM.war.districts.BlockAssemblySeat().setRegistryName("assembly_seat").setTranslationKey(MODID + ".assembly_seat");
+            family_kitchen = new studio.ERM.war.districts.BlockFamilyKitchen().setRegistryName("family_kitchen").setTranslationKey(MODID + ".family_kitchen");
 
-            event.getRegistry().registerAll(citizen_bed, district_marker, scaffold, assembly_seat);
-            logger.info("[NUCLEAR-LOG] Blocks registered: citizen_bed, district_marker, scaffold, assembly_seat");
+            event.getRegistry().registerAll(citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen);
+            logger.info("[NUCLEAR-LOG] Blocks registered: citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen");
         }
 
         @SubscribeEvent
@@ -398,6 +411,7 @@ public class EpochRunnerMod {
             event.getRegistry().register(new ItemBlock(district_marker).setRegistryName("district_marker"));
             event.getRegistry().register(new ItemBlock(scaffold).setRegistryName("scaffold"));
             event.getRegistry().register(new ItemBlock(assembly_seat).setRegistryName("assembly_seat"));
+            event.getRegistry().register(new ItemBlock(family_kitchen).setRegistryName("family_kitchen"));
 
             logger.info("[NUCLEAR-LOG] Items registered: all items including job items (hammer, multimeter, blueprint, command_buck, gold_wrench)");
         }

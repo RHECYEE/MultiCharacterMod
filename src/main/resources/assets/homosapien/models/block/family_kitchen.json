@@ -1,0 +1,38 @@
+{
+  "__comment": "Family Kitchen: a brick hearth with a furnace front + a pot on top, vanilla textures.",
+  "ambientocclusion": true,
+  "textures": {
+    "brick": "blocks/brick",
+    "front": "blocks/furnace_front_on",
+    "top": "blocks/furnace_top",
+    "iron": "blocks/iron_block",
+    "particle": "blocks/brick"
+  },
+  "elements": [
+    {
+      "__comment": "Hearth body.",
+      "from": [0, 0, 0],
+      "to": [16, 13, 16],
+      "faces": {
+        "down":  { "texture": "#brick", "cullface": "down" },
+        "up":    { "texture": "#top" },
+        "north": { "texture": "#front" },
+        "south": { "texture": "#brick" },
+        "west":  { "texture": "#brick" },
+        "east":  { "texture": "#brick" }
+      }
+    },
+    {
+      "__comment": "Cooking pot on top.",
+      "from": [4, 13, 4],
+      "to": [12, 16, 12],
+      "faces": {
+        "up":    { "texture": "#iron" },
+        "north": { "texture": "#iron" },
+        "south": { "texture": "#iron" },
+        "west":  { "texture": "#iron" },
+        "east":  { "texture": "#iron" }
+      }
+    }
+  ]
+}

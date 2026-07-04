@@ -19,5 +19,6 @@ tile.homosapien.citizen_bed.name=Citizen Bed
 tile.homosapien.district_marker.name=District Marker
 tile.homosapien.scaffold.name=Scaffold
 tile.homosapien.assembly_seat.name=Assembly Seat
+tile.homosapien.family_kitchen.name=Family Kitchen
 
 entity.homosapien.modern_citizen.name=Modern Citizen
