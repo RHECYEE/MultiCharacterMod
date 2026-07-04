@@ -57,6 +57,9 @@ public class GuiTacticalWarMap extends GuiScreen {
 
     // ==================== Pan Dragging ====================
     private boolean panning = false;
+    // AUTO-FOLLOW: the map surveys around the player and keeps them centred as they move. Manual
+    // panning turns it off; pressing R (recenter) turns it back on.
+    private boolean autoFollow = true;
     private int panStartMouseX, panStartMouseY;
     private int panStartCenterX, panStartCenterZ;
     private static final int MAX_PAN_RADIUS = 8192;
@@ -566,9 +569,10 @@ public class GuiTacticalWarMap extends GuiScreen {
             }
         }
 
-        // Normal left-click: start panning
+        // Normal left-click: start panning (turns off auto-follow until the next recenter).
         if (mouseButton == 0) {
             panning = true;
+            autoFollow = false;
             panStartMouseX = mouseX;
             panStartMouseY = mouseY;
             panStartCenterX = viewCenterX;
@@ -677,11 +681,12 @@ public class GuiTacticalWarMap extends GuiScreen {
             mc.displayGuiScreen(null);
             return;
         }
-        // 'R' to recenter on player
+        // 'R' to recenter on player AND re-enable auto-follow.
         if (typedChar == 'r' || typedChar == 'R') {
             if (mc.player != null) {
                 viewCenterX = (int) mc.player.posX;
                 viewCenterZ = (int) mc.player.posZ;
+                autoFollow = true;
             }
         }
         // (The old 'P' tool cycle is gone: tools are picked from the Icon+Name list LEFT of the map.)
@@ -756,6 +761,12 @@ public class GuiTacticalWarMap extends GuiScreen {
 
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        // AUTO-FOLLOW: keep the view centred on the player (survey around them) unless they've panned.
+        if (autoFollow && !panning && mc.player != null) {
+            viewCenterX = (int) mc.player.posX;
+            viewCenterZ = (int) mc.player.posZ;
+        }
+
         // Full-screen dark background
         drawDefaultBackground();
 
@@ -2173,6 +2184,14 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         if (sx < canvasLeft || sx >= canvasLeft + canvasSize) return;
         if (sy < canvasTop || sy >= canvasTop + canvasSize) return;
+
+        // FACING ARROW: a yellow line + tip pointing the way the player is looking (MC forward vector
+        // = (-sin yaw, cos yaw); on the map +Z is screen-down, +X screen-right).
+        double yaw = Math.toRadians(mc.player.rotationYaw);
+        double dirX = -Math.sin(yaw), dirZ = Math.cos(yaw);
+        int tx = sx + (int) Math.round(dirX * 12), ty = sy + (int) Math.round(dirZ * 12);
+        drawMapLine(sx, sy, tx, ty, 0xFFFFDD00, 2.0F);
+        Gui.drawRect(tx - 2, ty - 2, tx + 2, ty + 2, 0xFFFFDD00);
 
         // Draw a small white diamond for the player
         Gui.drawRect(sx - 1, sy - 3, sx + 2, sy + 4, 0xFFFFFFFF);
