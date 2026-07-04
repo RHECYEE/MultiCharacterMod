@@ -215,6 +215,25 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.BedAssignmentManager.class);
             logger.info("[Strategic] bed assignment manager registered (housing ownership is LIVE)");
 
+            // ROADS — majority-block survey + condition grading + visible builder auto-repair.
+            // Without this the Civilian tab's roads are decoration (the unregistered-handler failure).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.RoadNetworkManager.class);
+            logger.info("[Strategic] road network manager registered (roads are LIVE)");
+
+            // PHASE 3 — settlement-wide courier logistics: depot IN/OUT templates -> shortages/
+            // surpluses -> jobs -> hired couriers walking cargo depot-to-depot (Warehouse = hub).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.logistics.LogisticsManager.class);
+            logger.info("[Strategic] logistics manager registered (couriers are LIVE)");
+
+            // Strategic Missions (Civilian map right-click): timed parties -> deliver a haul to a depot.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.StrategicMissionManager.class);
+            logger.info("[Strategic] mission manager registered (hunting party is LIVE)");
+
+            // MODERN-WAR SOUNDBOARD — layered AW2 sound recipes for modern weapons (its tick scheduler
+            // drives the delayed layers; every cue no-ops cleanly if AW2 is absent).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.war.sound.WarSoundboard.class);
+            logger.info("[War] soundboard registered (AW2 sound recipes are LIVE)");
+
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(
                     instance, new studio.ERM.strategic.defense.ErmGuiHandler());

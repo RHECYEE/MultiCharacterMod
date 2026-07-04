@@ -33,6 +33,8 @@ public final class TacticalWarMapNetwork {
                 C2SCivilPlanEdit.Handler.class, C2SCivilPlanEdit.class, nextId++, Side.SERVER);
         EpochRunnerMod.network.registerMessage(
                 C2SDistrictDepotEdit.Handler.class, C2SDistrictDepotEdit.class, nextId++, Side.SERVER);
+        EpochRunnerMod.network.registerMessage(
+                C2SStrategicMission.Handler.class, C2SStrategicMission.class, nextId++, Side.SERVER);
 
         // Server -> Client
         EpochRunnerMod.network.registerMessage(

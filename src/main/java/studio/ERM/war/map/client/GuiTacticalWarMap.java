@@ -41,10 +41,10 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int viewCenterX; // world X at center of canvas
     private int viewCenterZ; // world Z at center of canvas
 
-    // 0.5 bpp (2 screen px per block) added so districts can be drawn PRECISELY around even a small
-    // single building; 1 bpp remains the block-precision level for marker placement.
-    private static final double[] ZOOM_LEVELS = {0.5, 1, 2, 4, 8, 16, 32}; // blocks per pixel
-    private int zoomIndex = 4; // default 8 bpp
+    // Deep sub-block zoom (down to 0.0125 bpp = 80 screen px per block) for placing districts and
+    // markers with true detail; 1 bpp is the block-precision level, 32 the strategic overview.
+    private static final double[] ZOOM_LEVELS = {0.0125, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32};
+    private int zoomIndex = 9; // default 8 bpp
 
     private int canvasSize = 512;
     private int canvasLeft, canvasTop;
@@ -106,6 +106,8 @@ public class GuiTacticalWarMap extends GuiScreen {
     // closed POLYGONS that generate jobs + logistics (right-click commits >=3 corners).
     private int civilMode = -1;
     private final List<net.minecraft.util.math.BlockPos> civilPending = new ArrayList<>();
+    // Throttle for the Civilian tab's live re-sync (road conditions / courier jobs / stats).
+    private long lastCivilSyncReq = 0;
     // Kind-indexed colors (see CivilMarker): road tan, then one hue per district type.
     private static final int[] CIVIL_COLORS = {
             0xFFD2A24C, // ROAD tan
@@ -140,6 +142,12 @@ public class GuiTacticalWarMap extends GuiScreen {
     // CIVILIAN district panel (Civilian tab, Inspect tool): Workers X/Y +/- (shift=10) + delete.
     private int civPanelUid = -1;
     private int civPanelX, civPanelY;
+
+    // STRATEGIC MISSION MENU (Civilian tab, Inspect mode, right-click): dispatch a party to the
+    // cursor. For now the only mission is Hunting Party (returns 2-16 raw porkchops to a depot).
+    private boolean missionMenuOpen = false;
+    private int missionMenuX, missionMenuY, missionWorldX, missionWorldZ;
+    private static final String[] MISSION_NAMES = {"Hunting Party"};
 
     // ==================== Status Messages ====================
     private String statusMessage = "";
@@ -270,6 +278,19 @@ public class GuiTacticalWarMap extends GuiScreen {
     @Override
     protected void mouseClicked(int mouseX, int mouseY, int mouseButton) throws IOException {
         // Deploy menu intercepts first
+        // STRATEGIC MISSION MENU eats clicks while open.
+        if (missionMenuOpen) {
+            int row = missionRowAt(mouseX, mouseY);
+            if (mouseButton == 0 && row >= 0) {
+                TacticalWarMapNetwork.sendToServer(
+                        new studio.ERM.war.map.net.C2SStrategicMission(row, missionWorldX, missionWorldZ));
+                setStatus(TextFormatting.GREEN + MISSION_NAMES[row] + " dispatched to "
+                        + missionWorldX + ", " + missionWorldZ + ".");
+            }
+            missionMenuOpen = false;
+            return;
+        }
+
         if (deployMenu.isOpen()) {
             if (deployMenu.handleLeftClick(mouseX, mouseY)) return;
             deployMenu.close();
@@ -430,6 +451,18 @@ public class GuiTacticalWarMap extends GuiScreen {
         if (activeTab == 1 && civilMode < 0 && civPanelUid != -1) {
             if (handleCivPanelClick(mouseX, mouseY)) return;
             civPanelUid = -1;
+            return;
+        }
+
+        // STRATEGIC MISSION (Civilian tab, Inspect mode, RIGHT-click): open the mission menu at the
+        // cursor instead of deleting (deletion lives on the district panel's DELETE button now).
+        if (activeTab == 1 && civilMode < 0 && mouseButton == 1) {
+            int[] w = screenToWorld(mouseX, mouseY);
+            missionWorldX = w[0];
+            missionWorldZ = w[1];
+            missionMenuX = Math.min(mouseX, canvasLeft + canvasSize - 96);
+            missionMenuY = Math.min(mouseY, canvasTop + canvasSize - 40);
+            missionMenuOpen = true;
             return;
         }
 
@@ -714,6 +747,12 @@ public class GuiTacticalWarMap extends GuiScreen {
         if (activeTab == 2) drawDefensePlan();
 
         // CIVILIAN INFRASTRUCTURE (Civilian tab): roads + district polygons under the traffic dots.
+        // While the tab is open, re-request the civil snapshot every 2s so road conditions, worker
+        // counts and courier jobs stay LIVE (the packet is small; this is the strategic feed).
+        if (activeTab == 1 && System.currentTimeMillis() - lastCivilSyncReq > 2000) {
+            lastCivilSyncReq = System.currentTimeMillis();
+            TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SCivilPlanEdit.requestSync());
+        }
         if (activeTab == 1) drawCivilPlan();
 
         // LIVE UNIT DOTS (Military tab): every loaded friendly soldier + red enemy dots.
@@ -751,6 +790,7 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // Draw deploy menu
         deployMenu.draw(mouseX, mouseY, fontRenderer);
+        drawMissionMenu(mouseX, mouseY);
 
         // Marker properties panel (drawn on top of everything on the Military tab).
         if (activeTab == 2 && panelUid != -1) drawMarkerPanel();
@@ -1536,13 +1576,45 @@ public class GuiTacticalWarMap extends GuiScreen {
             "Troop Alloc", "Def. Line", "Strongpoint", "Vehicle Pos", "AA Battery", "Rally Point",
             "Reserve", "Fallback Ln", "Patrol Route", "Heli LZ", "Medical", "Engage Zone" };
     private static final String[] CIV_TOOL_NAMES = {
+            // Hunting is NOT a district — it's a Strategic Mission (civilian-map right-click). Quarry
+            // replaces Mining. The row index still maps to the CivilMarker kind (civilMode = row - 1),
+            // so this list must stay a prefix of the kind order and Hunting (the last kind) drops off.
             "Inspect", "Road", "Residential", "Barracks", "Warehouse", "Armory",
             "Kitchen", "Hospital", "Factory", "Research", "Trade Depot",
-            "Fishing", "Lumber", "Farm", "Mining", "Hunting" };
+            "Fishing", "Lumber", "Farm", "Mining" };
     private static net.minecraft.item.ItemStack[] milToolIcons, civToolIcons;
 
     private int toolbarX() {
         return canvasLeft - 6 - TOOLBAR_WIDTH;
+    }
+
+    // ==================== Strategic Mission menu ====================
+
+    private static final int MISSION_W = 92, MISSION_ROW_H = 14;
+
+    private int missionRowAt(int mx, int my) {
+        if (!missionMenuOpen) return -1;
+        int y0 = missionMenuY + 12;
+        if (mx < missionMenuX || mx >= missionMenuX + MISSION_W) return -1;
+        int row = (my - y0) / MISSION_ROW_H;
+        return (row >= 0 && row < MISSION_NAMES.length) ? row : -1;
+    }
+
+    private void drawMissionMenu(int mouseX, int mouseY) {
+        if (!missionMenuOpen) return;
+        int x0 = missionMenuX, y0 = missionMenuY;
+        int h = 12 + MISSION_NAMES.length * MISSION_ROW_H + 2;
+        Gui.drawRect(x0, y0, x0 + MISSION_W, y0 + h, 0xF2101018);
+        Gui.drawRect(x0, y0, x0 + MISSION_W, y0 + 11, 0xFF1F3A1F);
+        Gui.drawRect(x0, y0, x0 + MISSION_W, y0 + 1, 0xFF69F0AE);
+        fontRenderer.drawStringWithShadow("Strategic Mission", x0 + 3, y0 + 2, 0xFF69F0AE);
+        int hover = missionRowAt(mouseX, mouseY);
+        for (int i = 0; i < MISSION_NAMES.length; i++) {
+            int ry = y0 + 12 + i * MISSION_ROW_H;
+            Gui.drawRect(x0 + 1, ry, x0 + MISSION_W - 1, ry + MISSION_ROW_H - 1,
+                    (i == hover) ? 0xCC2C3A47 : 0x9910101E);
+            fontRenderer.drawStringWithShadow(MISSION_NAMES[i], x0 + 5, ry + 3, 0xFFE0E0E0);
+        }
     }
 
     private String[] toolNames() {
@@ -1583,14 +1655,15 @@ public class GuiTacticalWarMap extends GuiScreen {
 
     // ==================== CIVILIAN plan drawing ====================
 
-    /** Roads as cased tan polylines, districts as translucent polygons with outline + icon + name. */
+    /** Roads as cased polylines tinted by their DETECTED material + condition, districts as
+     *  translucent polygons with outline + icon + name, live courier jobs as moving gold lines. */
     private void drawCivilPlan() {
         initIconStacks();
         for (studio.ERM.strategic.civil.CivilMarker m
                 : studio.ERM.war.map.client.ClientCivilPlanCache.markers()) {
             int color = CIVIL_COLORS[Math.max(0, Math.min(m.kind, CIVIL_COLORS.length - 1))];
             if (m.isRoad()) {
-                drawRoadLine(m.points, color, false);
+                drawRoad(m);
             } else {
                 drawDistrictPolygon(m.points, color, false);
                 net.minecraft.util.math.BlockPos c = m.center();
@@ -1614,15 +1687,116 @@ public class GuiTacticalWarMap extends GuiScreen {
                 drawDistrictPolygon(civilPending, color, true);
             }
         }
+        // LIVE COURIER JOBS: src -> dst freight lines with a travelling dot (the logistics pulse).
+        drawCourierJobs();
+
         // Hover readout: what is under the cursor (districts by containment, roads near the line).
+        // Roads read out their DETECTED material + condition ("Road — Gravel, Good").
         studio.ERM.strategic.civil.CivilMarker hover = civilMarkerAt(uiMouseX, uiMouseY);
         if (hover != null) {
-            String label = studio.ERM.strategic.civil.CivilMarker.nameOf(hover.kind)
-                    + (hover.isRoad() ? "" : " District");
+            String label;
+            if (hover.isRoad()) {
+                label = "Road";
+                int seg = roadSegmentAt(hover, uiMouseX, uiMouseY);
+                if (seg != -1 && seg < hover.segCondition.length) {
+                    String mat = seg < hover.segLabel.length && hover.segLabel[seg] != null
+                            && !hover.segLabel[seg].isEmpty() ? hover.segLabel[seg] : null;
+                    int cond = hover.segCondition[seg];
+                    label = (mat != null ? mat + " Road" : "Road") + " — "
+                            + studio.ERM.strategic.civil.CivilMarker.CONDITION_NAMES[
+                                    Math.max(0, Math.min(cond,
+                                    studio.ERM.strategic.civil.CivilMarker.CONDITION_NAMES.length - 1))];
+                }
+            } else {
+                label = studio.ERM.strategic.civil.CivilMarker.nameOf(hover.kind) + " District";
+            }
             int tw = fontRenderer.getStringWidth(label);
             Gui.drawRect(uiMouseX + 6, uiMouseY - 12, uiMouseX + tw + 12, uiMouseY - 1, 0xCC000000);
             fontRenderer.drawStringWithShadow(label, uiMouseX + 9, uiMouseY - 10, 0xFFFFD54F);
         }
+    }
+
+    /** Live courier jobs as thin freight lines: gray while waiting for a courier, gold when one
+     *  is on the move (with a travelling dot src -> dst). Hover a line for the cargo readout. */
+    private void drawCourierJobs() {
+        java.util.List<studio.ERM.war.map.net.S2CCivilPlanSync.JobLine> jobs =
+                studio.ERM.war.map.client.ClientCivilPlanCache.jobs();
+        if (jobs.isEmpty()) return;
+        String hoverLabel = null;
+        for (int i = 0; i < jobs.size(); i++) {
+            studio.ERM.war.map.net.S2CCivilPlanSync.JobLine j = jobs.get(i);
+            int[] s = worldToScreen(j.sx, j.sz);
+            int[] d = worldToScreen(j.dx, j.dz);
+            if (s == null || d == null) continue;
+            boolean assigned = j.state != 0; // CourierJob.STATE_PENDING
+            int color = assigned ? 0xCCFFC107 : 0x66B0BEC5;
+            drawMapLine(s[0], s[1], d[0], d[1], color, assigned ? 2.0F : 1.0F);
+            if (assigned) {
+                // The travelling dot: source -> destination on a shared clock, offset per job.
+                double t = ((System.currentTimeMillis() / 30 + i * 33) % 100) / 100.0;
+                int px = (int) (s[0] + (d[0] - s[0]) * t);
+                int py = (int) (s[1] + (d[1] - s[1]) * t);
+                if (onCanvasPoint(new int[]{px, py})) {
+                    Gui.drawRect(px - 1, py - 1, px + 2, py + 2, 0xFFFFE082);
+                }
+            }
+            if (hoverLabel == null
+                    && pointSegDistSq(uiMouseX, uiMouseY, s[0], s[1], d[0], d[1]) <= 9) {
+                hoverLabel = j.label;
+            }
+        }
+        if (hoverLabel != null && !hoverLabel.isEmpty()) {
+            int tw = fontRenderer.getStringWidth(hoverLabel);
+            Gui.drawRect(uiMouseX + 6, uiMouseY + 2, uiMouseX + tw + 12, uiMouseY + 13, 0xCC101800);
+            fontRenderer.drawStringWithShadow(hoverLabel, uiMouseX + 9, uiMouseY + 4, 0xFFFFC107);
+        }
+    }
+
+    /** Per-segment road rendering: each stretch tinted by its DETECTED majority block, styled by
+     *  condition — solid when kept, fading as it degrades, red-scarred casing when DESTROYED. */
+    private void drawRoad(studio.ERM.strategic.civil.CivilMarker m) {
+        m.ensureSegArrays();
+        int fallback = CIVIL_COLORS[0];
+        for (int i = 0; i < m.segmentCount(); i++) {
+            net.minecraft.util.math.BlockPos a = m.points.get(i), b = m.points.get(i + 1);
+            int[] s = worldToScreen(a.getX(), a.getZ());
+            int[] d = worldToScreen(b.getX(), b.getZ());
+            if (s == null || d == null) continue;
+            int cond = i < m.segCondition.length ? m.segCondition[i]
+                    : studio.ERM.strategic.civil.CivilMarker.COND_UNSAMPLED;
+            int color = (i < m.segColor.length && m.segColor[i] != 0) ? m.segColor[i] : fallback;
+            if (cond == studio.ERM.strategic.civil.CivilMarker.COND_DESTROYED) {
+                // Destroyed: dark scar with red hazard ticks — reads as impassable at a glance.
+                drawMapLine(s[0], s[1], d[0], d[1], 0xCC4E1010, 4.0F);
+                drawMapLine(s[0], s[1], d[0], d[1], 0x99FF1744, 1.5F);
+            } else {
+                int alpha = cond == studio.ERM.strategic.civil.CivilMarker.COND_POOR ? 0x88
+                        : cond == studio.ERM.strategic.civil.CivilMarker.COND_FAIR ? 0xCC : 0xFF;
+                drawMapLine(s[0], s[1], d[0], d[1], 0xCC3E2723, 4.0F);
+                drawMapLine(s[0], s[1], d[0], d[1], (color & 0x00FFFFFF) | (alpha << 24), 2.0F);
+            }
+        }
+        // Waypoint dots on top.
+        for (net.minecraft.util.math.BlockPos p : m.points) {
+            int[] scr = worldToScreen(p.getX(), p.getZ());
+            if (scr != null && onCanvasPoint(scr)) {
+                Gui.drawRect(scr[0] - 1, scr[1] - 1, scr[0] + 2, scr[1] + 2, fallback);
+            }
+        }
+    }
+
+    /** The road segment index nearest the mouse (within ~5 px), or -1. */
+    private int roadSegmentAt(studio.ERM.strategic.civil.CivilMarker m, int mx, int my) {
+        int best = -1;
+        double bd = 25;
+        for (int i = 0; i < m.segmentCount(); i++) {
+            int[] s = worldToScreen(m.points.get(i).getX(), m.points.get(i).getZ());
+            int[] d = worldToScreen(m.points.get(i + 1).getX(), m.points.get(i + 1).getZ());
+            if (s == null || d == null) continue;
+            double dist = pointSegDistSq(mx, my, s[0], s[1], d[0], d[1]);
+            if (dist < bd) { bd = dist; best = i; }
+        }
+        return best;
     }
 
     /** A road: dark casing under a tan centre line (reads as infrastructure), waypoint dots. */
@@ -1794,8 +1968,8 @@ public class GuiTacticalWarMap extends GuiScreen {
                 new net.minecraft.item.ItemStack(net.minecraft.init.Items.FISHING_ROD),     // Fishing
                 new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_AXE),        // Lumber
                 new net.minecraft.item.ItemStack(net.minecraft.init.Items.WHEAT),           // Farm
-                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_PICKAXE),    // Mining
-                new net.minecraft.item.ItemStack(net.minecraft.init.Items.BOW)              // Hunting
+                new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_PICKAXE)     // Mining
+                // Hunting removed — it's a Strategic Mission now, not a district.
         };
     }
 
@@ -1980,6 +2154,11 @@ public class GuiTacticalWarMap extends GuiScreen {
             sideY += 12;
             fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Beds free: "
                     + TextFormatting.AQUA + ab + TextFormatting.GRAY + " / " + tb, sideX, sideY, 0xFFFFFFFF);
+            sideY += 12;
+            int jobs = studio.ERM.war.map.client.ClientCivilPlanCache.jobs().size();
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Courier jobs: "
+                    + (jobs > 0 ? TextFormatting.GOLD : TextFormatting.DARK_GRAY) + jobs,
+                    sideX, sideY, 0xFFFFFFFF);
             sidebarEndY = sideY + 14;
         }
 
