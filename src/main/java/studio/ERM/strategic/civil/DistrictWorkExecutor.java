@@ -118,6 +118,9 @@ public final class DistrictWorkExecutor {
         if (++passCounter % PASS_INTERVAL != 0) return;
         WorldServer world = (WorldServer) e.world;
 
+        // ARMORY: arm empty-handed player-owned soldiers from a nearby armory depot (runs day+night).
+        equipFromArmory(world);
+
         // NIGHT: drop all orders in this dimension — workers fall back to AW2's own AI (beds).
         if (!world.isDaytime()) {
             boolean any = false;
@@ -131,9 +134,9 @@ public final class DistrictWorkExecutor {
         CivilPlanData plan = CivilPlanData.get(world);
         List<CivilMarker> districts = new ArrayList<>();
         for (CivilMarker m : plan.markers) {
-            // Quarry produces by PHYSICALLY MINING (no output table), so it staffs without a table.
+            // Quarry mines physically; Warehouse organizes chests — both staff without an output table.
             boolean workable = DistrictOutputConfig.produces(m.configKey())
-                    || m.kind == CivilMarker.QUARRY;
+                    || m.kind == CivilMarker.QUARRY || m.kind == CivilMarker.WAREHOUSE;
             if (!m.isRoad() && m.hasDepot() && workable) {
                 districts.add(m);
             }
@@ -203,6 +206,51 @@ public final class DistrictWorkExecutor {
                         + " district #" + (district.uid & 0xFFFF));
             }
         }
+    }
+
+    /**
+     * ARMORY gear-up: a player-owned COMBAT npc standing empty-handed within ~24 blocks of an armory
+     * depot draws its first stocked WEAPON (sword / bow / tool / Flan gun) and equips it (drop chance
+     * zeroed so it never becomes loot). "Soldiers go to get their gear if spawned without any."
+     */
+    private static void equipFromArmory(WorldServer world) {
+        List<CivilMarker> armories = new ArrayList<>();
+        for (CivilMarker m : CivilPlanData.get(world).markers) {
+            if (m.kind == CivilMarker.ARMORY && m.hasDepot()) armories.add(m);
+        }
+        if (armories.isEmpty()) return;
+        for (net.minecraft.entity.Entity ent : world.loadedEntityList) {
+            if (!(ent instanceof EntityCreature) || ent.isDead) continue;
+            EntityCreature npc = (EntityCreature) ent;
+            if (!Aw2Npc.isPlayerOwnedCombat(npc)) continue;
+            if (!npc.getHeldItemMainhand().isEmpty()) continue;
+            for (CivilMarker ar : armories) {
+                if (npc.getDistanceSq(ar.depotPos.getX(), ar.depotPos.getY(), ar.depotPos.getZ()) > 24 * 24) continue;
+                TileEntityDistrictMarker depot = DistrictRegistry.depotOf(world, ar);
+                if (depot == null) continue;
+                for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
+                    ItemStack s = depot.depot.getStackInSlot(slot);
+                    if (s.isEmpty() || !isWeapon(s)) continue;
+                    ItemStack one = s.copy();
+                    one.setCount(1);
+                    npc.setHeldItem(net.minecraft.util.EnumHand.MAIN_HAND, one);
+                    npc.setDropChance(net.minecraft.inventory.EntityEquipmentSlot.MAINHAND, 0f);
+                    s.shrink(1);
+                    depot.depot.setStackInSlot(slot, s.isEmpty() ? ItemStack.EMPTY : s);
+                    EpochRunnerMod.logger.info("[Armory] armed " + npc.getName() + " with "
+                            + one.getDisplayName());
+                    break;
+                }
+                if (!npc.getHeldItemMainhand().isEmpty()) break;
+            }
+        }
+    }
+
+    private static boolean isWeapon(ItemStack s) {
+        net.minecraft.item.Item it = s.getItem();
+        if (it instanceof net.minecraft.item.ItemSword || it instanceof net.minecraft.item.ItemBow
+                || it instanceof net.minecraft.item.ItemTool) return true;
+        return it.getClass().getName().toLowerCase().contains("flansmod");
     }
 
     /** desiredWorkers was lowered: release the newest extras back to AW2. */
@@ -471,6 +519,13 @@ public final class DistrictWorkExecutor {
             return;
         }
 
+        // WAREHOUSE: no output table — the worker "organizes" by pulling loose items from nearby
+        // chests into the carried pile, which the deposit run moves into the warehouse depot.
+        if (district.kind == CivilMarker.WAREHOUSE) {
+            workWarehouse(world, worker, district);
+            return;
+        }
+
         String key = district.configKey();
         if (RNG.nextDouble() >= DistrictOutputConfig.rateCoefficient(key)) return;
 
@@ -589,6 +644,51 @@ public final class DistrictWorkExecutor {
         }
         if (VERBOSE) EpochRunnerMod.logger.info("[DistrictAI] " + worker.getName()
                 + " quarried " + st.getBlock().getLocalizedName());
+    }
+
+    /**
+     * WAREHOUSE organize loop: find a nearby container (NOT the warehouse depot) inside the district,
+     * "open" it, and pull ONE stack into the worker's carried pile — the deposit run then consolidates
+     * it into the warehouse depot. This is the visible "opening chests and moving stuff" when couriers
+     * aren't out on deliveries. No-op when there's nothing loose to gather.
+     */
+    private static void workWarehouse(WorldServer world, EntityCreature worker, CivilMarker district) {
+        BlockPos feet = worker.getPosition();
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dz = -4; dz <= 4; dz++) {
+                for (int dy = -2; dy <= 2; dy++) {
+                    BlockPos p = feet.add(dx, dy, dz);
+                    if (p.equals(district.depotPos) || !world.isBlockLoaded(p, false)) continue;
+                    net.minecraft.tileentity.TileEntity te = world.getTileEntity(p);
+                    net.minecraftforge.items.IItemHandler inv = itemHandlerOf(te);
+                    if (inv == null) continue;
+                    for (int slot = 0; slot < inv.getSlots(); slot++) {
+                        ItemStack ex = inv.extractItem(slot, 64, false);
+                        if (!ex.isEmpty()) {
+                            CARRIED.computeIfAbsent(worker.getUniqueID(), u -> new ArrayList<>()).add(ex);
+                            // Chest open/close animation for the pickup (best-effort).
+                            if (te instanceof net.minecraft.tileentity.TileEntityChest) {
+                                world.addBlockEvent(p, te.getBlockType(), 1, 1);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** IItemHandler view of a tile entity (capability first, then IInventory), or null. */
+    private static net.minecraftforge.items.IItemHandler itemHandlerOf(net.minecraft.tileentity.TileEntity te) {
+        if (te == null) return null;
+        if (te instanceof TileEntityDistrictMarker) return null; // depots are managed, not scavenged
+        if (te.hasCapability(net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, null)) {
+            return te.getCapability(net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, null);
+        }
+        if (te instanceof net.minecraft.inventory.IInventory) {
+            return new net.minecraftforge.items.wrapper.InvWrapper((net.minecraft.inventory.IInventory) te);
+        }
+        return null;
     }
 
     public static int carriedCount(EntityCreature worker) {
