@@ -1,0 +1,51 @@
+{
+  "__comment": "Assembly seat: a workshop stool + a tool backrest, all vanilla textures.",
+  "ambientocclusion": true,
+  "textures": {
+    "seat": "blocks/crafting_table_top",
+    "leg": "blocks/crafting_table_side",
+    "back": "blocks/crafting_table_front",
+    "iron": "blocks/iron_block",
+    "particle": "blocks/crafting_table_side"
+  },
+  "elements": [
+    {
+      "__comment": "Seat pad.",
+      "from": [2, 6, 2],
+      "to": [14, 9, 14],
+      "faces": {
+        "down":  { "texture": "#leg" },
+        "up":    { "texture": "#seat" },
+        "north": { "texture": "#leg" },
+        "south": { "texture": "#leg" },
+        "west":  { "texture": "#leg" },
+        "east":  { "texture": "#leg" }
+      }
+    },
+    {
+      "__comment": "Four legs (single merged box for simplicity).",
+      "from": [3, 0, 3],
+      "to": [13, 6, 13],
+      "faces": {
+        "down":  { "texture": "#leg", "cullface": "down" },
+        "north": { "texture": "#leg" },
+        "south": { "texture": "#leg" },
+        "west":  { "texture": "#leg" },
+        "east":  { "texture": "#leg" }
+      }
+    },
+    {
+      "__comment": "Backrest with a tool panel.",
+      "from": [2, 9, 2],
+      "to": [14, 16, 4],
+      "faces": {
+        "down":  { "texture": "#back" },
+        "up":    { "texture": "#back" },
+        "north": { "texture": "#iron" },
+        "south": { "texture": "#back" },
+        "west":  { "texture": "#back" },
+        "east":  { "texture": "#back" }
+      }
+    }
+  ]
+}

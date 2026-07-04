@@ -46,7 +46,7 @@ public class EpochRunnerMod {
     public static studio.ERM.proxy.CommonProxy proxy;
 
     public static Item entity_protector, sabotage_fixer, camp_setter, modern_citizen_item, air_target_designator;
-    public static Block citizen_bed, district_marker, scaffold;
+    public static Block citizen_bed, district_marker, scaffold, assembly_seat;
 
     // Job assignment items
     public static Item hammer, multimeter, blueprint, command_buck, gold_wrench;
@@ -70,7 +70,8 @@ public class EpochRunnerMod {
                 studio.ERM.war.config.DistrictOutputConfig.load(cfgDir);
                 studio.ERM.war.config.TradePriceConfig.load(cfgDir);
                 studio.ERM.war.config.ResearchConfig.load(cfgDir);
-                logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice + Research configs loaded from " + cfgDir);
+                studio.ERM.war.config.FactoryConfig.load(cfgDir);
+                logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice + Research + Factory configs loaded from " + cfgDir);
             } catch (Throwable t) {
                 logger.error("[Config] failed to load war configs", t);
             }
@@ -85,6 +86,8 @@ public class EpochRunnerMod {
                 new ResourceLocation(MODID, "power_district"));
             GameRegistry.registerTileEntity(studio.ERM.war.districts.TileEntityDistrictMarker.class,
                 new ResourceLocation(MODID, "district_marker"));
+            GameRegistry.registerTileEntity(studio.ERM.war.districts.TileEntityAssemblySeat.class,
+                new ResourceLocation(MODID, "assembly_seat"));
 
             // Register entity with proper tracking range
             EntityRegistry.registerModEntity(new ResourceLocation(MODID, "modern_citizen"),
@@ -239,6 +242,10 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.research.ResearchManager.class);
             logger.info("[Strategic] research manager registered (Research tree is LIVE)");
 
+            // Factory: assembly seats inside a Factory district craft their recipes on a timer.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.factory.FactoryManager.class);
+            logger.info("[Strategic] factory manager registered (assembly seats are LIVE)");
+
             // MODERN-WAR SOUNDBOARD — layered AW2 sound recipes for modern weapons (its tick scheduler
             // drives the delayed layers; every cue no-ops cleanly if AW2 is absent).
             MinecraftForge.EVENT_BUS.register(studio.ERM.war.sound.WarSoundboard.class);
@@ -350,9 +357,10 @@ public class EpochRunnerMod {
             district_marker = new studio.ERM.war.districts.BlockDistrictMarker().setRegistryName("district_marker").setTranslationKey(MODID + ".district_marker");
             citizen_bed = new studio.ERM.war.districts.BlockCitizenBed().setRegistryName("citizen_bed").setTranslationKey(MODID + ".citizen_bed");
             scaffold = new studio.ERM.war.districts.BlockScaffold().setRegistryName("scaffold").setTranslationKey(MODID + ".scaffold");
+            assembly_seat = new studio.ERM.war.districts.BlockAssemblySeat().setRegistryName("assembly_seat").setTranslationKey(MODID + ".assembly_seat");
 
-            event.getRegistry().registerAll(citizen_bed, district_marker, scaffold);
-            logger.info("[NUCLEAR-LOG] Blocks registered: citizen_bed, district_marker, scaffold");
+            event.getRegistry().registerAll(citizen_bed, district_marker, scaffold, assembly_seat);
+            logger.info("[NUCLEAR-LOG] Blocks registered: citizen_bed, district_marker, scaffold, assembly_seat");
         }
 
         @SubscribeEvent
@@ -389,6 +397,7 @@ public class EpochRunnerMod {
             event.getRegistry().register(new ItemBlock(citizen_bed).setRegistryName("citizen_bed"));
             event.getRegistry().register(new ItemBlock(district_marker).setRegistryName("district_marker"));
             event.getRegistry().register(new ItemBlock(scaffold).setRegistryName("scaffold"));
+            event.getRegistry().register(new ItemBlock(assembly_seat).setRegistryName("assembly_seat"));
 
             logger.info("[NUCLEAR-LOG] Items registered: all items including job items (hammer, multimeter, blueprint, command_buck, gold_wrench)");
         }

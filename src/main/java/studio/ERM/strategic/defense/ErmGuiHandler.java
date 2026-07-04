@@ -21,6 +21,8 @@ public class ErmGuiHandler implements IGuiHandler {
     public static final int GUI_RESEARCH = 4;
     /** The Armory loadout GUI: x/y/z = the armory-depot block's position. */
     public static final int GUI_ARMORY = 5;
+    /** The assembly-seat recipe GUI: x/y/z = the seat block's position. */
+    public static final int GUI_SEAT = 6;
 
     @Override
     public Object getServerGuiElement(int id, EntityPlayer player, World world, int x, int y, int z) {
@@ -41,6 +43,13 @@ public class ErmGuiHandler implements IGuiHandler {
             TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
             if (te instanceof TileEntityDistrictMarker) {
                 return new studio.ERM.strategic.civil.armory.ContainerArmory(player, (TileEntityDistrictMarker) te);
+            }
+        }
+        if (id == GUI_SEAT) {
+            TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
+            if (te instanceof studio.ERM.war.districts.TileEntityAssemblySeat) {
+                return new studio.ERM.strategic.civil.factory.ContainerSeat(player,
+                        (studio.ERM.war.districts.TileEntityAssemblySeat) te);
             }
         }
         return null;
@@ -65,6 +74,13 @@ public class ErmGuiHandler implements IGuiHandler {
             TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
             if (te instanceof TileEntityDistrictMarker) {
                 return new studio.ERM.strategic.civil.armory.GuiArmory(player, (TileEntityDistrictMarker) te);
+            }
+        }
+        if (id == GUI_SEAT) {
+            TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
+            if (te instanceof studio.ERM.war.districts.TileEntityAssemblySeat) {
+                return new studio.ERM.strategic.civil.factory.GuiSeat(player,
+                        (studio.ERM.war.districts.TileEntityAssemblySeat) te);
             }
         }
         return null;

@@ -137,7 +137,7 @@ public final class DistrictWorkExecutor {
             // Quarry mines, Warehouse organizes, Research generates points — all staff without a table.
             boolean workable = DistrictOutputConfig.produces(m.configKey())
                     || m.kind == CivilMarker.QUARRY || m.kind == CivilMarker.WAREHOUSE
-                    || m.kind == CivilMarker.RESEARCH;
+                    || m.kind == CivilMarker.RESEARCH || m.kind == CivilMarker.FACTORY;
             if (!m.isRoad() && m.hasDepot() && workable) {
                 districts.add(m);
             }
@@ -571,6 +571,12 @@ public final class DistrictWorkExecutor {
         // RESEARCH: no item output — the scientists just work the room; their COUNT drives research
         // points in ResearchManager. Nothing to deposit.
         if (district.kind == CivilMarker.RESEARCH) {
+            return;
+        }
+
+        // FACTORY: no output table here — assembly SEATS craft in FactoryManager, driven by the
+        // worker count. The workers just man the line.
+        if (district.kind == CivilMarker.FACTORY) {
             return;
         }
 
