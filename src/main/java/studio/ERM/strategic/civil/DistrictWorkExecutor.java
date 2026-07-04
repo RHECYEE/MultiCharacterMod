@@ -273,7 +273,18 @@ public final class DistrictWorkExecutor {
         for (net.minecraft.entity.ai.EntityAITasks.EntityAITaskEntry e : worker.tasks.taskEntries) {
             if (e.action instanceof EntityAIDistrictWork) return;
         }
-        worker.tasks.addTask(0, new EntityAIDistrictWork(worker));
+        // Priority 1: still outranks AW2's own movement tasks (~4+) but SITS BELOW the citizen-life
+        // task at 0, so night bed-seeking and hunger override the work loop.
+        worker.tasks.addTask(1, new EntityAIDistrictWork(worker));
+    }
+
+    /** Inject the citizen-life task ONCE (priority 0) for any player-owned worker, so it sleeps at
+     *  night and visits the kitchen when hungry even when not hired to a district. */
+    public static void ensureLifeTask(EntityCreature worker) {
+        for (net.minecraft.entity.ai.EntityAITasks.EntityAITaskEntry e : worker.tasks.taskEntries) {
+            if (e.action instanceof EntityAICitizenLife) return;
+        }
+        worker.tasks.addTask(0, new EntityAICitizenLife(worker));
     }
 
     // ==================================================================

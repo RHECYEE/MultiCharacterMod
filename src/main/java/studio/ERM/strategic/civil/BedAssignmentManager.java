@@ -55,6 +55,14 @@ public final class BedAssignmentManager {
         if (++passCounter % PASS_INTERVAL != 0) return;
         WorldServer world = (WorldServer) e.world;
 
+        // Ensure every loaded player-owned WORKER carries the citizen-life task (night bed-seeking +
+        // hunger). Independent of housing so a citizen still gets fed with no beds around.
+        for (Object o : world.loadedEntityList) {
+            if (o instanceof EntityCreature && DistrictWorkExecutor.isAnyWorker((EntityCreature) o)) {
+                DistrictWorkExecutor.ensureLifeTask((EntityCreature) o);
+            }
+        }
+
         List<CivilMarker> housing = new ArrayList<>();
         for (CivilMarker m : CivilPlanData.get(world).markers) {
             if (!m.isRoad() && (m.kind == CivilMarker.RESIDENTIAL || m.kind == CivilMarker.BARRACKS))
