@@ -592,7 +592,25 @@ public class CommandWar extends CommandBase {
                 break;
             }
             case "city": {
-                int level = (args.length >= 3) ? parseInt(args[2], 1, 10) : 3;
+                // /war rival city level [add|<n>] — adjust the nearest rival city's level in place.
+                if (args.length >= 3 && "level".equalsIgnoreCase(args[2])) {
+                    RivalCityState near = RivalCityManager.getNearestCity(world, player.getPosition());
+                    if (near == null) {
+                        msg(sender, TextFormatting.RED + "No rival city yet — use /war rival city first.");
+                        break;
+                    }
+                    int cur = Math.max(1, near.level);
+                    int target = (args.length >= 4 && !"add".equalsIgnoreCase(args[3]))
+                            ? parseInt(args[3], 1, 10) : Math.min(10, cur + 1);
+                    try { RivalCityManager.setLevel(world, player, target); }
+                    catch (Throwable t) { EpochRunnerMod.logger.error("[/war rival city level] failed", t); }
+                    msg(sender, TextFormatting.GREEN + "Rival level " + cur + " -> " + target
+                            + " (nations advance to their towns at level 2).");
+                    break;
+                }
+                // A fresh seed defaults to LEVEL 1 (was 3 — the bug that spawned nations at L3 and
+                // triggered their tier-2 town build immediately).
+                int level = (args.length >= 3) ? parseInt(args[2], 1, 10) : 1;
                 try {
                     // Delegate to the Rival City module: offsets the city to a believable
                     // distance (not the player's feet) AND registers RIVAL chunk ownership

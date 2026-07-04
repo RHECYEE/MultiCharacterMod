@@ -90,15 +90,24 @@ public final class StrategicMissionManager {
         }
     }
 
-    /** Insert the haul into the nearest KITCHEN depot, else WAREHOUSE; return the depot pos or null. */
+    /**
+     * Deposit the haul into the WAREHOUSE (then KITCHEN) depot — the party returns to the settlement.
+     * The depot chunk is force-loaded first so an UNLOADED warehouse still receives the goods (the
+     * "reward went to the player instead of the warehouse" bug was depotOf() returning null when the
+     * settlement wasn't loaded at completion time). Returns the depot pos, or null only when there is
+     * genuinely no warehouse/kitchen depot anywhere.
+     */
     private static BlockPos deliver(WorldServer world, ItemStack haul) {
         CivilPlanData plan = CivilPlanData.get(world);
-        for (int kind : new int[]{CivilMarker.KITCHEN, CivilMarker.WAREHOUSE}) {
+        for (int kind : new int[]{CivilMarker.WAREHOUSE, CivilMarker.KITCHEN}) {
             for (CivilMarker mk : plan.markers) {
                 if (mk.kind != kind || !mk.hasDepot()) continue;
-                TileEntityDistrictMarker depot = DistrictRegistry.depotOf(world, mk);
-                if (depot == null) continue;
-                ItemStack left = ItemHandlerHelper.insertItemStacked(depot.depot, haul.copy(), false);
+                // Force-load the depot chunk so an unloaded warehouse still receives the haul.
+                world.getChunkProvider().provideChunk(mk.depotPos.getX() >> 4, mk.depotPos.getZ() >> 4);
+                net.minecraft.tileentity.TileEntity te = world.getTileEntity(mk.depotPos);
+                if (!(te instanceof TileEntityDistrictMarker)) continue;
+                ItemStack left = ItemHandlerHelper.insertItemStacked(
+                        ((TileEntityDistrictMarker) te).depot, haul.copy(), false);
                 if (left.isEmpty()) return mk.depotPos;
             }
         }
