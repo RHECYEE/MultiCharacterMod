@@ -48,6 +48,16 @@ public class TileEntityDistrictMarker extends TileEntity {
     /** District sub-mode toggle (currently: LUMBER 0 = Tree Farm, 1 = Fruit Farm). */
     private int subMode = 0;
 
+    // ARMORY loadout stands: 6 loadouts × 6 ghost slots (hand, offhand, helm, chest, legs, boots) —
+    // patterns of what each equipped soldier should carry — plus the number of soldiers to kit per
+    // loadout. Items are pulled from the real depot stock at equip time; couriers restock the depot.
+    public static final int LOADOUTS = 6;
+    public static final int LOADOUT_SLOTS = 6;
+    public final ItemStackHandler loadouts = new ItemStackHandler(LOADOUTS * LOADOUT_SLOTS) {
+        @Override protected void onContentsChanged(int slot) { markDirty(); }
+    };
+    private final int[] loadoutCounts = new int[LOADOUTS];
+
     public DistrictType getDistrictType() {
         return districtType;
     }
@@ -83,6 +93,12 @@ public class TileEntityDistrictMarker extends TileEntity {
 
     public void setSubMode(int m) { this.subMode = Math.max(0, m); markDirty(); }
 
+    public int getLoadoutCount(int i) { return (i >= 0 && i < LOADOUTS) ? loadoutCounts[i] : 0; }
+
+    public void setLoadoutCount(int i, int n) {
+        if (i >= 0 && i < LOADOUTS) { loadoutCounts[i] = Math.max(0, Math.min(255, n)); markDirty(); }
+    }
+
     // ------------------------------------------------------------------
     // Capabilities: hoppers/pipes see ONLY the real depot inventory.
     // ------------------------------------------------------------------
@@ -114,6 +130,8 @@ public class TileEntityDistrictMarker extends TileEntity {
         compound.setInteger("workers", desiredWorkers);
         compound.setInteger("districtUid", districtUid);
         compound.setInteger("subMode", subMode);
+        compound.setTag("loadouts", loadouts.serializeNBT());
+        compound.setIntArray("loadoutCounts", loadoutCounts.clone());
         return compound;
     }
 
@@ -133,5 +151,8 @@ public class TileEntityDistrictMarker extends TileEntity {
         if (compound.hasKey("workers")) desiredWorkers = compound.getInteger("workers");
         districtUid = compound.hasKey("districtUid") ? compound.getInteger("districtUid") : -1;
         subMode = compound.getInteger("subMode");
+        if (compound.hasKey("loadouts")) loadouts.deserializeNBT(compound.getCompoundTag("loadouts"));
+        int[] lc = compound.getIntArray("loadoutCounts");
+        for (int i = 0; i < LOADOUTS && i < lc.length; i++) loadoutCounts[i] = lc[i];
     }
 }

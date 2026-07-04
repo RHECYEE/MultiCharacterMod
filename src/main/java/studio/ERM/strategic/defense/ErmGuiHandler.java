@@ -19,6 +19,8 @@ public class ErmGuiHandler implements IGuiHandler {
     public static final int GUI_TRADE_DEPOT = 3;
     /** The Research tech-tree GUI: x/y/z = the research-depot block's position. */
     public static final int GUI_RESEARCH = 4;
+    /** The Armory loadout GUI: x/y/z = the armory-depot block's position. */
+    public static final int GUI_ARMORY = 5;
 
     @Override
     public Object getServerGuiElement(int id, EntityPlayer player, World world, int x, int y, int z) {
@@ -34,6 +36,12 @@ public class ErmGuiHandler implements IGuiHandler {
         }
         if (id == GUI_RESEARCH) {
             return new studio.ERM.strategic.civil.research.ContainerResearch(player, new BlockPos(x, y, z));
+        }
+        if (id == GUI_ARMORY) {
+            TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
+            if (te instanceof TileEntityDistrictMarker) {
+                return new studio.ERM.strategic.civil.armory.ContainerArmory(player, (TileEntityDistrictMarker) te);
+            }
         }
         return null;
     }
@@ -52,6 +60,12 @@ public class ErmGuiHandler implements IGuiHandler {
         }
         if (id == GUI_RESEARCH) {
             return new studio.ERM.strategic.civil.research.GuiResearchTree(player, new BlockPos(x, y, z));
+        }
+        if (id == GUI_ARMORY) {
+            TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
+            if (te instanceof TileEntityDistrictMarker) {
+                return new studio.ERM.strategic.civil.armory.GuiArmory(player, (TileEntityDistrictMarker) te);
+            }
         }
         return null;
     }

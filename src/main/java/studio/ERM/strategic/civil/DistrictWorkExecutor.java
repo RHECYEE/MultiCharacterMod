@@ -209,10 +209,19 @@ public final class DistrictWorkExecutor {
         }
     }
 
+    private static final net.minecraft.inventory.EntityEquipmentSlot[] LOADOUT_EQUIP = {
+            net.minecraft.inventory.EntityEquipmentSlot.MAINHAND,
+            net.minecraft.inventory.EntityEquipmentSlot.OFFHAND,
+            net.minecraft.inventory.EntityEquipmentSlot.HEAD,
+            net.minecraft.inventory.EntityEquipmentSlot.CHEST,
+            net.minecraft.inventory.EntityEquipmentSlot.LEGS,
+            net.minecraft.inventory.EntityEquipmentSlot.FEET };
+
     /**
-     * ARMORY gear-up: a player-owned COMBAT npc standing empty-handed within ~24 blocks of an armory
-     * depot draws its first stocked WEAPON (sword / bow / tool / Flan gun) and equips it (drop chance
-     * zeroed so it never becomes loot). "Soldiers go to get their gear if spawned without any."
+     * ARMORY SUPPLY — the main kit hub. Each armory defines up to 6 LOADOUTS (patterns) with a soldier
+     * COUNT each; nearby player-owned combat NPCs are assigned to loadouts up to their counts (tagged so
+     * the assignment sticks), and equipped by ISSUING the loadout's items from the depot STOCK (couriers
+     * keep the stock filled). A slot with no stock is left empty — under-supplied until a courier arrives.
      */
     private static void equipFromArmory(WorldServer world) {
         List<CivilMarker> armories = new ArrayList<>();
@@ -220,38 +229,66 @@ public final class DistrictWorkExecutor {
             if (m.kind == CivilMarker.ARMORY && m.hasDepot()) armories.add(m);
         }
         if (armories.isEmpty()) return;
-        for (net.minecraft.entity.Entity ent : world.loadedEntityList) {
-            if (!(ent instanceof EntityCreature) || ent.isDead) continue;
-            EntityCreature npc = (EntityCreature) ent;
-            if (!Aw2Npc.isPlayerOwnedCombat(npc)) continue;
-            if (!npc.getHeldItemMainhand().isEmpty()) continue;
-            for (CivilMarker ar : armories) {
-                if (npc.getDistanceSq(ar.depotPos.getX(), ar.depotPos.getY(), ar.depotPos.getZ()) > 24 * 24) continue;
-                TileEntityDistrictMarker depot = DistrictRegistry.depotOf(world, ar);
-                if (depot == null) continue;
-                for (int slot = 0; slot < depot.depot.getSlots(); slot++) {
-                    ItemStack s = depot.depot.getStackInSlot(slot);
-                    if (s.isEmpty() || !isWeapon(s)) continue;
-                    ItemStack one = s.copy();
-                    one.setCount(1);
-                    npc.setHeldItem(net.minecraft.util.EnumHand.MAIN_HAND, one);
-                    npc.setDropChance(net.minecraft.inventory.EntityEquipmentSlot.MAINHAND, 0f);
-                    s.shrink(1);
-                    depot.depot.setStackInSlot(slot, s.isEmpty() ? ItemStack.EMPTY : s);
-                    EpochRunnerMod.logger.info("[Armory] armed " + npc.getName() + " with "
-                            + one.getDisplayName());
-                    break;
+
+        for (CivilMarker ar : armories) {
+            TileEntityDistrictMarker depot = DistrictRegistry.depotOf(world, ar);
+            if (depot == null) continue;
+            AxisAlignedBB box = new AxisAlignedBB(ar.depotPos).grow(48, 32, 48);
+
+            // Tally current assignments to THIS armory + collect the unassigned nearby soldiers.
+            int[] assigned = new int[TileEntityDistrictMarker.LOADOUTS];
+            List<EntityCreature> unassigned = new ArrayList<>();
+            for (EntityCreature npc : world.getEntitiesWithinAABB(EntityCreature.class, box)) {
+                if (npc.isDead || !Aw2Npc.isPlayerOwnedCombat(npc)) continue;
+                int tag = npc.getEntityData().getInteger("erm_loadout") - 1; // stored +1; 0 => none
+                int tagArm = npc.getEntityData().getInteger("erm_loadout_arm");
+                if (tag >= 0 && tag < TileEntityDistrictMarker.LOADOUTS && tagArm == ar.uid) {
+                    assigned[tag]++;
+                    if (npc.getHeldItemMainhand().isEmpty()) equipLoadout(depot, npc, tag); // re-kit after death
+                } else {
+                    unassigned.add(npc);
                 }
-                if (!npc.getHeldItemMainhand().isEmpty()) break;
+            }
+
+            // Fill open loadout slots (lowest row first) from the unassigned pool.
+            for (EntityCreature npc : unassigned) {
+                int row = -1;
+                for (int i = 0; i < TileEntityDistrictMarker.LOADOUTS; i++) {
+                    if (assigned[i] < depot.getLoadoutCount(i)) { row = i; break; }
+                }
+                if (row < 0) break; // all loadouts full at this armory
+                npc.getEntityData().setInteger("erm_loadout", row + 1);
+                npc.getEntityData().setInteger("erm_loadout_arm", ar.uid);
+                assigned[row]++;
+                equipLoadout(depot, npc, row);
+                EpochRunnerMod.logger.info("[Armory] assigned " + npc.getName() + " to loadout " + (row + 1));
             }
         }
     }
 
-    private static boolean isWeapon(ItemStack s) {
-        net.minecraft.item.Item it = s.getItem();
-        if (it instanceof net.minecraft.item.ItemSword || it instanceof net.minecraft.item.ItemBow
-                || it instanceof net.minecraft.item.ItemTool) return true;
-        return it.getClass().getName().toLowerCase().contains("flansmod");
+    /** Issue loadout {@code row}'s items to a soldier, pulling each from the depot stock (skip if absent). */
+    private static void equipLoadout(TileEntityDistrictMarker depot, EntityCreature npc, int row) {
+        for (int slot = 0; slot < TileEntityDistrictMarker.LOADOUT_SLOTS; slot++) {
+            ItemStack want = depot.loadouts.getStackInSlot(row * TileEntityDistrictMarker.LOADOUT_SLOTS + slot);
+            if (want.isEmpty()) continue;
+            net.minecraft.inventory.EntityEquipmentSlot eq = LOADOUT_EQUIP[slot];
+            if (!npc.getItemStackFromSlot(eq).isEmpty()) continue; // already wearing something there
+            int found = findStock(depot, want);
+            if (found < 0) continue; // not in stock — courier will bring it
+            ItemStack issue = depot.depot.extractItem(found, 1, false);
+            if (issue.isEmpty()) continue;
+            npc.setItemStackToSlot(eq, issue);
+            npc.setDropChance(eq, 0f); // issued gear never drops (no dupe)
+        }
+    }
+
+    /** First depot slot holding an item matching {@code want} (item + meta), or -1. */
+    private static int findStock(TileEntityDistrictMarker depot, ItemStack want) {
+        for (int i = 0; i < depot.depot.getSlots(); i++) {
+            ItemStack s = depot.depot.getStackInSlot(i);
+            if (!s.isEmpty() && s.getItem() == want.getItem() && s.getMetadata() == want.getMetadata()) return i;
+        }
+        return -1;
     }
 
     /** desiredWorkers was lowered: release the newest extras back to AW2. */

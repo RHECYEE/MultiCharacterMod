@@ -19,10 +19,12 @@ public class C2SDistrictDepotEdit implements IMessage {
 
     public static final int OP_WORKER_DELTA = 0;
     public static final int OP_TOGGLE_SUBMODE = 1;
+    public static final int OP_LOADOUT_COUNT = 2;
 
     private BlockPos pos = BlockPos.ORIGIN;
     private int op = OP_WORKER_DELTA;
-    private int value; // worker delta, or (for submode) the number of modes to cycle through
+    private int value;  // worker delta, or (submode) mode count, or (loadout) the +/- delta
+    private int index;  // loadout row (LOADOUT_COUNT only)
 
     public C2SDistrictDepotEdit() {}
 
@@ -39,11 +41,19 @@ public class C2SDistrictDepotEdit implements IMessage {
         return p;
     }
 
+    /** Adjust the number of soldiers to kit with armory loadout {@code row} by {@code delta}. */
+    public static C2SDistrictDepotEdit loadoutCount(BlockPos pos, int row, int delta) {
+        C2SDistrictDepotEdit p = new C2SDistrictDepotEdit();
+        p.pos = pos; p.op = OP_LOADOUT_COUNT; p.index = row; p.value = delta;
+        return p;
+    }
+
     @Override
     public void fromBytes(ByteBuf buf) {
         pos = BlockPos.fromLong(buf.readLong());
         op = buf.readByte();
         value = buf.readByte();
+        index = buf.readByte();
     }
 
     @Override
@@ -51,6 +61,7 @@ public class C2SDistrictDepotEdit implements IMessage {
         buf.writeLong(pos.toLong());
         buf.writeByte(op);
         buf.writeByte(value);
+        buf.writeByte(index);
     }
 
     public static class Handler implements IMessageHandler<C2SDistrictDepotEdit, IMessage> {
@@ -66,6 +77,8 @@ public class C2SDistrictDepotEdit implements IMessage {
                 if (msg.op == OP_TOGGLE_SUBMODE) {
                     int modes = Math.max(1, msg.value);
                     depot.setSubMode((depot.getSubMode() + 1) % modes);
+                } else if (msg.op == OP_LOADOUT_COUNT) {
+                    depot.setLoadoutCount(msg.index, depot.getLoadoutCount(msg.index) + msg.value);
                 } else {
                     depot.setDesiredWorkers(depot.getDesiredWorkers() + msg.value);
                 }
