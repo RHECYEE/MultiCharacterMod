@@ -15,6 +15,8 @@ public class ErmGuiHandler implements IGuiHandler {
     public static final int GUI_RECRUIT = 1;
     /** The Universal District Controller: x/y/z = the depot block's position. */
     public static final int GUI_DISTRICT_DEPOT = 2;
+    /** The Trade Depot market GUI: x/y/z = the trade-depot block's position. */
+    public static final int GUI_TRADE_DEPOT = 3;
 
     @Override
     public Object getServerGuiElement(int id, EntityPlayer player, World world, int x, int y, int z) {
@@ -24,6 +26,9 @@ public class ErmGuiHandler implements IGuiHandler {
             if (te instanceof TileEntityDistrictMarker) {
                 return new ContainerDistrict(player, (TileEntityDistrictMarker) te);
             }
+        }
+        if (id == GUI_TRADE_DEPOT) {
+            return new studio.ERM.strategic.civil.trade.ContainerTradeDepot(player, new BlockPos(x, y, z));
         }
         return null;
     }
@@ -36,6 +41,9 @@ public class ErmGuiHandler implements IGuiHandler {
             if (te instanceof TileEntityDistrictMarker) {
                 return new GuiDistrict(player, (TileEntityDistrictMarker) te);
             }
+        }
+        if (id == GUI_TRADE_DEPOT) {
+            return new studio.ERM.strategic.civil.trade.GuiTradeDepot(player, new BlockPos(x, y, z));
         }
         return null;
     }

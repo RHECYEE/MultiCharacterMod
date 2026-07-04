@@ -68,7 +68,8 @@ public class EpochRunnerMod {
                 studio.ERM.war.config.WarMasterConfig.load(cfgDir);
                 studio.ERM.war.config.WarLevelsConfig.load(cfgDir);
                 studio.ERM.war.config.DistrictOutputConfig.load(cfgDir);
-                logger.info("[Config] WarMaster + WarLevels + DistrictOutput configs loaded from " + cfgDir);
+                studio.ERM.war.config.TradePriceConfig.load(cfgDir);
+                logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice configs loaded from " + cfgDir);
             } catch (Throwable t) {
                 logger.error("[Config] failed to load war configs", t);
             }
@@ -228,6 +229,10 @@ public class EpochRunnerMod {
             // Strategic Missions (Civilian map right-click): timed parties -> deliver a haul to a depot.
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.StrategicMissionManager.class);
             logger.info("[Strategic] mission manager registered (hunting party is LIVE)");
+
+            // Trade Depot shipments: buy = timed import delivery, sell = timed export payout + market decay.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.trade.TradeShipmentManager.class);
+            logger.info("[Strategic] trade shipment manager registered (Trade Depot is LIVE)");
 
             // MODERN-WAR SOUNDBOARD — layered AW2 sound recipes for modern weapons (its tick scheduler
             // drives the delayed layers; every cue no-ops cleanly if AW2 is absent).

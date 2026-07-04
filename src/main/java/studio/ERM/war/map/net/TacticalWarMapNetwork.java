@@ -35,6 +35,8 @@ public final class TacticalWarMapNetwork {
                 C2SDistrictDepotEdit.Handler.class, C2SDistrictDepotEdit.class, nextId++, Side.SERVER);
         EpochRunnerMod.network.registerMessage(
                 C2SStrategicMission.Handler.class, C2SStrategicMission.class, nextId++, Side.SERVER);
+        EpochRunnerMod.network.registerMessage(
+                C2STradeAction.Handler.class, C2STradeAction.class, nextId++, Side.SERVER);
 
         // Server -> Client
         EpochRunnerMod.network.registerMessage(
@@ -47,6 +49,8 @@ public final class TacticalWarMapNetwork {
                 S2CDefensePlanSync.Handler.class, S2CDefensePlanSync.class, nextId++, Side.CLIENT);
         EpochRunnerMod.network.registerMessage(
                 S2CCivilPlanSync.Handler.class, S2CCivilPlanSync.class, nextId++, Side.CLIENT);
+        EpochRunnerMod.network.registerMessage(
+                S2CTradeSync.Handler.class, S2CTradeSync.class, nextId++, Side.CLIENT);
     }
 
     public static void sendToServer(IMessage msg) {

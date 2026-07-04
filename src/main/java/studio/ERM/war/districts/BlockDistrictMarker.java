@@ -71,8 +71,15 @@ public class BlockDistrictMarker extends Block {
             if (te instanceof TileEntityDistrictMarker && !((TileEntityDistrictMarker) te).isBound()) {
                 DistrictRegistry.bindDepot(world, pos);
             }
-            player.openGui(EpochRunnerMod.instance, ErmGuiHandler.GUI_DISTRICT_DEPOT, world,
-                    pos.getX(), pos.getY(), pos.getZ());
+            // A Trade Depot district opens the market GUI; every other kind opens the depot controller.
+            int gui = ErmGuiHandler.GUI_DISTRICT_DEPOT;
+            if (te instanceof TileEntityDistrictMarker) {
+                studio.ERM.strategic.civil.CivilMarker d = studio.ERM.strategic.civil.DistrictRegistry
+                        .byUid(world, ((TileEntityDistrictMarker) te).getDistrictUid());
+                if (d != null && d.kind == studio.ERM.strategic.civil.CivilMarker.TRADE_DEPOT)
+                    gui = ErmGuiHandler.GUI_TRADE_DEPOT;
+            }
+            player.openGui(EpochRunnerMod.instance, gui, world, pos.getX(), pos.getY(), pos.getZ());
         }
         return true;
     }
