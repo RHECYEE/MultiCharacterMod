@@ -69,6 +69,12 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
     private net.minecraft.util.math.BlockPos rallyPoint = null;
     public void setRallyPoint(net.minecraft.util.math.BlockPos p) { this.rallyPoint = p; }
 
+    // DELIVERY MODE (a recruited vehicle en route to the player's rally): drive flat-out instead of
+    // the siege-cautious 0.7 throttle. Transient by design — StrategicReinforcement re-asserts it
+    // every drive pass, so a reload can't leave a delivery crawling.
+    private boolean deliveryMode = false;
+    public void setDeliveryMode(boolean b) { this.deliveryMode = b; }
+
     // C10: the director's view of the assault route + the army-side hold point just outside the breach. A
     // ground vehicle reads these to WAIT while the route is being cleared (NEEDS_ENGINEER/BEING_CLEARED) and
     // roll in the moment it is CLEARED. Both null for any vehicle the director doesn't manage -> unchanged.
@@ -1716,8 +1722,8 @@ public class EntityAIPilot extends EntityCreature implements ISkinnable {
         if (dot < 0) turnPower = (cross > 0) ? 1.0F : -1.0F;
 
         tank.wheelsYaw = turnPower * 25.0F;
-        tank.throttle = 0.7F;
-        float power = 0.4F * Math.signum(tank.throttle);
+        tank.throttle = deliveryMode ? 1.0F : 0.7F;
+        float power = (deliveryMode ? 0.6F : 0.4F) * Math.signum(tank.throttle);
         tank.motionX += forward.x * power;
         tank.motionZ += forward.z * power;
     }

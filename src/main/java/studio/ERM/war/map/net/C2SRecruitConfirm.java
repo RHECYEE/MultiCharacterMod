@@ -92,6 +92,15 @@ public class C2SRecruitConfirm implements IMessage {
                             + "Vehicle contract needs a Flan vehicle item in the Hand slot."));
                     return;
                 }
+                // GROUND VEHICLES ONLY: planes/helicopters can't drive to a rally, and accepting
+                // one just consumed the item for nothing. Refuse before any charge/consume — the
+                // item stays in the slot and is returned when the screen closes.
+                if (StrategicReinforcement.flanIsAircraft(c.loadout.getStackInSlot(0))) {
+                    player.sendMessage(new TextComponentString(TextFormatting.RED
+                            + "Aircraft can't be recruited as vehicle deliveries — ground vehicles only. "
+                            + "Your " + vehicleShortName + " was not consumed."));
+                    return;
+                }
                 unitCost = WarLevelsConfig.recruitVehicleCost(vehicleShortName);
             } else {
                 unitCost = (kind == 0) ? WarLevelsConfig.recruitPermanentCost() : WarLevelsConfig.recruitMercCost();

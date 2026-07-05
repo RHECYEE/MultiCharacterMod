@@ -173,9 +173,11 @@ public class GuiTacticalWarMap extends GuiScreen {
     private long statusExpiry = 0;
 
     // ==================== Colors ====================
-    private static final int COLOR_PLAYER_FILL = 0x3300AA00;    // green, semi-transparent
-    private static final int COLOR_RIVAL_FILL  = 0x33CC0000;    // red, semi-transparent
-    private static final int COLOR_OTHER_FILL  = 0x330066CC;    // blue, semi-transparent
+    // Fill alpha 0x55 (was 0x33): a 20%-alpha tint was readable over the dark unexplored canvas but
+    // washed out to invisible over bright explored grass -- claims seemed to "disappear" on charted land.
+    private static final int COLOR_PLAYER_FILL = 0x5500AA00;    // green, semi-transparent
+    private static final int COLOR_RIVAL_FILL  = 0x55CC0000;    // red, semi-transparent
+    private static final int COLOR_OTHER_FILL  = 0x550066CC;    // blue, semi-transparent
     private static final int COLOR_CLAIM_PREVIEW  = 0x5500FF00; // bright green preview
     private static final int COLOR_UNCLAIM_PREVIEW = 0x55FF4444;// red preview
     private static final int COLOR_BORDER_PLAYER = 0xFF00DD00;  // solid green border
@@ -279,13 +281,17 @@ public class GuiTacticalWarMap extends GuiScreen {
         };
     }
 
-    /** Convert world coordinates to screen pixel. Returns null if off-canvas. */
+    /** Convert world coordinates to screen pixel. Returns null if off-canvas.
+     *  Uses floor (not int-cast truncation): a truncating cast rounds TOWARD ZERO, so every chunk
+     *  west/north of the view centre landed one pixel east/south of where the terrain sampler put
+     *  it. At 8+ bpp a chunk is only 1-2 px, so half the map's overlays visibly disagreed with the
+     *  terrain underneath -- the "overlays change when zoomed out" bug. */
     private int[] worldToScreen(int worldX, int worldZ) {
         double bpp = getBlocksPerPixel();
         if (bpp <= 0) return null;
         int half = canvasSize / 2;
-        int sx = canvasLeft + half + (int) ((worldX - viewCenterX) / bpp);
-        int sy = canvasTop + half + (int) ((worldZ - viewCenterZ) / bpp);
+        int sx = canvasLeft + half + (int) Math.floor((worldX - viewCenterX) / bpp);
+        int sy = canvasTop + half + (int) Math.floor((worldZ - viewCenterZ) / bpp);
         return new int[]{sx, sy};
     }
 
@@ -797,9 +803,6 @@ public class GuiTacticalWarMap extends GuiScreen {
         // Draw terrain placeholder (colored biome-ish grid)
         drawTerrainBackground();
 
-        // Draw territory overlay
-        drawTerritoryOverlay();
-
         // Draw pending claim/unclaim preview
         if ((claimDragging || unclaimDragging) && !pendingSelection.isEmpty()) {
             drawSelectionPreview();
@@ -831,6 +834,12 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // FOG OF WAR: black out every un-charted chunk on the canvas (over terrain, under markers).
         drawFog();
+
+        // TERRITORY over the fog, not under it: claims are strategic knowledge the server already
+        // announced (rival seeded, nation settled, batch-claim receipts), so charting terrain must
+        // never erase them. Drawing them under the fog made every synced claim vanish the moment
+        // the first fog chart landed -- the "two claim overlays competing" report.
+        drawTerritoryOverlay();
         if (activeTab == 1) drawCivilPlan();
 
         // CITIZEN DOTS (Civilian tab): every loaded civilian worker as a white fleck — the city's
@@ -1050,7 +1059,9 @@ public class GuiTacticalWarMap extends GuiScreen {
         int chunkPixelSize = Math.max(1, (int) Math.round(16 / bpp));
         String playerId = mc.player != null ? mc.player.getUniqueID().toString() : "";
 
-        // First pass: fill
+        // First pass: fill. Each chunk's rect runs to the NEXT chunk's screen position (exact
+        // span), not start + a rounded fixed size -- the rounded size drifted off the real chunk
+        // boundaries at zoom levels where 16/bpp isn't an integer, stacking overlay error at 8bpp.
         for (Map.Entry<ChunkPos, String> entry : snapshot.entrySet()) {
             ChunkPos cp = entry.getKey();
             String owner = entry.getValue();
@@ -1059,12 +1070,13 @@ public class GuiTacticalWarMap extends GuiScreen {
             int chunkWorldX = cp.x << 4;
             int chunkWorldZ = cp.z << 4;
             int[] scr = worldToScreen(chunkWorldX, chunkWorldZ);
-            if (scr == null) continue;
+            int[] scrEnd = worldToScreen(chunkWorldX + 16, chunkWorldZ + 16);
+            if (scr == null || scrEnd == null) continue;
 
             int sx = scr[0];
             int sy = scr[1];
-            int ex = sx + chunkPixelSize;
-            int ey = sy + chunkPixelSize;
+            int ex = Math.max(sx + 1, scrEnd[0]);
+            int ey = Math.max(sy + 1, scrEnd[1]);
 
             if (ex < canvasLeft || sx >= canvasLeft + canvasSize) continue;
             if (ey < canvasTop || sy >= canvasTop + canvasSize) continue;
@@ -1074,7 +1086,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         }
 
         // Second pass: borders (frontline effect - only draw edges where neighbor differs)
-        if (chunkPixelSize >= 3) {
+        if (chunkPixelSize >= 2) {
             for (Map.Entry<ChunkPos, String> entry : snapshot.entrySet()) {
                 ChunkPos cp = entry.getKey();
                 String owner = entry.getValue();
@@ -1083,12 +1095,13 @@ public class GuiTacticalWarMap extends GuiScreen {
                 int chunkWorldX = cp.x << 4;
                 int chunkWorldZ = cp.z << 4;
                 int[] scr = worldToScreen(chunkWorldX, chunkWorldZ);
-                if (scr == null) continue;
+                int[] scrEnd = worldToScreen(chunkWorldX + 16, chunkWorldZ + 16);
+                if (scr == null || scrEnd == null) continue;
 
                 int sx = scr[0];
                 int sy = scr[1];
-                int ex = sx + chunkPixelSize;
-                int ey = sy + chunkPixelSize;
+                int ex = Math.max(sx + 1, scrEnd[0]);
+                int ey = Math.max(sy + 1, scrEnd[1]);
 
                 if (ex < canvasLeft || sx >= canvasLeft + canvasSize) continue;
                 if (ey < canvasTop || sy >= canvasTop + canvasSize) continue;
@@ -1418,15 +1431,19 @@ public class GuiTacticalWarMap extends GuiScreen {
         int worldBottom = viewCenterZ + (int) Math.ceil(half * bpp);
         int cxMin = worldLeft >> 4, cxMax = worldRight >> 4, czMin = worldTop >> 4, czMax = worldBottom >> 4;
         if ((long) (cxMax - cxMin + 1) * (czMax - czMin + 1) > 20000) return; // cost cap
-        int step = (int) Math.ceil(chunkPx) + 1;
+        // Exact chunk spans: each fog rect ends where the NEXT chunk begins. The old
+        // "ceil(chunkPx)+1" step over-painted a pixel into the east/south neighbour -- at 8bpp
+        // (2px chunks) that blacked out HALF of every adjacent explored chunk, eating the claim
+        // overlay along every fog boundary ("claims don't stay after I explore").
         for (int cx = cxMin; cx <= cxMax; cx++) {
             for (int cz = czMin; cz <= czMax; cz++) {
                 if (studio.ERM.war.map.client.ClientFogCache.isExplored(cx, cz)) continue;
                 int[] s = worldToScreen(cx << 4, cz << 4);
-                if (s == null) continue;
+                int[] sEnd = worldToScreen((cx + 1) << 4, (cz + 1) << 4);
+                if (s == null || sEnd == null) continue;
                 int x1 = Math.max(s[0], canvasLeft), y1 = Math.max(s[1], canvasTop);
-                int x2 = Math.min(s[0] + step, canvasLeft + canvasSize);
-                int y2 = Math.min(s[1] + step, canvasTop + canvasSize);
+                int x2 = Math.min(Math.max(s[0] + 1, sEnd[0]), canvasLeft + canvasSize);
+                int y2 = Math.min(Math.max(s[1] + 1, sEnd[1]), canvasTop + canvasSize);
                 if (x2 > x1 && y2 > y1) Gui.drawRect(x1, y1, x2, y2, 0xFF060608);
             }
         }

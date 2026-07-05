@@ -101,6 +101,152 @@ public class RivalCityManager {
         return player.getUniqueID().toString();
     }
 
+    /**
+     * THE city lookup every player-facing path must use. Cities are stored under TWO keying schemes
+     * (the command path seeds under the shared "RIVAL" key; the legacy init path under the player's
+     * UUID), and half the API only checked the UUID key -- so /war rival level said "no rival city
+     * exists" while staring at one, and grow silently did nothing (the stalled capital). Resolution:
+     * player key -> "RIVAL" -> nearest to the player -> any city in the dimension.
+     */
+    public static RivalCityState resolveCity(World world, EntityPlayer player) {
+        RivalCityState state = (player != null) ? getCity(world, getOwnerKey(player)) : null;
+        if (state == null || state.center == null) {
+            RivalCityState r = getCity(world, "RIVAL");
+            if (r != null && r.center != null) state = r;
+        }
+        if ((state == null || state.center == null) && player != null && player.getPosition() != null) {
+            RivalCityState n = getNearestCity(world, player.getPosition());
+            if (n != null && n.center != null) state = n;
+        }
+        if (state == null || state.center == null) {
+            RivalCityState a = getAnyCity(world);
+            if (a != null && a.center != null) state = a;
+        }
+        return state;
+    }
+
+    // =====================================================================
+    // PERSISTENCE — rival cities across restarts
+    // =====================================================================
+    // RivalCityState always had full NBT serialization and RivalCityWorldData always existed, but
+    // NOTHING ever wired them together: rivalCitiesByDim was a static in-memory map that evaporated
+    // on every server restart. That single hole produced three separate bug reports at once --
+    // "says a rival doesn't exist when it does", "it let me make more than one rival city", and
+    // "rival grow stopped growing the capital" (all lookups against an empty map after a relog).
+
+    @SubscribeEvent
+    public static void onWorldLoad(net.minecraftforge.event.world.WorldEvent.Load e) {
+        if (e.getWorld() == null || e.getWorld().isRemote) return;
+        try { loadCities((World) e.getWorld()); } catch (Throwable t) {
+            EpochRunnerMod.logger.error("[RivalCity] city restore failed", t);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onWorldSave(net.minecraftforge.event.world.WorldEvent.Save e) {
+        if (e.getWorld() == null || e.getWorld().isRemote) return;
+        try { saveCities((World) e.getWorld()); } catch (Throwable t) {
+            EpochRunnerMod.logger.error("[RivalCity] city save failed", t);
+        }
+    }
+
+    /** Write every live city of this dimension into the world save. Cheap; also called directly
+     *  after seed/level/grow so a crash between autosaves can't lose the capital. */
+    public static void saveCities(World world) {
+        if (world == null || world.isRemote) return;
+        Map<String, RivalCityState> map = rivalCitiesByDim.get(world.provider.getDimension());
+        if (map == null || map.isEmpty()) return;
+        studio.ERM.war.world.RivalCityWorldData data = studio.ERM.war.world.RivalCityWorldData.get(world);
+        for (Map.Entry<String, RivalCityState> en : map.entrySet()) {
+            try { data.putCityTag(en.getKey(), en.getValue().toNBT()); } catch (Throwable t) {
+                EpochRunnerMod.logger.error("[RivalCity] failed to serialize city " + en.getKey(), t);
+            }
+        }
+    }
+
+    /** Restore this dimension's cities from the world save. Live in-memory state always wins
+     *  (never clobber a session's cities on a re-fired load event). */
+    public static void loadCities(World world) {
+        if (world == null || world.isRemote) return;
+        Map<String, RivalCityState> map = getDimensionCities(world);
+        if (!map.isEmpty()) return;
+        studio.ERM.war.world.RivalCityWorldData data = studio.ERM.war.world.RivalCityWorldData.get(world);
+        int loaded = 0;
+        for (Map.Entry<String, net.minecraft.nbt.NBTTagCompound> en : data.entries()) {
+            try {
+                RivalCityState st = new RivalCityState(en.getKey());
+                st.fromNBT(en.getValue());
+                if (st.center == null) continue; // never-seeded placeholder
+                map.put(en.getKey(), st);
+                loaded++;
+            } catch (Throwable t) {
+                EpochRunnerMod.logger.error("[RivalCity] failed to restore city " + en.getKey(), t);
+            }
+        }
+        if (loaded > 0) {
+            RivalCityState primary = getAnyCity(world);
+            if (primary != null && primary.center != null) {
+                updateLegacyFields(primary);
+                WarMapOverlay.setRivalCityMarker(primary.center, primary.level);
+            }
+            EpochRunnerMod.logger.info("[RivalCity] restored " + loaded + " rival city(ies) from the world save");
+        }
+    }
+
+    // =====================================================================
+    // AUTO-GROWTH — the capital keeps expanding on its own
+    // =====================================================================
+    // "The rival keeps expanding/repairing; nations stay static" is the design line, but growth
+    // only ever ran from a command. A gentle heartbeat: every ~15 minutes, if the capital (level
+    // 2+) has its centre loaded, run one small expansion pass. Camps (level 1) never auto-sprawl.
+
+    private static final long AUTO_GROW_INTERVAL = 15 * 60 * 20L;
+    private static long lastAutoGrowTick = 0;
+
+    @SubscribeEvent
+    public static void onAutoGrowTick(TickEvent.WorldTickEvent e) {
+        if (e.phase != TickEvent.Phase.END || e.side.isClient() || e.world == null || e.world.isRemote) return;
+        World world = e.world;
+        long now = world.getTotalWorldTime();
+        if (now - lastAutoGrowTick < AUTO_GROW_INTERVAL || isGenerating) return;
+        lastAutoGrowTick = now;
+
+        RivalCityState state = getAnyCity(world);
+        if (state == null || state.center == null || state.level < 2) return;
+        if (!world.isBlockLoaded(state.center, false)) return; // grows only while its chunks exist
+
+        isGenerating = true;
+        try {
+            if (!state.expansionManager.isInitialized()) {
+                state.expansionManager.initialize(world, state.center);
+            }
+            List<RivalExpansionManager.ExpansionNode> newNodes =
+                    state.expansionManager.expand(world, state.stats);
+            int built = 0;
+            if (newNodes != null) {
+                for (RivalExpansionManager.ExpansionNode node : newNodes) {
+                    if (node == null || node.position == null) continue;
+                    ChunkPos cp = new ChunkPos(node.position);
+                    WarWorldData data = WarWorldData.get(world);
+                    data.setOwner(cp, "RIVAL");
+                    data.markDirty();
+                    RivalCitySpawner.generateBuildingAtExpansionNode(world, state, node);
+                    built++;
+                }
+            }
+            updateLegacyFields(state);
+            saveCities(world);
+            if (built > 0) {
+                EpochRunnerMod.logger.info("[RivalCity] auto-growth: capital L" + state.level
+                        + " expanded by " + built + " node(s)");
+            }
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.error("[RivalCity] auto-growth failed (guarded)", t);
+        } finally {
+            isGenerating = false;
+        }
+    }
+
     // =====================================================================
     // EVENT HANDLERS
     // =====================================================================
@@ -284,6 +430,18 @@ public class RivalCityManager {
         if (world == null || player == null || world.isRemote) return null;
         if (isGenerating) return null;
 
+        // ONE rival capital per dimension. Re-running /war rival city used to RE-CENTER the same state
+        // at a new site while the old city's buildings + claims stayed in the world -- "it let me make
+        // more than one rival city". Point the player at the level command instead.
+        RivalCityState existing = getAnyCity(world);
+        if (existing != null && existing.center != null) {
+            player.sendMessage(new TextComponentString(TextFormatting.RED
+                    + "A rival city already exists at " + existing.center.getX() + ", " + existing.center.getZ()
+                    + " (L" + existing.level + "). Use " + TextFormatting.YELLOW + "/war rival city level add"
+                    + TextFormatting.RED + " to advance it."));
+            return null;
+        }
+
         isGenerating = true;
         try {
             // Command path tracks the city under the shared "RIVAL" key, matching the
@@ -319,6 +477,7 @@ public class RivalCityManager {
             claimChunksForRival(world, state);   // registers RIVAL chunk ownership -> shows on map
             RivalCitySpawner.spawnRivalNPCs(world, state);
             WarMapOverlay.setRivalCityMarker(state.center, state.level);
+            saveCities(world);
 
             return state.center;
         } finally {
@@ -404,9 +563,12 @@ public class RivalCityManager {
         if (world.isRemote) return;
         if (isGenerating) return;
 
-        String ownerKey = getOwnerKey(player);
-        RivalCityState state = getCity(world, ownerKey);
-        if (state == null || state.center == null) return;
+        RivalCityState state = resolveCity(world, player);
+        if (state == null || state.center == null) {
+            player.sendMessage(new TextComponentString(
+                    TextFormatting.RED + "No rival city exists. Use /war rival city first."));
+            return;
+        }
 
         isGenerating = true;
         try {
@@ -415,7 +577,8 @@ public class RivalCityManager {
                 state.expansionManager.initialize(world, state.center);
             }
 
-            int steps = Math.max(1, 1 + (state.level / 3));
+            // A level-1 settlement is a tent camp: it doesn't sprawl expansion-node buildings.
+            int steps = state.level <= 1 ? 0 : Math.max(1, 1 + (state.level / 3));
             int builtNodes = 0;
 
             for (int i = 0; i < steps; i++) {
@@ -457,6 +620,7 @@ public class RivalCityManager {
 
             updateLegacyFields(state);
             WarMapOverlay.setRivalCityMarker(state.center, state.level);
+            saveCities(world);
 
             player.sendMessage(new TextComponentString(
                     TextFormatting.YELLOW + "Rival grew (Level " + state.level + "): " +
@@ -477,11 +641,10 @@ public class RivalCityManager {
         if (world.isRemote) return;
         if (isGenerating) return;
 
-        String ownerKey = getOwnerKey(player);
-        RivalCityState state = getCity(world, ownerKey);
+        RivalCityState state = resolveCity(world, player);
         if (state == null || state.center == null) {
             player.sendMessage(new TextComponentString(
-                    TextFormatting.RED + "No rival city exists. Use /war rival spawn first."));
+                    TextFormatting.RED + "No rival city exists. Use /war rival city first."));
             return;
         }
 
@@ -514,6 +677,7 @@ public class RivalCityManager {
             updateLegacyFields(state);
             claimChunksForRival(world, state);
             WarMapOverlay.setRivalCityMarker(state.center, state.level);
+            saveCities(world);
 
             player.sendMessage(new TextComponentString(
                     TextFormatting.GREEN + "Rival city is now level " +
@@ -542,10 +706,9 @@ public class RivalCityManager {
      */
     public static void printRivalStatus(World world, EntityPlayer player) {
         if (world == null || player == null) return;
-        String ownerKey = getOwnerKey(player);
-        RivalCityState state = getCity(world, ownerKey);
+        RivalCityState state = resolveCity(world, player);
         if (state == null || state.center == null) {
-            player.sendMessage(new TextComponentString(TextFormatting.RED + "No rival city exists. Use /war rival spawn first."));
+            player.sendMessage(new TextComponentString(TextFormatting.RED + "No rival city exists. Use /war rival city first."));
             return;
         }
 
@@ -848,7 +1011,7 @@ public class RivalCityManager {
      * Get stats for the player's rival city.
      */
     public static RivalFactionStats getStats(World world, EntityPlayer player) {
-        RivalCityState state = getCity(world, getOwnerKey(player));
+        RivalCityState state = resolveCity(world, player);
         return state != null ? state.stats : null;
     }
 
@@ -856,7 +1019,7 @@ public class RivalCityManager {
      * Get expansion manager for the player's rival city.
      */
     public static RivalExpansionManager getExpansionManager(World world, EntityPlayer player) {
-        RivalCityState state = getCity(world, getOwnerKey(player));
+        RivalCityState state = resolveCity(world, player);
         return state != null ? state.expansionManager : null;
     }
 

@@ -143,6 +143,10 @@ public class RivalCityState {
     public final Set<Long> roadBlocks = new HashSet<>();
     public final List<BlockPos> majorIntersections = new ArrayList<>();
 
+    // Level progression: the CORE town structure (castle/walled centre) is placed exactly once,
+    // when the settlement first reaches level 2 — level 1 is the tribal tent camp.
+    public boolean coreStructurePlaced = false;
+
     // Stats integration
     public RivalFactionStats stats;
     public RivalExpansionManager expansionManager;
@@ -177,6 +181,7 @@ public class RivalCityState {
         nbt.setInteger("level", level);
         nbt.setInteger("size", size);
         nbt.setInteger("ringRadius", currentRingRadius);
+        nbt.setBoolean("corePlaced", coreStructurePlaced);
         nbt.setInteger("gridPlotSize", gridPlotSize);
         nbt.setInteger("gridRoadWidth", gridRoadWidth);
         nbt.setInteger("gridSpacing", gridSpacing);
@@ -241,6 +246,7 @@ public class RivalCityState {
         level = nbt.getInteger("level");
         size = nbt.getInteger("size");
         currentRingRadius = nbt.getInteger("ringRadius");
+        coreStructurePlaced = nbt.getBoolean("corePlaced");
 
         // Grid layout
         gridPlotSize = nbt.hasKey("gridPlotSize") ? nbt.getInteger("gridPlotSize") : RivalCityConfig.plotSize;

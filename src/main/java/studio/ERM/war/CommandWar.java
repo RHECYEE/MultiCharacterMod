@@ -671,10 +671,19 @@ public class CommandWar extends CommandBase {
                     int cur = Math.max(1, near.level);
                     int target = (args.length >= 4 && !"add".equalsIgnoreCase(args[3]))
                             ? parseInt(args[3], 1, 10) : Math.min(10, cur + 1);
+                    if (target == cur) {
+                        msg(sender, TextFormatting.YELLOW + "Rival city is already level " + cur
+                                + (cur >= 10 ? " (the cap)." : "."));
+                        break;
+                    }
+                    // setLevel reports its own progress/result lines (it may fail and say why);
+                    // don't pre-announce a success that hasn't happened.
                     try { RivalCityManager.setLevel(world, player, target); }
-                    catch (Throwable t) { EpochRunnerMod.logger.error("[/war rival city level] failed", t); }
-                    msg(sender, TextFormatting.GREEN + "Rival level " + cur + " -> " + target
-                            + " (nations advance to their towns at level 2).");
+                    catch (Throwable t) {
+                        msg(sender, TextFormatting.RED + "Level change failed: " + t.getMessage());
+                        EpochRunnerMod.logger.error("[/war rival city level] failed", t);
+                    }
+                    msg(sender, TextFormatting.GRAY + "(nations advance to their permanent towns at rival level 2)");
                     break;
                 }
                 // A fresh seed defaults to LEVEL 1 (was 3 — the bug that spawned nations at L3 and
@@ -686,7 +695,11 @@ public class CommandWar extends CommandBase {
                     // so the settlement shows up as red territory on the tactical war map.
                     BlockPos center = RivalCityManager.seedCityAtDistance(world, player, level);
                     if (center == null) {
-                        msg(sender, TextFormatting.RED + "Rival city generation failed (busy or invalid world).");
+                        // seedCityAtDistance already messaged the reason when a city exists (one capital
+                        // per dimension); only the busy/invalid case needs a line here.
+                        if (RivalCityManager.getAnyCity(world) == null) {
+                            msg(sender, TextFormatting.RED + "Rival city generation failed (busy or invalid world).");
+                        }
                         break;
                     }
                     int dist = (int) Math.sqrt(center.distanceSq(player.getPosition()));

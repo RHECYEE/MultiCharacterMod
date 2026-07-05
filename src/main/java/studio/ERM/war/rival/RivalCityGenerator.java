@@ -93,10 +93,20 @@ public class RivalCityGenerator {
 
     /**
      * Generate structures for a specific city level.
+     *
+     * LEVEL 1 IS NOT A CITY: it's the rival's TRIBAL CAMP — tents/teepees from the catalog's
+     * "Level 0 Tribal / Tents" pool, nothing else. The core town structure (castle/walled centre),
+     * plots, backfill and the road web all begin at level 2 ("it shouldve been teepees or tents
+     * not a city, city is next").
      */
     public static void generateCityLevel(World world, RivalCityState state, int level) {
         if (state.center == null) return;
         if (!world.isBlockLoaded(state.center, false)) return;
+
+        if (level <= 1) {
+            generateTribalCamp(world, state);
+            return;
+        }
 
         // Determine mix of AW2 templates vs procedural buildings
         float proceduralRatio = Math.min(0.7f, (level - 3) * 0.15f);
@@ -109,12 +119,45 @@ public class RivalCityGenerator {
         }
 
         // Density backfill
-        if (level >= 2) {
-            performDensityBackfill(world, state, level);
-        }
+        performDensityBackfill(world, state, level);
 
         // Road network
         generateRoadNetwork(world, state);
+    }
+
+    // Keyword fallback for the level-1 camp, matched against everything AW2 has loaded (the same
+    // doctrine the nation-state camps use) so a thin catalog still yields real tents.
+    private static final String[] TRIBAL_CAMP_KEYWORDS =
+            {"teepee", "tepee", "tipi", "tent", "tribal", "camp", "hut", "yurt", "wigwam"};
+
+    /**
+     * The rival's LEVEL 1 settlement: a ring of tents/teepees around a bare centre. Placed once
+     * (re-runs only top up tents that failed to place); never drops the castle core or paves roads.
+     */
+    private static void generateTribalCamp(World world, RivalCityState state) {
+        int want = 7;
+        int placed = 0;
+        // Count what's already standing so /war rival city re-runs don't double the camp.
+        int existing = state.placedStructures.size();
+        for (int i = 0; existing + placed < want && i < want * 2; i++) {
+            double ang = rand.nextDouble() * Math.PI * 2;
+            int r = (i == 0 && existing == 0) ? 0 : 10 + rand.nextInt(22);
+            BlockPos probe = state.center.add((int) (Math.cos(ang) * r), 0, (int) (Math.sin(ang) * r));
+            if (!world.isBlockLoaded(probe, false)) continue;
+            BlockPos at = world.getTopSolidOrLiquidBlock(probe);
+            if (world.getBlockState(at.down()).getMaterial().isLiquid()) continue;
+
+            String tmpl = studio.ERM.strategic.Aw2Structures.pick(
+                    studio.ERM.war.config.SchematicCatalog.TRIBAL, null, TRIBAL_CAMP_KEYWORDS);
+            if (tmpl == null) break; // no tent templates loaded at all — nothing to place
+            if (placeAW2TemplateSafe(world, tmpl, at, EnumFacing.HORIZONTALS[rand.nextInt(4)], state)) {
+                state.placedStructures.add(at);
+                placed++;
+            }
+        }
+        state.currentRingRadius = Math.max(state.currentRingRadius, 34);
+        EpochRunnerMod.logger.info("[RivalCity] L1 tribal camp: " + placed + " tent(s) raised ("
+                + (existing + placed) + " standing)");
     }
 
     // =====================================================================
@@ -130,8 +173,9 @@ public class RivalCityGenerator {
             Set<String> templates = net.shadowmage.ancientwarfare.structure.template.StructureTemplateManager.getTemplates();
             if (templates == null || templates.isEmpty()) return false;
 
-            // Core structure on level 1
-            if (level == 1) {
+            // Core structure: placed exactly ONCE, the first time the settlement generates at
+            // level 2+ (level 1 is the tent camp and never reaches this method anymore).
+            if (level >= 2 && !state.coreStructurePlaced) {
                 String coreName = findTemplate(templates, CORE_STRUCTURES);
                 if (coreName != null) {
                     placeAW2TemplateSafe(world, coreName, state.center, EnumFacing.NORTH, state);
@@ -140,6 +184,7 @@ public class RivalCityGenerator {
                     state.currentRingRadius = 45;
                     state.stats.onStructureBuilt(RivalFactionStats.StructureType.HOUSING);
                     state.stats.onStructureBuilt(RivalFactionStats.StructureType.MILITARY_FORT);
+                    state.coreStructurePlaced = true;
                 }
             }
 
@@ -445,30 +490,34 @@ public class RivalCityGenerator {
         createRoad(world, state, from, to, RivalCityConfig.sideRoadWidth, Blocks.GRAVEL.getDefaultState());
     }
 
+    /**
+     * Roads are AXIS-ALIGNED, L-shaped streets: an X leg then a Z leg through a shared corner.
+     * The old point-to-point diagonals with a per-step random sine wobble read as "kind of random"
+     * trails; straight legs match the grid the plots are laid on and read as city streets.
+     */
     private static void createRoad(World world, RivalCityState state, BlockPos from, BlockPos to,
                                    int width, IBlockState material) {
-        double distance = Math.sqrt(from.distanceSq(to));
-        if (distance <= 0) return;
+        if (from.getX() == to.getX() && from.getZ() == to.getZ()) return;
+        // Corner: run east-west first, then north-south (deterministic — repaved roads overlap).
+        paveStraight(world, state, from.getX(), from.getZ(), to.getX(), from.getZ(), width, material);
+        paveStraight(world, state, to.getX(), from.getZ(), to.getX(), to.getZ(), width, material);
+    }
 
-        int steps = (int) (distance * 1.5);
-
-        double dx = (to.getX() - from.getX()) / distance;
-        double dz = (to.getZ() - from.getZ()) / distance;
-
-        double px = -dz;
-        double pz = dx;
-
-        for (int i = 0; i <= steps; i++) {
-            double t = (double) i / steps;
-
-            double curve = Math.sin(t * Math.PI) * 2.0 * (rand.nextDouble() - 0.5);
-
-            double centerX = from.getX() + (to.getX() - from.getX()) * t + px * curve;
-            double centerZ = from.getZ() + (to.getZ() - from.getZ()) * t + pz * curve;
-
-            for (int w = -width / 2; w <= width / 2; w++) {
-                int roadX = (int) (centerX + px * w);
-                int roadZ = (int) (centerZ + pz * w);
+    /** Pave one straight axis-aligned segment (either x1==x2 or z1==z2). */
+    private static void paveStraight(World world, RivalCityState state, int x1, int z1, int x2, int z2,
+                                     int width, IBlockState material) {
+        int half = width / 2;
+        int stepX = Integer.compare(x2, x1);
+        int stepZ = Integer.compare(z2, z1);
+        if (stepX == 0 && stepZ == 0) return;
+        int len = Math.max(Math.abs(x2 - x1), Math.abs(z2 - z1));
+        for (int i = 0; i <= len; i++) {
+            int cx = x1 + stepX * i;
+            int cz = z1 + stepZ * i;
+            for (int w = -half; w <= half; w++) {
+                // Width runs perpendicular to the leg's axis.
+                int roadX = (stepX != 0) ? cx : cx + w;
+                int roadZ = (stepX != 0) ? cz + w : cz;
 
                 BlockPos roadPos = new BlockPos(roadX, 0, roadZ);
                 if (!world.isBlockLoaded(roadPos, false)) continue;

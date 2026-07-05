@@ -1,4 +1,4 @@
-package studio.ERM.war;
+package studio.ERM.war.world;
 
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.math.BlockPos;

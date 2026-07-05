@@ -28,6 +28,14 @@ public class StrategicReinforcement extends StrategicObject {
     public NBTTagList gear = new NBTTagList(); // the loadout the player built (slot-indexed ItemStacks)
     public String vehicleShortName = "";       // vehicle contracts: the Flan ShortName being delivered
 
+    // Stuck-recovery bookkeeping for VEHICLE deliveries (transient — recomputed after any reload):
+    // Flan hull physics grinds into trees/slopes on raw terrain. Sampled every ~3s: no progress
+    // while far from the goal earns a strike and an 8-block unstick hop toward the goal; repeated
+    // strikes park the hull beside the rally instead ("takes forever / gets stuck in terrain").
+    private double stallX, stallZ;
+    private int stallStrikes = 0;
+    private long stallSampleTick = 0;
+
     public StrategicReinforcement() {
         speed = 2.6;
         strength = 1;
@@ -55,6 +63,7 @@ public class StrategicReinforcement extends StrategicObject {
                 pilot.setLocationAndAngles(at.getX() + 0.5, g.getY() + 1.0, at.getZ() + 0.5, yawDeg, 0F);
                 pilot.setVehicleType(vehicleShortName);
                 pilot.setMcmTeam("militia");
+                pilot.setDeliveryMode(true);
                 applyGearTo(pilot);
                 pilot.getEntityData().setString("erm_strategic", id.toString());
                 BlockPos wp = currentWaypoint();
@@ -108,6 +117,24 @@ public class StrategicReinforcement extends StrategicObject {
         }
     }
 
+    /** True when a Flan item is a PLANE or HELICOPTER (Flan models both as PlaneType). Vehicle
+     *  recruit contracts are ground-only: an aircraft "delivery" can't drive to the rally, so the
+     *  contract must REFUSE the item instead of consuming it. */
+    public static boolean flanIsAircraft(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        try {
+            Object item = stack.getItem();
+            if (!item.getClass().getName().toLowerCase().contains("flansmod")) return false;
+            Object type = item.getClass().getField("type").get(item);
+            for (Class<?> c = (type == null) ? null : type.getClass(); c != null; c = c.getSuperclass()) {
+                if ("PlaneType".equals(c.getSimpleName())) return true;
+            }
+            return false;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** Resolve a Flan vehicle/plane ITEM's ShortName reflectively ("" when it isn't one). */
     public static String flanShortNameOf(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return "";
@@ -152,10 +179,44 @@ public class StrategicReinforcement extends StrategicObject {
             }
             strength = (lead != null) ? 1 : 0;
             if (lead == null) return; // destroyed en route
-            try { ((studio.ERM.war.vehicle.EntityAIPilot) lead).setRallyPoint(goal); } catch (Throwable ignored) {}
+            try {
+                ((studio.ERM.war.vehicle.EntityAIPilot) lead).setRallyPoint(goal);
+                ((studio.ERM.war.vehicle.EntityAIPilot) lead).setDeliveryMode(true); // flat-out, every pass
+            } catch (Throwable ignored) {}
             x = lead.posX;
             z = lead.posZ;
             double vdx = (goal.getX() + 0.5) - lead.posX, vdz = (goal.getZ() + 0.5) - lead.posZ;
+
+            // STUCK RECOVERY: the hull (the pilot's ride, or the pilot if it hasn't mounted yet).
+            Entity hull = lead.getRidingEntity() != null ? lead.getRidingEntity() : lead;
+            long now = world.getTotalWorldTime();
+            if (stallSampleTick == 0) {
+                stallSampleTick = now; stallX = hull.posX; stallZ = hull.posZ;
+            } else if (now - stallSampleTick >= 60) {
+                double moved = (hull.posX - stallX) * (hull.posX - stallX)
+                        + (hull.posZ - stallZ) * (hull.posZ - stallZ);
+                double goalDistSq = vdx * vdx + vdz * vdz;
+                if (moved < 2.25 && goalDistSq > 400.0) { // <1.5 blocks in 3s, >20 blocks out
+                    stallStrikes++;
+                    double d = Math.sqrt(goalDistSq);
+                    double ux = vdx / d, uz = vdz / d;
+                    BlockPos to = (stallStrikes >= 4)
+                            ? surface(world, goal.getX() + 0.5 - ux * 10.0, goal.getZ() + 0.5 - uz * 10.0)
+                            : surface(world, hull.posX + ux * 8.0, hull.posZ + uz * 8.0);
+                    try {
+                        hull.setPositionAndUpdate(to.getX() + 0.5, to.getY() + 1.0, to.getZ() + 0.5);
+                        if (hull != lead) lead.setPositionAndUpdate(to.getX() + 0.5, to.getY() + 1.0, to.getZ() + 0.5);
+                        EpochRunnerMod.logger.info("[Recruit] delivery unstick hop (strike " + stallStrikes
+                                + ") -> " + to.getX() + "," + to.getZ());
+                    } catch (Throwable ignored) {}
+                    if (stallStrikes >= 4) stallStrikes = 0; // parked beside the rally; next pass arrives
+                } else if (moved >= 2.25) {
+                    stallStrikes = 0; // making progress again
+                }
+                stallSampleTick = now; stallX = hull.posX; stallZ = hull.posZ;
+            }
+            vdx = (goal.getX() + 0.5) - hull.posX;
+            vdz = (goal.getZ() + 0.5) - hull.posZ;
             // Generous 16-block arrival: Flan hull driving is imprecise; the delivery PARKS nearby
             // rather than fussing at the exact block (the "takes forever to show up" feel).
             if (vdx * vdx + vdz * vdz < 256.0 && routeIndex >= route.size() - 1) {

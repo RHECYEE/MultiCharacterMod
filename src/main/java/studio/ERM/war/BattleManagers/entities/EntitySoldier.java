@@ -501,9 +501,8 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         // AP round is the baseline. (Armor/air categories apply where those damage paths live.)
         double classMult = 1.0;
         try {
-            classMult = studio.ERM.war.config.WeaponClassConfig.mult(
-                    studio.ERM.war.config.WeaponClassConfig.classify(
-                            getHeldItemMainhand().getItem().getRegistryName().toString()),
+            classMult = studio.ERM.war.config.WeaponClassConfig.multFor(
+                    getHeldItemMainhand().getItem().getRegistryName().toString(),
                     studio.ERM.war.config.WeaponClassConfig.TARGET_INFANTRY);
         } catch (Throwable ignored) {}
         target.attackEntityFrom(DamageSource.causeMobDamage(this), (float) ((2.0 + warLevel) * classMult));
