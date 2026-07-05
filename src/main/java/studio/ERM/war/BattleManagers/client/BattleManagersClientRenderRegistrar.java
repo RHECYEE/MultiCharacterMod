@@ -56,6 +56,7 @@ public final class BattleManagersClientRenderRegistrar {
         bindItemModel(EpochRunnerMod.camp_setter);
         bindItemModel(EpochRunnerMod.modern_citizen_item);
         bindItemModel(EpochRunnerMod.air_target_designator);
+        bindItemModel(EpochRunnerMod.giant_schematic);
         bindItemModel(EpochRunnerMod.hammer);
         bindItemModel(EpochRunnerMod.multimeter);
         bindItemModel(EpochRunnerMod.blueprint);

@@ -46,6 +46,7 @@ public class EpochRunnerMod {
     public static studio.ERM.proxy.CommonProxy proxy;
 
     public static Item entity_protector, sabotage_fixer, camp_setter, modern_citizen_item, air_target_designator;
+    public static Item giant_schematic;
     public static Block citizen_bed, district_marker, scaffold, assembly_seat, family_kitchen, evacuation_point;
 
     // Job assignment items
@@ -426,6 +427,9 @@ public class EpochRunnerMod {
             // all of the player's airstrike items were missing from the game.
             air_target_designator = new studio.ERM.war.items.ItemAirTargetDesignator().setRegistryName("air_target_designator").setTranslationKey(MODID + ".air_target_designator");
 
+            // In-hand GIANT SCHEMATIC placer (skyscraper / cooling tower / factory).
+            giant_schematic = new studio.ERM.war.items.ItemGiantSchematic().setRegistryName("giant_schematic").setTranslationKey(MODID + ".giant_schematic");
+
             // Job assignment items - simple items that assign jobs when given to citizens
             hammer = new Item().setRegistryName("hammer").setTranslationKey(MODID + ".hammer").setCreativeTab(CreativeTabs.TOOLS).setMaxStackSize(1);
             multimeter = new Item().setRegistryName("multimeter").setTranslationKey(MODID + ".multimeter").setCreativeTab(CreativeTabs.TOOLS).setMaxStackSize(1);
@@ -440,7 +444,7 @@ public class EpochRunnerMod {
             expertise_resource = new studio.ERM.war.items.ItemExpertise(studio.ERM.war.items.ItemExpertise.ExpertiseKind.RESOURCE).setRegistryName("expertise_resource").setTranslationKey(MODID + ".expertise_resource");
 
             event.getRegistry().registerAll(entity_protector, sabotage_fixer, camp_setter, modern_citizen_item,
-                air_target_designator,
+                air_target_designator, giant_schematic,
                 hammer, multimeter, blueprint, command_buck, gold_wrench,
                 expertise_industry, expertise_agriculture, expertise_defense, expertise_resource);
 
