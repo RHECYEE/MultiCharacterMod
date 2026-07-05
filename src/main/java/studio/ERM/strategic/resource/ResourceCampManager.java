@@ -52,13 +52,11 @@ import java.util.UUID;
  */
 public final class ResourceCampManager {
 
-    // Tuning (config lift later — grouped here deliberately).
+    // Camp tuning now lives in config/Homosapien/camps.json (CampConfig); these are engine-cadence
+    // constants only.
     private static final int PASS_INTERVAL = 200;            // 10s manager cadence
-    private static final int EVAL_EVERY_DAYS = 6;            // rival expansion evaluation period
-    private static final int BASE_MAX_CAMPS = 3;             // + rivalLevel/3
     private static final double STAFF_RANGE = 96.0;          // player within -> staff materializes
     private static final double STAFF_DESPAWN_RANGE = 140.0;
-    private static final int UNITS_PER_ITEM = 8;             // strategic units -> one delivered item
 
     private ResourceCampManager() {}
 
@@ -87,6 +85,7 @@ public final class ResourceCampManager {
             rivalExpansion(world, data);
             construction(world, data);
             production(world, data);
+            dispatchTeamsters(world, data);
             campLife(world, data);
         } catch (Throwable t) {
             EpochRunnerMod.logger.error("[Camps] pass failed (guarded)", t);
@@ -99,7 +98,8 @@ public final class ResourceCampManager {
 
     private static void rivalExpansion(WorldServer world, ResourceNodeData data) {
         long day = world.getTotalWorldTime() / 24000L;
-        if (data.lastRivalEvalDay >= 0 && day - data.lastRivalEvalDay < EVAL_EVERY_DAYS) return;
+        if (data.lastRivalEvalDay >= 0
+                && day - data.lastRivalEvalDay < studio.ERM.war.config.CampConfig.data.evalEveryDays) return;
         RivalCityState city = RivalCityManager.getAnyCity(world);
         if (city == null || city.center == null) return; // no rival civilization yet
         data.lastRivalEvalDay = day;
@@ -115,8 +115,21 @@ public final class ResourceCampManager {
                     + " deposit @ " + scouted.pos.getX() + "," + scouted.pos.getZ());
         }
 
+        // AUTO-UPGRADE: one established camp per eval grows while its reserve justifies the works
+        // ("claim pressure" — the footprint + garrison + output all step with the level).
+        if (studio.ERM.war.config.CampConfig.data.rivalAutoUpgrade) {
+            for (ResourceNodeData.Node n : data.nodes) {
+                if (n.owner != ResourceNodeData.OWNER_RIVAL || n.campState != ResourceNodeData.CAMP_BUILT) continue;
+                int ceiling = Math.min(studio.ERM.war.config.CampConfig.data.maxCampLevel, 1 + level / 3);
+                if (n.level >= ceiling) continue;
+                if (n.remaining < n.reserve / 3) continue; // don't invest in a dying pit
+                upgradeCamp(world, data, n, "rival");
+                break;
+            }
+        }
+
         // EXPANSION: capped, slow, one convoy per eval.
-        int cap = BASE_MAX_CAMPS + level / 3;
+        int cap = studio.ERM.war.config.CampConfig.maxRivalCamps(level);
         if (data.activeCamps(ResourceNodeData.OWNER_RIVAL) >= cap) return;
         ResourceNodeData.Node target = data.nearestClaimable(city.center.getX(), city.center.getZ(), false, 1400);
         if (target == null) return;
@@ -141,21 +154,39 @@ public final class ResourceCampManager {
                 + " (" + data.activeCamps(ResourceNodeData.OWNER_RIVAL) + "/" + cap + " camps)");
     }
 
-    /** A BUILD_CAMP convoy holding at its destination founds the camp and retires. */
+    /** Convoys holding at their destinations resolve their missions and retire: engineers FOUND the
+     *  camp; teamsters DELIVER their cargo (player camps -> the warehouse; rival camps -> the city). */
     private static void handleConvoyArrivals(WorldServer world, ResourceNodeData data) {
         StrategicMapData map = StrategicMapData.get(world);
         for (StrategicObject o : new ArrayList<>(map.objects.values())) {
             if (!(o instanceof StrategicConvoy)) continue;
             StrategicConvoy c = (StrategicConvoy) o;
-            if (!"BUILD_CAMP".equals(c.purpose) || !c.arrived()) continue;
-            ResourceNodeData.Node n = data.byUid(c.targetNodeUid);
-            if (c.materialized) c.dematerialize(world);
-            map.remove(c.id);
-            if (n == null || n.campState != ResourceNodeData.CAMP_NONE) continue;
-            n.campState = ResourceNodeData.CAMP_PENDING;
-            data.markDirty();
-            EpochRunnerMod.logger.info("[Camps] convoy arrived — " + n.typeName()
-                    + " camp founded @ " + n.pos.getX() + "," + n.pos.getZ() + " (construction begins)");
+            if (!c.arrived()) continue;
+            if ("BUILD_CAMP".equals(c.purpose)) {
+                ResourceNodeData.Node n = data.byUid(c.targetNodeUid);
+                if (c.materialized) c.dematerialize(world);
+                map.remove(c.id);
+                if (n == null || n.campState != ResourceNodeData.CAMP_NONE) continue;
+                n.campState = ResourceNodeData.CAMP_PENDING;
+                data.markDirty();
+                EpochRunnerMod.logger.info("[Camps] convoy arrived — " + n.typeName()
+                        + " camp founded @ " + n.pos.getX() + "," + n.pos.getZ() + " (construction begins)");
+            } else if ("TEAMSTER".equals(c.purpose)) {
+                if (c.materialized) c.dematerialize(world);
+                map.remove(c.id);
+                ResourceNodeData.Node n = data.byUid(c.targetNodeUid);
+                boolean playerCargo = n != null && n.owner == ResourceNodeData.OWNER_PLAYER;
+                if (c.cargoUnits > 0 && playerCargo) {
+                    deliverUnitsToWarehouse(world, c.cargoType, c.cargoUnits);
+                    EpochRunnerMod.logger.info("[Camps] teamster delivered " + c.cargoUnits + " "
+                            + ResourceNodeData.TYPE_NAMES[Math.min(c.cargoType, ResourceNodeData.TYPE_NAMES.length - 1)]
+                            + " unit(s) to the warehouse");
+                } else if (c.cargoUnits > 0) {
+                    // Rival cargo vanishes into the rival economy (abstract for now).
+                    EpochRunnerMod.logger.info("[Camps] rival teamster brought " + c.cargoUnits
+                            + " unit(s) home to the city");
+                }
+            }
         }
     }
 
@@ -207,6 +238,7 @@ public final class ResourceCampManager {
                 n.template = tmpl;
                 n.campState = ResourceNodeData.CAMP_BUILT;
                 data.markDirty();
+                claimCampChunks(world, n); // the frontier shows on the map the moment the camp stands
                 String owner = n.owner == ResourceNodeData.OWNER_PLAYER ? "Your" : "The rival's";
                 for (EntityPlayer p : world.playerEntities) {
                     p.sendMessage(new TextComponentString(TextFormatting.GOLD + owner + " "
@@ -217,8 +249,70 @@ public final class ResourceCampManager {
                 // AW2 absent entirely: run the camp as data-only (no structure, never a tent).
                 n.campState = ResourceNodeData.CAMP_BUILT;
                 data.markDirty();
+                claimCampChunks(world, n);
             }
         }
+        // UPGRADE STRUCTURES: levels bought while the area was unloaded appear when the world does.
+        for (ResourceNodeData.Node n : data.nodes) {
+            if (n.pendingStructures <= 0 || n.campState != ResourceNodeData.CAMP_BUILT) continue;
+            if (!world.isBlockLoaded(n.pos, false)) continue;
+            BlockPos at = Aw2Structures.surfaceNear(world, n.pos, 10 + n.level * 4);
+            String tmpl = Aw2Structures.pick(SchematicCatalog.OUTPOSTS_CAMPS, null, campKeywordsFor(n.type));
+            if (at != null && tmpl != null && Aw2Structures.placeRandomFacing(world, tmpl, at)) {
+                n.pendingStructures--;
+                data.markDirty();
+                EpochRunnerMod.logger.info("[Camps] upgrade structure raised at the " + n.typeName()
+                        + " camp (level " + n.level + ")");
+            }
+        }
+    }
+
+    /**
+     * CLAIM PRESSURE: a standing camp claims chunks around itself — radius per camp level from
+     * CampConfig ("configurable target chunks"). Rival camps push RIVAL territory onto the map;
+     * player camps push PLAYER territory. Only NEUTRAL chunks flip (no silent land theft).
+     */
+    private static void claimCampChunks(WorldServer world, ResourceNodeData.Node n) {
+        try {
+            studio.ERM.war.world.WarWorldData war = studio.ERM.war.world.WarWorldData.get(world);
+            String owner = n.owner == ResourceNodeData.OWNER_PLAYER ? "PLAYER" : "RIVAL";
+            int r = studio.ERM.war.config.CampConfig.claimRadiusChunks(n.level);
+            net.minecraft.util.math.ChunkPos c = new net.minecraft.util.math.ChunkPos(n.pos);
+            int flipped = 0;
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    net.minecraft.util.math.ChunkPos p = new net.minecraft.util.math.ChunkPos(c.x + dx, c.z + dz);
+                    if ("NEUTRAL".equals(war.getOwner(p))) { war.setOwner(p, owner); flipped++; }
+                }
+            }
+            if (flipped > 0)
+                EpochRunnerMod.logger.info("[Camps] " + owner + " camp claimed " + flipped
+                        + " chunk(s) (level " + n.level + ", r=" + r + ")");
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * CAMP UPGRADE — shared by /war camp grow, the rival's auto-upgrade, and (later) upgrade GUIs:
+     * +1 level within the config ceiling; production, garrison, and the claim footprint all scale,
+     * and one more AW2 structure is queued to physically appear when the area is loaded.
+     */
+    public static boolean upgradeCamp(WorldServer world, ResourceNodeData data,
+                                      ResourceNodeData.Node n, String by) {
+        if (n == null || !n.hasActiveCamp()) return false;
+        if (n.level >= studio.ERM.war.config.CampConfig.data.maxCampLevel) return false;
+        n.level++;
+        n.pendingStructures++;
+        data.markDirty();
+        claimCampChunks(world, n);
+        despawnStaff(world, n.uid); // re-materializes at the new garrison size when next approached
+        EpochRunnerMod.logger.info("[Camps] " + n.typeName() + " camp upgraded to level " + n.level
+                + " (by " + by + ")");
+        for (EntityPlayer p : world.playerEntities) {
+            p.sendMessage(new TextComponentString(TextFormatting.GOLD
+                    + (n.owner == ResourceNodeData.OWNER_PLAYER ? "Your " : "The rival's ")
+                    + n.typeName() + " camp" + TextFormatting.GRAY + " grew to level " + n.level + "."));
+        }
+        return true;
     }
 
     /** Template keyword pools per resource type — matched against whatever AW2 actually loaded. */
@@ -251,14 +345,13 @@ public final class ResourceCampManager {
                 RivalCityState city = RivalCityManager.getAnyCity(world);
                 if (city != null) level = Math.max(1, city.level);
             } catch (Throwable ignored) {}
-            long produce = Math.min(n.remaining, Math.round(n.ratePerDay * (1.0 + 0.15 * (level - 1))));
+            double campScale = 1.0 + studio.ERM.war.config.CampConfig.data.productionPerCampLevel * (n.level - 1);
+            long produce = Math.min(n.remaining,
+                    Math.round(n.ratePerDay * (1.0 + 0.15 * (level - 1)) * campScale));
             n.remaining -= produce;
             n.storedOutput += produce;
             data.markDirty();
-
-            if (n.owner == ResourceNodeData.OWNER_PLAYER && n.storedOutput >= UNITS_PER_ITEM) {
-                deliverPlayerOutput(world, n);
-            }
+            // Output now travels by TEAMSTER (dispatchTeamsters) — visible logistics, raidable cargo.
             if (n.remaining <= 0) {
                 n.campState = ResourceNodeData.CAMP_EXHAUSTED;
                 data.markDirty();
@@ -274,36 +367,95 @@ public final class ResourceCampManager {
         }
     }
 
-    /** Player camp output -> real items -> the warehouse depot (loaded: direct; unloaded: the inbox). */
-    private static void deliverPlayerOutput(WorldServer world, ResourceNodeData.Node n) {
-        int items = (int) Math.min(64, n.storedOutput / UNITS_PER_ITEM);
-        if (items <= 0) return;
-        ItemStack stack = outputItemFor(n.type, items);
-        if (stack.isEmpty()) return;
-        CivilPlanData plan = CivilPlanData.get(world);
-        for (int kind : new int[]{CivilMarker.WAREHOUSE, CivilMarker.KITCHEN}) {
-            for (CivilMarker mk : plan.markers) {
-                if (mk.kind != kind || !mk.hasDepot()) continue;
-                if (world.isBlockLoaded(mk.depotPos, false)) {
-                    net.minecraft.tileentity.TileEntity te = world.getTileEntity(mk.depotPos);
-                    if (!(te instanceof TileEntityDistrictMarker)) continue;
-                    DepotInboxData.get(world).drainInto(mk.depotPos, ((TileEntityDistrictMarker) te).depot);
-                    ItemStack left = ItemHandlerHelper.insertItemStacked(
-                            ((TileEntityDistrictMarker) te).depot, stack, false);
-                    // Deduct EXACTLY what landed in the chest — a partial fit must not ship again
-                    // tomorrow (that would duplicate the inserted portion). The rest waits at camp.
-                    int deliveredItems = items - (left.isEmpty() ? 0 : left.getCount());
-                    if (deliveredItems > 0) n.storedOutput -= (long) deliveredItems * UNITS_PER_ITEM;
-                    return;
-                } else if (DepotInboxData.get(world).queue(mk.depotPos, stack)) {
-                    n.storedOutput -= (long) items * UNITS_PER_ITEM; // queued in full to the ledger
-                    return;
-                } else {
-                    return; // inbox guard full: output waits at the camp
+    /**
+     * MILITARY TEAMSTERS — the visible logistics leg: every few days a teamster convoy departs a
+     * producing camp with its stored output in the cart and hauls it home (player camps -> the
+     * warehouse; rival camps -> the rival city). The cargo rides the strategic map: ambush the
+     * convoy and the goods are LOST — camps are worth raiding.
+     */
+    private static void dispatchTeamsters(WorldServer world, ResourceNodeData data) {
+        long day = world.getTotalWorldTime() / 24000L;
+        studio.ERM.war.config.CampConfig.ConfigData cfg = studio.ERM.war.config.CampConfig.data;
+        for (ResourceNodeData.Node n : data.nodes) {
+            if (n.campState != ResourceNodeData.CAMP_BUILT || n.owner == ResourceNodeData.OWNER_NONE) continue;
+            if (n.storedOutput < cfg.teamsterMinUnits) continue;
+            if (n.lastTeamsterDay >= 0 && day - n.lastTeamsterDay < cfg.teamsterEveryDays) continue;
+
+            BlockPos home = null;
+            if (n.owner == ResourceNodeData.OWNER_PLAYER) {
+                CivilPlanData plan = CivilPlanData.get(world);
+                for (int kind : new int[]{CivilMarker.WAREHOUSE, CivilMarker.KITCHEN}) {
+                    for (CivilMarker mk : plan.markers) {
+                        if (mk.kind == kind && mk.hasDepot()) { home = mk.depotPos; break; }
+                    }
+                    if (home != null) break;
                 }
+            } else {
+                RivalCityState city = RivalCityManager.getAnyCity(world);
+                if (city != null) home = city.center;
             }
+            if (home == null) continue; // nowhere to haul to yet — output keeps stacking
+
+            // One teamster per camp at a time.
+            boolean enRoute = false;
+            for (StrategicObject o : StrategicMapData.get(world).objects.values()) {
+                if (o instanceof StrategicConvoy && "TEAMSTER".equals(((StrategicConvoy) o).purpose)
+                        && ((StrategicConvoy) o).targetNodeUid == n.uid) { enRoute = true; break; }
+            }
+            if (enRoute) continue;
+
+            StrategicConvoy t = new StrategicConvoy();
+            t.purpose = "TEAMSTER";
+            t.targetNodeUid = n.uid;
+            t.cargoType = n.type;
+            t.cargoUnits = n.storedOutput;
+            t.warLevel = Math.max(1, n.level + 1);
+            t.strength = 3 + n.level; // driver + handlers + a level-scaled escort
+            t.route.add(new BlockPos(n.pos.getX(), 0, n.pos.getZ()));
+            t.route.add(new BlockPos(home.getX(), 0, home.getZ()));
+            t.x = n.pos.getX() + 0.5;
+            t.z = n.pos.getZ() + 0.5;
+            n.storedOutput = 0;   // the goods are IN THE CART now — lose the convoy, lose the load
+            n.lastTeamsterDay = day;
+            data.markDirty();
+            StrategicMapData.get(world).add(t);
+            EpochRunnerMod.logger.info("[Camps] teamster departed the " + n.typeName() + " camp with "
+                    + t.cargoUnits + " unit(s) -> " + home.getX() + "," + home.getZ());
         }
-        // No warehouse anywhere: output simply accumulates at the camp until one exists.
+    }
+
+    /** Teamster arrival (player cargo): units -> real items -> the warehouse depot (loaded: direct
+     *  + inbox drain; unloaded: the depot inbox ledger). Called from handleConvoyArrivals. */
+    private static void deliverUnitsToWarehouse(WorldServer world, int type, long units) {
+        int upi = studio.ERM.war.config.CampConfig.data.unitsPerItem;
+        long remaining = units;
+        CivilPlanData plan = CivilPlanData.get(world);
+        while (remaining >= upi) {
+            int items = (int) Math.min(64, remaining / upi);
+            ItemStack stack = outputItemFor(type, items);
+            if (stack.isEmpty()) return;
+            boolean moved = false;
+            for (int kind : new int[]{CivilMarker.WAREHOUSE, CivilMarker.KITCHEN}) {
+                for (CivilMarker mk : plan.markers) {
+                    if (mk.kind != kind || !mk.hasDepot()) continue;
+                    if (world.isBlockLoaded(mk.depotPos, false)) {
+                        net.minecraft.tileentity.TileEntity te = world.getTileEntity(mk.depotPos);
+                        if (!(te instanceof TileEntityDistrictMarker)) continue;
+                        DepotInboxData.get(world).drainInto(mk.depotPos, ((TileEntityDistrictMarker) te).depot);
+                        ItemStack left = ItemHandlerHelper.insertItemStacked(
+                                ((TileEntityDistrictMarker) te).depot, stack, false);
+                        int deliveredItems = items - (left.isEmpty() ? 0 : left.getCount());
+                        if (deliveredItems > 0) { remaining -= (long) deliveredItems * upi; moved = true; }
+                    } else if (DepotInboxData.get(world).queue(mk.depotPos, stack)) {
+                        remaining -= (long) items * upi;
+                        moved = true;
+                    }
+                    if (moved) break;
+                }
+                if (moved) break;
+            }
+            if (!moved) return; // everything full — the rest of the load is written off
+        }
     }
 
     /** Resource type -> the delivered item (vanilla stand-ins; config lift later). */
@@ -377,7 +529,7 @@ public final class ResourceCampManager {
         } catch (Throwable ignored) {}
 
         if (n.owner == ResourceNodeData.OWNER_RIVAL) {
-            int guards = 4 + level / 3;
+            int guards = 4 + level / 3 + (n.level - 1) * 2; // upgrades harden the garrison
             for (int i = 0; i < guards; i++) {
                 BlockPos at = Aw2Structures.surfaceNear(world, n.pos, 6);
                 if (at == null) continue;

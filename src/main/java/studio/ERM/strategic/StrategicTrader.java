@@ -42,6 +42,10 @@ public class StrategicTrader extends StrategicObject {
     // robbed cart never restocks itself by dematerializing and coming back).
     private boolean cargoFilled = false;
 
+    /** Encounter hook: raiders take the goods. Marks the cargo spent so the once-per-lifetime fill
+     *  never runs — a robbed caravan's cart materializes EMPTY from here on. */
+    public void robCargo() { cargoFilled = true; }
+
     public StrategicTrader() {
         speed = 1.8;      // a walking merchant pace while unloaded
         strength = 1;

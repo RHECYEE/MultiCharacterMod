@@ -18,12 +18,16 @@ import java.util.UUID;
  */
 public class StrategicConvoy extends StrategicObject {
 
-    /** What this convoy does at its destination. BUILD_CAMP is the first mission profile. */
+    /** Mission profile at the destination: BUILD_CAMP (engineers raise a camp) or TEAMSTER
+     *  (collect camp output and haul it home) — same generic group, different mission. */
     public String purpose = "BUILD_CAMP";
-    /** The resource node this convoy is heading for (ResourceNodeData uid; 0 = none). */
+    /** The resource node this convoy serves (ResourceNodeData uid; 0 = none). */
     public int targetNodeUid = 0;
     public int warLevel = 3;
     public String team = "empire";
+    /** TEAMSTER cargo: strategic units + resource type in the cart. Lost if the convoy dies. */
+    public long cargoUnits = 0;
+    public int cargoType = 0;
 
     public StrategicConvoy() {
         loopRoute = false;   // one-way: hold at the destination until the camp manager retires us
@@ -35,7 +39,10 @@ public class StrategicConvoy extends StrategicObject {
     public String typeId() { return "convoy"; }
 
     @Override
-    public String label() { return "Engineer convoy (" + strength + ") -> node #" + targetNodeUid; }
+    public String label() {
+        return ("TEAMSTER".equals(purpose) ? "Teamster convoy (" : "Engineer convoy (")
+                + strength + ") -> node #" + targetNodeUid;
+    }
 
     /** True when this one-way convoy is holding at (or within ~4 blocks of) its final waypoint. */
     public boolean arrived() {
@@ -141,6 +148,8 @@ public class StrategicConvoy extends StrategicObject {
         tag.setInteger("node", targetNodeUid);
         tag.setInteger("warLevel", warLevel);
         tag.setString("team", team);
+        tag.setLong("cargoUnits", cargoUnits);
+        tag.setInteger("cargoType", cargoType);
         return tag;
     }
 
@@ -151,6 +160,8 @@ public class StrategicConvoy extends StrategicObject {
         targetNodeUid = tag.getInteger("node");
         warLevel = Math.max(1, Math.min(10, tag.getInteger("warLevel")));
         team = tag.getString("team").isEmpty() ? "empire" : tag.getString("team");
+        cargoUnits = Math.max(0, tag.getLong("cargoUnits"));
+        cargoType = tag.getInteger("cargoType");
         loopRoute = false;
     }
 }

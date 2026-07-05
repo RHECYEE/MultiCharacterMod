@@ -71,6 +71,7 @@ public class EpochRunnerMod {
                 studio.ERM.war.config.TradePriceConfig.load(cfgDir);
                 studio.ERM.war.config.SchematicCatalog.load(cfgDir);
                 studio.ERM.strategic.patrol.PatrolConfig.load(cfgDir);
+                studio.ERM.war.config.CampConfig.load(cfgDir);
                 studio.ERM.war.config.ResearchConfig.load(cfgDir);
                 studio.ERM.war.config.FactoryConfig.load(cfgDir);
                 logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice + Research + Factory configs loaded from " + cfgDir);
@@ -281,6 +282,11 @@ public class EpochRunnerMod {
             // their first targeting tick can crash the server.
             MinecraftForge.EVENT_BUS.register(studio.ERM.war.util.Aw2FactionCrashGuard.class);
             logger.info("[War] AW2 faction crash guard registered");
+
+            // LOW-INTENSITY ENCOUNTERS — unloaded strategic groups passing on the map occasionally
+            // clash/rob each other (rumors in chat; casualties + cargo losses persist).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.StrategicEncounterManager.class);
+            logger.info("[Strategic] encounter manager registered (the roads are alive)");
 
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(

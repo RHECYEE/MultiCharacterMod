@@ -121,6 +121,24 @@ public final class BattleDirectorRegistry {
                 }
         ));
 
+        // OFFENSIVE missions — the player takes the fight to the rival's forward presence.
+        register(new BattleDirectorEntry(
+                "attack_camp",
+                "Attack Rival Camp",
+                "Short tactical assault. Deploy ON a rival extraction camp; wipe the garrison to capture it.",
+                60,  // CP cost
+                1,   // Min level
+                () -> new CampAssaultDirector(false)
+        ));
+        register(new BattleDirectorEntry(
+                "attack_outpost",
+                "Attack Outpost/City",
+                "Heavy assault with enemy reinforcements. Victory claims the surrounding chunks.",
+                120, // CP cost
+                3,   // Min level
+                () -> new CampAssaultDirector(true)
+        ));
+
         // Debug circle retired from the player-facing deploy menu (it was a formation test rig).
         // DebugCircleDirector stays in the codebase for /war debug work; it just isn't registered,
         // so the dropdown only offers real Player-Created Battles.

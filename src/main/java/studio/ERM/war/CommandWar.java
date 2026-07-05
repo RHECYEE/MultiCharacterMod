@@ -101,6 +101,7 @@ public class CommandWar extends CommandBase {
             case "designator": giveDesignator(sender, args); break;
             case "summon":  summonVehicle(sender, args); break;
             case "rival":   rival(sender, args);       break;
+            case "camp":    camp(sender, args);        break;
             case "claim":   claim(sender, args, true); break;
             case "unclaim": claim(sender, args, false); break;
             case "cp":      grantCp(sender, args);     break;
@@ -319,6 +320,74 @@ public class CommandWar extends CommandBase {
         WarBattleSystem.forceEndBattle(world);
         msg(sender, was ? TextFormatting.GREEN + "Battle force-ended."
                         : TextFormatting.GRAY + "No active battle to stop.");
+    }
+
+    /**
+     * /war camp list | info | grow | level <n> — the extraction-camp console. info/grow/level act
+     * on the NEAREST node (any owner: it's an admin/design tool); grow mirrors what the rival's
+     * auto-upgrade and future upgrade GUIs call.
+     */
+    private void camp(ICommandSender sender, String[] args) throws CommandException {
+        EntityPlayerMP player = getCommandSenderAsPlayer(sender);
+        net.minecraft.world.WorldServer world = (net.minecraft.world.WorldServer) player.world;
+        studio.ERM.strategic.resource.ResourceNodeData data =
+                studio.ERM.strategic.resource.ResourceNodeData.get(world);
+        data.ensureSeeded(world);
+        String op = args.length > 1 ? args[1].toLowerCase(java.util.Locale.ROOT) : "info";
+
+        if ("list".equals(op)) {
+            msg(sender, TextFormatting.GOLD + "Strategic resource nodes (" + data.nodes.size() + "):");
+            for (studio.ERM.strategic.resource.ResourceNodeData.Node n : data.nodes) {
+                String owner = n.owner == 1 ? "PLAYER" : n.owner == 2 ? "RIVAL" : "-";
+                String camp = n.campState == 0 ? "none" : n.campState == 1 ? "pending"
+                        : n.campState == 2 ? ("L" + n.level) : "exhausted";
+                msg(sender, TextFormatting.GRAY + "  #" + n.uid + " " + TextFormatting.AQUA + n.typeName()
+                        + TextFormatting.GRAY + " @ " + n.pos.getX() + "," + n.pos.getZ()
+                        + "  reserve " + n.remaining + "/" + n.reserve
+                        + "  owner " + owner + "  camp " + camp
+                        + (n.playerKnown ? " (charted)" : ""));
+            }
+            return;
+        }
+
+        // Everything else targets the NEAREST node.
+        studio.ERM.strategic.resource.ResourceNodeData.Node best = null;
+        double bd = Double.MAX_VALUE;
+        for (studio.ERM.strategic.resource.ResourceNodeData.Node n : data.nodes) {
+            double d = n.pos.distanceSq(player.getPosition());
+            if (d < bd) { bd = d; best = n; }
+        }
+        if (best == null) { msg(sender, TextFormatting.RED + "No resource nodes exist."); return; }
+
+        switch (op) {
+            case "grow":
+                if (studio.ERM.strategic.resource.ResourceCampManager.upgradeCamp(world, data, best, "command")) {
+                    msg(sender, TextFormatting.GREEN + best.typeName() + " camp grew to level " + best.level + ".");
+                } else {
+                    msg(sender, TextFormatting.RED + "Can't grow: no active camp here, or already at the ceiling.");
+                }
+                break;
+            case "level": {
+                int target = args.length > 2 ? parseInt(args[2], 1,
+                        studio.ERM.war.config.CampConfig.data.maxCampLevel) : best.level;
+                while (best.level < target
+                        && studio.ERM.strategic.resource.ResourceCampManager.upgradeCamp(world, data, best, "command")) {
+                    // upgradeCamp steps one level at a time (claims + structures per step)
+                }
+                msg(sender, TextFormatting.GREEN + best.typeName() + " camp is level " + best.level + ".");
+                break;
+            }
+            default:
+                msg(sender, TextFormatting.GOLD + best.typeName() + " node #" + best.uid
+                        + TextFormatting.GRAY + " @ " + best.pos.getX() + "," + best.pos.getZ());
+                msg(sender, TextFormatting.GRAY + "  reserve " + best.remaining + "/" + best.reserve
+                        + "  rate " + best.ratePerDay + "/day  stored " + best.storedOutput);
+                msg(sender, TextFormatting.GRAY + "  owner " + (best.owner == 1 ? "PLAYER" : best.owner == 2 ? "RIVAL" : "-")
+                        + "  camp " + (best.campState == 0 ? "none" : best.campState == 1 ? "pending"
+                        : best.campState == 2 ? ("built L" + best.level) : "exhausted")
+                        + "  charted " + best.playerKnown);
+                break;
+        }
     }
 
     private void status(ICommandSender sender) {

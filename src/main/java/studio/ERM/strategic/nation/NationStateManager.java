@@ -218,14 +218,38 @@ public final class NationStateManager {
                 data.markDirty();
             }
 
-            // PATROL NOISE: a small guard patrol wanders out from the settlement (era skins applied
-            // by the framework). If the player destroys it, the clock simply rolls another later.
+            // PATROL: a PERSISTENT strategic roamer walking a circuit around the settlement — the
+            // unified background-life path (exists on the map while unloaded, materializes as the
+            // nation_guard_patrol composition when the player crosses it, casualties persist).
+            // One circuit per nation; destroyed patrols re-raise on the next roll.
             if (now - n.lastPatrol > PATROL_EVERY && RNG.nextInt(3) == 0) {
                 n.lastPatrol = now;
                 try {
-                    if (PatrolFramework.spawnAt(world, "nation_guard_patrol", n.center)
-                            && PatrolFramework.VERBOSE) {
-                        EpochRunnerMod.logger.info("[Nations] " + n.name + " dispatched a patrol");
+                    String homeKey = "nationroam:" + (n.center.getX() >> 4) + "," + (n.center.getZ() >> 4);
+                    boolean alive = false;
+                    for (studio.ERM.strategic.StrategicObject o
+                            : studio.ERM.strategic.StrategicMapData.get(world).objects.values()) {
+                        if (o instanceof studio.ERM.strategic.StrategicRoamer && homeKey.equals(o.homeKey)) {
+                            alive = true; break;
+                        }
+                    }
+                    if (!alive) {
+                        studio.ERM.strategic.StrategicRoamer r = new studio.ERM.strategic.StrategicRoamer();
+                        r.defName = "nation_guard_patrol";
+                        r.displayName = n.name + " patrol";
+                        r.faction = "NATION:" + n.name;
+                        r.homeKey = homeKey;
+                        r.strength = 3 + RNG.nextInt(2);
+                        for (int wp = 0; wp < 6; wp++) { // the circuit: a 6-point ring around home
+                            double wa = Math.PI * 2 * wp / 6;
+                            int wr = 40 + RNG.nextInt(24);
+                            r.route.add(new BlockPos(n.center.getX() + (int) (Math.cos(wa) * wr), 0,
+                                    n.center.getZ() + (int) (Math.sin(wa) * wr)));
+                        }
+                        r.x = n.center.getX() + 0.5;
+                        r.z = n.center.getZ() + 0.5;
+                        studio.ERM.strategic.StrategicMapData.get(world).add(r);
+                        EpochRunnerMod.logger.info("[Nations] " + n.name + " raised a patrol circuit");
                     }
                 } catch (Throwable t) {
                     EpochRunnerMod.logger.error("[Nations] patrol dispatch failed for " + n.name, t);
@@ -239,6 +263,7 @@ public final class NationStateManager {
                 try {
                     EntityPlayer p = world.playerEntities.get(0);
                     studio.ERM.strategic.StrategicTrader t = new studio.ERM.strategic.StrategicTrader();
+                    t.faction = "NATION:" + n.name; // encounters + intel read the flag, not the skin
                     t.level = Math.max(1, rivalLevel);
                     t.escorts = rivalLevel >= 3 ? 2 : 0;
                     t.route.add(new BlockPos(n.center.getX(), 0, n.center.getZ()));

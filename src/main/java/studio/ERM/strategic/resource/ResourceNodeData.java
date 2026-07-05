@@ -52,6 +52,11 @@ public class ResourceNodeData extends WorldSavedData {
         public long storedOutput;   // mined units awaiting collection/delivery
         public String template = ""; // the AW2 schematic chosen for this camp (once built)
         public long lastProdDay = -1;
+        /** Camp upgrade level (1..CampConfig.maxCampLevel): production, garrison, claim footprint. */
+        public int level = 1;
+        /** Upgrade structures awaiting a loaded chunk to physically appear (AW2 templates). */
+        public int pendingStructures = 0;
+        public long lastTeamsterDay = -1;
 
         public String typeName() { return TYPE_NAMES[Math.max(0, Math.min(type, TYPE_NAMES.length - 1))]; }
         public boolean hasActiveCamp() { return campState == CAMP_PENDING || campState == CAMP_BUILT; }
@@ -186,6 +191,9 @@ public class ResourceNodeData extends WorldSavedData {
             n.storedOutput = t.getLong("stored");
             n.template = t.getString("tmpl");
             n.lastProdDay = t.hasKey("prodDay") ? t.getLong("prodDay") : -1;
+            n.level = Math.max(1, t.getInteger("lvl"));
+            n.pendingStructures = Math.max(0, t.getInteger("pendStruct"));
+            n.lastTeamsterDay = t.hasKey("teamDay") ? t.getLong("teamDay") : -1;
             nodes.add(n);
         }
     }
@@ -211,6 +219,9 @@ public class ResourceNodeData extends WorldSavedData {
             t.setLong("stored", n.storedOutput);
             t.setString("tmpl", n.template == null ? "" : n.template);
             t.setLong("prodDay", n.lastProdDay);
+            t.setInteger("lvl", n.level);
+            t.setInteger("pendStruct", n.pendingStructures);
+            t.setLong("teamDay", n.lastTeamsterDay);
             list.appendTag(t);
         }
         nbt.setTag("nodes", list);
