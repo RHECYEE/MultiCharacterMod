@@ -1,0 +1,9 @@
+{
+  "variants": {
+    "facing=north": { "model": "minecraft:bed_foot" },
+    "facing=south": { "model": "minecraft:bed_foot", "y": 180 },
+    "facing=east": { "model": "minecraft:bed_foot", "y": 90 },
+    "facing=west": { "model": "minecraft:bed_foot", "y": 270 },
+    "inventory": { "model": "minecraft:bed_inventory" }
+  }
+}

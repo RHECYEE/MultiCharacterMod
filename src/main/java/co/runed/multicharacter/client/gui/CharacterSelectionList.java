@@ -1,74 +1,60 @@
 package co.runed.multicharacter.client.gui;
 
 import co.runed.multicharacter.character.Character;
-import com.google.common.collect.Lists;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiListExtended;
-import net.minecraftforge.fml.relauncher.Side;
-import net.minecraftforge.fml.relauncher.SideOnly;
 
+import java.util.ArrayList;
 import java.util.List;
 
-@SideOnly(Side.CLIENT)
-public class CharacterSelectionList extends GuiListExtended
-{
-    private final CharacterListGuiScreen parent;
-    private final List<GuiCharacterListEntry> characterList = Lists.newArrayList();
-    private int selectedSlotIndex = -1;
+public class CharacterSelectionList extends GuiListExtended {
 
-    public CharacterSelectionList(CharacterListGuiScreen parent, Minecraft mcIn, int widthIn, int heightIn, int topIn, int bottomIn, int slotHeightIn)
-    {
-        super(mcIn, widthIn, heightIn, topIn, bottomIn, slotHeightIn);
-        this.parent = parent;
+    private final CharacterListGuiScreen parentScreen;
+    private final List<GuiCharacterListEntry> entries = new ArrayList<>();
+    private int selectedIndex = -1;
+
+    public CharacterSelectionList(CharacterListGuiScreen parentScreen, Minecraft mc, int width, int height, int top, int bottom, int slotHeight) {
+        super(mc, width, height, top, bottom, slotHeight);
+        this.parentScreen = parentScreen;
     }
 
-    public GuiListExtended.IGuiListEntry getListEntry(int index)
-    {
-        if (index < this.characterList.size() && index >= 0)
-        {
-            return this.characterList.get(index);
-        }
-
-        return this.characterList.get(0);
-    }
-
-    protected int getSize()
-    {
-        return this.characterList.size();
-    }
-
-    public void setSelectedSlotIndex(int selectedSlotIndexIn)
-    {
-        this.selectedSlotIndex = selectedSlotIndexIn;
-    }
-
-    protected boolean isSelected(int slotIndex)
-    {
-        return slotIndex == this.selectedSlotIndex;
-    }
-
-    public int getSelected()
-    {
-        return this.selectedSlotIndex;
-    }
-
-    public void updateCharacters(List<Character> characters)
-    {
-        this.characterList.clear();
-
-        for (int i = 0; i < characters.size(); ++i)
-        {
-            this.characterList.add(new GuiCharacterListEntry(this.parent, characters.get(i)));
+    public void updateCharacters(List<Character> characters) {
+        entries.clear();
+        if (characters != null) {
+            for (Character c : characters) {
+                entries.add(new GuiCharacterListEntry(parentScreen, c));
+            }
         }
     }
 
-    protected int getScrollBarX()
-    {
-        return super.getScrollBarX() + 30;
+    @Override
+    public IGuiListEntry getListEntry(int index) {
+        if (index < 0 || index >= entries.size()) return null;
+        return entries.get(index);
     }
 
-    public int getListWidth()
-    {
-        return super.getListWidth() + 85;
+    @Override
+    protected int getSize() {
+        return entries.size();
+    }
+
+    @Override
+    protected boolean isSelected(int slotIndex) {
+        return slotIndex == selectedIndex;
+    }
+
+    public int getSelected() {
+        return selectedIndex;
+    }
+
+    public void setSelectedSlotIndex(int index) {
+        this.selectedIndex = index;
+    }
+
+    public void setDimensions(int width, int height, int top, int bottom) {
+        this.width = width;
+        this.height = height;
+        this.top = top;
+        this.bottom = bottom;
     }
 }

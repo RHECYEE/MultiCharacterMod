@@ -1,0 +1,60 @@
+# Epoch Runner Mod (erm) - en_us.lang
+# All items and blocks registered under "erm" modid
+
+# ----------------------------
+# Items
+# ----------------------------
+
+item.erm.command_buck.name=Command Buck
+item.erm.gold_wrench.name=Gold Wrench
+item.erm.hammer.name=Hammer
+item.erm.blueprint.name=Blueprint
+item.erm.multimeter.name=Multimeter
+item.erm.camp_setter.name=Camp Setter
+item.erm.sabotage_fixer.name=Sabotage Fixer
+item.erm.patrol_stick.name=Patrol Stick
+item.erm.modern_citizen_item.name=Modern Citizen Spawner
+item.erm.intelligence_report.name=Intelligence Report
+item.erm.entity_protector.name=Entity Protector
+
+# Expertise items
+item.erm.expertise.name=Expertise
+item.erm.expertise_ag.name=Agriculture Expertise
+item.erm.expertise_power.name=Power Expertise
+item.erm.expertise_defense.name=Defense Expertise
+item.erm.expertise_resources.name=Resource Expertise
+
+# Air Target Designator - Base
+item.erm.air_target_designator.name=Airstrike Designator
+
+# Air Target Designator - Level Variants
+item.erm.air_target_designator_level1.name=Airstrike Designator (Recon Flyover)
+item.erm.air_target_designator_level2.name=Airstrike Designator (Light Strafe)
+item.erm.air_target_designator_level3.name=Airstrike Designator (Bombing Run)
+item.erm.air_target_designator_level4.name=Airstrike Designator (Heavy Strafe)
+item.erm.air_target_designator_level5.name=Airstrike Designator (Precision Strike)
+item.erm.air_target_designator_level6.name=Airstrike Designator (Napalm Run)
+item.erm.air_target_designator_level7.name=Airstrike Designator (Cluster Bomb)
+item.erm.air_target_designator_level8.name=Airstrike Designator (Carpet Bombing)
+item.erm.air_target_designator_level9.name=Airstrike Designator (Tactical Strike)
+item.erm.air_target_designator_level10.name=Airstrike Designator (Strategic Strike)
+
+# ----------------------------
+# Blocks
+# ----------------------------
+
+tile.erm.banquet_hall.name=Banquet Hall
+tile.erm.district_marker.name=District Marker
+tile.erm.scaffold.name=Scaffold
+tile.erm.citizen_bed.name=Citizen Bed
+
+# ----------------------------
+# Creative Tab
+# ----------------------------
+
+itemGroup.erm=Homosapien
+
+# ----------------------------
+# Entities (for AW2 compatibility, these use ancientwarfarenpc domain)
+# The mod spawns AW2 NPCs with "empire" faction
+# ----------------------------

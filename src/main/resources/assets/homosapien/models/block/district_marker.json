@@ -1,0 +1,51 @@
+{
+  "__comment": "Static chest-look depot: oak body + darker lid + iron latch, all vanilla textures.",
+  "ambientocclusion": true,
+  "textures": {
+    "body": "blocks/planks_oak",
+    "lid": "blocks/planks_big_oak",
+    "latch": "blocks/iron_block",
+    "particle": "blocks/planks_oak"
+  },
+  "elements": [
+    {
+      "__comment": "Chest body (lower box).",
+      "from": [1, 0, 1],
+      "to": [15, 9, 15],
+      "faces": {
+        "down":  { "texture": "#body", "cullface": "down" },
+        "up":    { "texture": "#body" },
+        "north": { "texture": "#body" },
+        "south": { "texture": "#body" },
+        "west":  { "texture": "#body" },
+        "east":  { "texture": "#body" }
+      }
+    },
+    {
+      "__comment": "Chest lid (upper box, darker).",
+      "from": [1, 9, 1],
+      "to": [15, 14, 15],
+      "faces": {
+        "down":  { "texture": "#lid" },
+        "up":    { "texture": "#lid" },
+        "north": { "texture": "#lid" },
+        "south": { "texture": "#lid" },
+        "west":  { "texture": "#lid" },
+        "east":  { "texture": "#lid" }
+      }
+    },
+    {
+      "__comment": "Front latch.",
+      "from": [7, 7, 0.5],
+      "to": [9, 11, 1.5],
+      "faces": {
+        "north": { "texture": "#latch" },
+        "south": { "texture": "#latch" },
+        "west":  { "texture": "#latch" },
+        "east":  { "texture": "#latch" },
+        "up":    { "texture": "#latch" },
+        "down":  { "texture": "#latch" }
+      }
+    }
+  ]
+}
