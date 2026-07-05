@@ -115,6 +115,18 @@ public class RivalCityGenerator {
         // with gates, interior grid + roads, exterior FARM ring, lamps, villagers — all from the
         // town template). Falls back to the legacy single-castle core when no town templates load.
         if (!state.coreStructurePlaced && tryGenerateAw2TownCore(world, state, level)) {
+            // MASSIVE CAPITAL: the moment the core urbanizes, ring it with a couple of ADJACENT
+            // satellite towns + link roads + claimed corridors so the capital reads as a sprawling
+            // metropolis rather than a lone walled block. Fires once (gated by coreStructurePlaced).
+            int bulkRounds = 2;
+            for (int r = 0; r < bulkRounds; r++) {
+                try {
+                    growSatelliteTown(world, state,
+                            studio.ERM.war.config.WarLevelsConfig.cityGrowth().growthChunksPerBatch, true);
+                } catch (Throwable t) {
+                    EpochRunnerMod.logger.error("[RivalCity] capital-bulk round failed (guarded)", t);
+                }
+            }
             checkLandmarks(world, state);
             return; // the town IS this pass's content — its own walls, roads and farm ring
         }
@@ -272,6 +284,15 @@ public class RivalCityGenerator {
      * (0 = no valid site / no town templates loaded — the caller may fall back to plot growth).
      */
     public static int growSatelliteTown(World world, RivalCityState state, int chunkBudget) {
+        return growSatelliteTown(world, state, chunkBudget, false);
+    }
+
+    /**
+     * @param forceAdjacent when true the new town HUGS the capital (never far-flung, minimal gap,
+     *   open/unwalled) — used to bulk the freshly-founded capital into a sprawling metropolis so it
+     *   reads as one massive city rather than a lone walled block.
+     */
+    public static int growSatelliteTown(World world, RivalCityState state, int chunkBudget, boolean forceAdjacent) {
         if (state.center == null) return 0;
         try {
             studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning cfg =
@@ -281,7 +302,7 @@ public class RivalCityGenerator {
 
             int size = cfg.satelliteMinChunks
                     + rand.nextInt(Math.max(1, cfg.satelliteMaxChunks - cfg.satelliteMinChunks + 1));
-            boolean walled = size >= cfg.satelliteWalledMinChunks && rand.nextBoolean();
+            boolean walled = !forceAdjacent && size >= cfg.satelliteWalledMinChunks && rand.nextBoolean();
             net.shadowmage.ancientwarfare.structure.town.TownTemplate tt =
                     mgr.getTemplate(walled ? cfg.townTemplate : cfg.satelliteUnwalledTemplate).orElse(null);
             if (tt == null) tt = mgr.getTemplate(cfg.satelliteUnwalledTemplate).orElse(null);
@@ -293,7 +314,7 @@ public class RivalCityGenerator {
             }
             if (tt == null) return 0; // no town templates loaded at all
 
-            boolean far = rand.nextDouble() < cfg.farTownChance;
+            boolean far = !forceAdjacent && rand.nextDouble() < cfg.farTownChance;
             int half = size / 2;
             ChunkPos capChunk = new ChunkPos(state.center);
             int capHalf = capitalHalfChunks(state);
@@ -308,7 +329,7 @@ public class RivalCityGenerator {
             for (int[] dir : dirs) {
                 int gap = far ? cfg.farTownMinChunks
                         + rand.nextInt(Math.max(1, cfg.farTownMaxChunks - cfg.farTownMinChunks + 1))
-                        : 1 + rand.nextInt(2);
+                        : (forceAdjacent ? 1 : 1 + rand.nextInt(2));
                 int centerDist = capHalf + gap + half + 1;
 
                 // Push outward past any satellite already sitting on this bearing.
@@ -323,11 +344,13 @@ public class RivalCityGenerator {
                 // Dry-land check: a 3x3 surface sample over the footprint (forces chunk gen — one-off).
                 BlockPos scBlock = new BlockPos((sc.x << 4) + 8, 64, (sc.z << 4) + 8);
                 int dry = 0;
+                java.util.List<Integer> ys = new java.util.ArrayList<>();
                 for (int dx = -1; dx <= 1; dx++) {
                     for (int dz = -1; dz <= 1; dz++) {
                         try {
                             BlockPos s = world.getTopSolidOrLiquidBlock(
                                     scBlock.add(dx * half * 12, 0, dz * half * 12));
+                            ys.add(s.getY());
                             if (!world.getBlockState(s.down()).getMaterial().isLiquid()) dry++;
                         } catch (Throwable ignored) {}
                     }
@@ -338,7 +361,11 @@ public class RivalCityGenerator {
                 net.shadowmage.ancientwarfare.structure.town.TownBoundingArea area =
                         new net.shadowmage.ancientwarfare.structure.town.TownBoundingArea(
                                 sc.x - half, sc.z - half, sc.x - half + size - 1, sc.z - half + size - 1, 1, 255);
-                int surfaceY = world.getTopSolidOrLiquidBlock(scBlock).getY() - 1;
+                // RESAMPLE GROUND Y across the WHOLE footprint (median of the 3x3 probes) so the town
+                // conforms to the local terrain height instead of snapping to the single centre pad.
+                java.util.Collections.sort(ys);
+                int surfaceY = (ys.isEmpty() ? world.getTopSolidOrLiquidBlock(scBlock).getY()
+                        : ys.get(ys.size() / 2)) - 1;
                 area.setSurfaceY(Math.max(2, surfaceY));
                 EpochRunnerMod.logger.info("[RivalCity] SATELLITE town: '" + tt.getTownTypeName() + "' "
                         + size + "x" + size + " chunks @ " + (sc.x << 4) + "," + (sc.z << 4)
