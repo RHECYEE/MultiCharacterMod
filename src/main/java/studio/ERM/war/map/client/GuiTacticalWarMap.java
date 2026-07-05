@@ -111,6 +111,8 @@ public class GuiTacticalWarMap extends GuiScreen {
     private final List<net.minecraft.util.math.BlockPos> civilPending = new ArrayList<>();
     // Throttle for the Civilian tab's live re-sync (road conditions / courier jobs / stats).
     private long lastCivilSyncReq = 0;
+    private long lastFogReq = 0;
+    private int fogCacheVersion = -1; // invalidate the terrain cache when the chart grows
     // Kind-indexed colors (see CivilMarker): road tan, then one hue per district type.
     private static final int[] CIVIL_COLORS = {
             0xFFD2A24C, // ROAD tan
@@ -243,6 +245,8 @@ public class GuiTacticalWarMap extends GuiScreen {
             TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SDefensePlanEdit.requestSync());
             // ...and the civilian infrastructure (roads + districts) for the Civilian tab.
             TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SCivilPlanEdit.requestSync());
+            // ...and the FOG OF WAR chart (the map starts black outside charted chunks).
+            TacticalWarMapNetwork.sendToServer(new studio.ERM.war.map.net.S2CFogSync.Request());
             // Real-logger trace: confirms the GUI constructed + sent its sync request. If we see
             // this but never see the server-side "C2SRequestTerritorySync received", the C2S packet
             // is not reaching the server (channel/registration), which would also explain why
@@ -507,15 +511,11 @@ public class GuiTacticalWarMap extends GuiScreen {
             }
         }
 
-        // STRATEGIC MISSION (Civilian tab, Inspect mode, RIGHT-click): open the mission menu at the
-        // cursor instead of deleting (deletion lives on the district panel's DELETE button now).
+        // STRATEGIC MISSION (Civilian tab, Inspect mode, RIGHT-click): open the Mission Dispatch GUI
+        // at the cursor target — assign characters + citizens, see the risk, dispatch.
         if (activeTab == 1 && civilMode < 0 && mouseButton == 1) {
             int[] w = screenToWorld(mouseX, mouseY);
-            missionWorldX = w[0];
-            missionWorldZ = w[1];
-            missionMenuX = Math.min(mouseX, canvasLeft + canvasSize - 96);
-            missionMenuY = Math.min(mouseY, canvasTop + canvasSize - 40);
-            missionMenuOpen = true;
+            mc.displayGuiScreen(new GuiMissionDispatch(w[0], w[1]));
             return;
         }
 
@@ -823,6 +823,14 @@ public class GuiTacticalWarMap extends GuiScreen {
             lastCivilSyncReq = System.currentTimeMillis();
             TacticalWarMapNetwork.sendToServer(studio.ERM.war.map.net.C2SCivilPlanEdit.requestSync());
         }
+        // Refresh the fog chart (all tabs) every 3s so newly-charted ground clears while the map is open.
+        if (System.currentTimeMillis() - lastFogReq > 3000) {
+            lastFogReq = System.currentTimeMillis();
+            TacticalWarMapNetwork.sendToServer(new studio.ERM.war.map.net.S2CFogSync.Request());
+        }
+
+        // FOG OF WAR: black out every un-charted chunk on the canvas (over terrain, under markers).
+        drawFog();
         if (activeTab == 1) drawCivilPlan();
 
         // CITIZEN DOTS (Civilian tab): every loaded civilian worker as a white fleck — the city's
@@ -1391,6 +1399,37 @@ public class GuiTacticalWarMap extends GuiScreen {
     private boolean onCanvasPoint(int[] scr) {
         return scr[0] >= canvasLeft && scr[0] < canvasLeft + canvasSize
                 && scr[1] >= canvasTop && scr[1] < canvasTop + canvasSize;
+    }
+
+    /**
+     * FOG OF WAR: paint opaque black over every un-charted chunk on the canvas (drawn over the terrain,
+     * under the markers). Nothing is fogged until the first full sync lands (no black flash), and at
+     * extreme zoom-out — where per-chunk fog would be sub-pixel or too numerous — it's skipped.
+     */
+    private void drawFog() {
+        if (!studio.ERM.war.map.client.ClientFogCache.ready()) return;
+        double bpp = getBlocksPerPixel();
+        double chunkPx = 16.0 / bpp;
+        if (chunkPx < 1.5) return; // too zoomed out for meaningful per-chunk fog
+        int half = canvasSize / 2;
+        int worldLeft = viewCenterX - (int) Math.ceil(half * bpp);
+        int worldTop = viewCenterZ - (int) Math.ceil(half * bpp);
+        int worldRight = viewCenterX + (int) Math.ceil(half * bpp);
+        int worldBottom = viewCenterZ + (int) Math.ceil(half * bpp);
+        int cxMin = worldLeft >> 4, cxMax = worldRight >> 4, czMin = worldTop >> 4, czMax = worldBottom >> 4;
+        if ((long) (cxMax - cxMin + 1) * (czMax - czMin + 1) > 20000) return; // cost cap
+        int step = (int) Math.ceil(chunkPx) + 1;
+        for (int cx = cxMin; cx <= cxMax; cx++) {
+            for (int cz = czMin; cz <= czMax; cz++) {
+                if (studio.ERM.war.map.client.ClientFogCache.isExplored(cx, cz)) continue;
+                int[] s = worldToScreen(cx << 4, cz << 4);
+                if (s == null) continue;
+                int x1 = Math.max(s[0], canvasLeft), y1 = Math.max(s[1], canvasTop);
+                int x2 = Math.min(s[0] + step, canvasLeft + canvasSize);
+                int y2 = Math.min(s[1] + step, canvasTop + canvasSize);
+                if (x2 > x1 && y2 > y1) Gui.drawRect(x1, y1, x2, y2, 0xFF060608);
+            }
+        }
     }
 
     private void drawPlanPolyline(java.util.List<net.minecraft.util.math.BlockPos> pts, int color, boolean pending) {

@@ -264,6 +264,10 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.civil.evac.EvacuationManager.class);
             logger.info("[Strategic] evacuation manager registered");
 
+            // Fog of war: the map starts black; players + owned citizens/soldiers chart the world.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.FogOfWarManager.class);
+            logger.info("[Strategic] fog-of-war charting registered");
+
             // Modern-era worker/soldier skins (WWI L6 / WWII L7 / modern L8+), wired at runtime so it
             // works regardless of any existing erm_skins.cfg.
             studio.ERM.war.skins.SkinPoolManager.ensureEraSkins();
