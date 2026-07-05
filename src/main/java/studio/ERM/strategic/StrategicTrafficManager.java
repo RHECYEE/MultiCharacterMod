@@ -62,30 +62,50 @@ public final class StrategicTrafficManager {
             // Top-up rate scales with level too: a high-tier city raises its traffic FAST after losses.
             int topUps = Math.max(1, lvl / 3);
             for (int i = 0; i < topUps && patrols < patrolCap; i++, patrols++) {
-                data.add(makePatrol(world, c, lvl, key));
+                data.add(makePatrol(world, city, lvl, key));
                 logRaise(world, "patrol", key, lvl);
             }
             for (int i = 0; i < topUps && traders < traderCap; i++, traders++) {
-                data.add(makeTrader(world, c, lvl, key));
+                data.add(makeTrader(world, city, lvl, key));
                 logRaise(world, "trader", key, lvl);
             }
         }
     }
 
-    /** A soldier circuit ringing the city (radius varies per patrol so routes don't overlap). */
-    private static StrategicPatrol makePatrol(WorldServer world, BlockPos center, int lvl, String key) {
+    /**
+     * A soldier patrol. Most ring the city (jittered circuit); ~1/3 are SWEEP patrols that march out
+     * to a frontier/nation objective and loop home — so the map shows "some heading out", not every
+     * squad orbiting the same walls.
+     */
+    private static StrategicPatrol makePatrol(WorldServer world, RivalCityState city, int lvl, String key) {
+        BlockPos center = city.center;
         StrategicPatrol p = new StrategicPatrol();
         p.homeKey = key;
         p.warLevel = lvl;
         p.strength = Math.min(8, 3 + lvl / 2);
-        int r = 40 + world.rand.nextInt(28);
-        double a0 = world.rand.nextDouble() * Math.PI * 2;
-        for (int i = 0; i < 8; i++) {
-            double a = a0 + i * (Math.PI * 2 / 8);
-            p.route.add(new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * r), 0,
-                    center.getZ() + (int) Math.round(Math.sin(a) * r)));
+
+        if (world.rand.nextDouble() < 0.35) {
+            // SWEEP: gate -> jittered legs -> a real objective, looping back home.
+            BlockPos obj = pickDestination(world, city, center, false);
+            double a = world.rand.nextDouble() * Math.PI * 2;
+            int near = 30 + world.rand.nextInt(20);
+            BlockPos gate = new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * near), 0,
+                    center.getZ() + (int) Math.round(Math.sin(a) * near));
+            p.route.add(gate);
+            addJitteredLeg(world, p.route, gate, obj, 2);
+            p.route.add(obj);
+            p.loopRoute = true;
+        } else {
+            int r = 40 + world.rand.nextInt(28);
+            double a0 = world.rand.nextDouble() * Math.PI * 2;
+            for (int i = 0; i < 8; i++) {
+                double a = a0 + i * (Math.PI * 2 / 8);
+                int jx = world.rand.nextInt(13) - 6, jz = world.rand.nextInt(13) - 6;
+                p.route.add(new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * r) + jx, 0,
+                        center.getZ() + (int) Math.round(Math.sin(a) * r) + jz));
+            }
         }
-        // Enter the circuit at a random point so freshly-raised patrols aren't all synchronized.
+        // Enter the route at a random point so freshly-raised patrols aren't all synchronized.
         p.routeIndex = world.rand.nextInt(p.route.size());
         BlockPos start = p.route.get(p.routeIndex);
         p.x = start.getX() + 0.5;
@@ -93,23 +113,78 @@ public final class StrategicTrafficManager {
         return p;
     }
 
-    /** A caravan ping-ponging a trade route from the city gate out to a frontier point. */
-    private static StrategicTrader makeTrader(WorldServer world, BlockPos center, int lvl, String key) {
+    /**
+     * A caravan running a VARIED objective: some haul to a neighbouring nation-state town (trade),
+     * some to one of the rival's own satellite towns (inter-city), some just out to the open frontier.
+     * The route jitters off the straight radial and loops out-and-back so caravans read as alive.
+     */
+    private static StrategicTrader makeTrader(WorldServer world, RivalCityState city, int lvl, String key) {
+        BlockPos center = city.center;
         StrategicTrader t = new StrategicTrader();
         t.homeKey = key;
         t.level = lvl;
         t.escorts = (lvl >= 3) ? 2 : 0;
+
         double a = world.rand.nextDouble() * Math.PI * 2;
         int near = 24 + world.rand.nextInt(12);
-        int far = 160 + world.rand.nextInt(90);
-        t.route.add(new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * near), 0,
-                center.getZ() + (int) Math.round(Math.sin(a) * near)));
-        t.route.add(new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * far), 0,
-                center.getZ() + (int) Math.round(Math.sin(a) * far)));
-        BlockPos start = t.route.get(0);
-        t.x = start.getX() + 0.5;
-        t.z = start.getZ() + 0.5;
+        BlockPos gate = new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * near), 0,
+                center.getZ() + (int) Math.round(Math.sin(a) * near));
+        BlockPos dest = pickDestination(world, city, center, true);
+
+        t.route.add(gate);
+        addJitteredLeg(world, t.route, gate, dest, 2);
+        t.route.add(dest);
+        t.loopRoute = true; // out to the objective and back forever
+
+        t.routeIndex = 0;
+        t.x = gate.getX() + 0.5;
+        t.z = gate.getZ() + 0.5;
         return t;
+    }
+
+    /**
+     * Pick a travel objective. {@code preferNation} biases traders toward nation-state towns (trade);
+     * patrols lean toward the frontier. Falls back to a far random bearing when no towns are known.
+     */
+    private static BlockPos pickDestination(WorldServer world, RivalCityState city, BlockPos center,
+                                            boolean preferNation) {
+        double roll = world.rand.nextDouble();
+        double nationChance = preferNation ? 0.45 : 0.2;
+        double satelliteChance = nationChance + 0.25;
+
+        // 1) A nation-state town — caravans/patrols heading to the neighbours.
+        if (roll < nationChance) {
+            try {
+                java.util.List<studio.ERM.strategic.nation.NationStateData.Nation> ns =
+                        studio.ERM.strategic.nation.NationStateData.get(world).nations;
+                if (!ns.isEmpty()) {
+                    BlockPos c = ns.get(world.rand.nextInt(ns.size())).center;
+                    if (c != null && !c.equals(BlockPos.ORIGIN)) return c;
+                }
+            } catch (Throwable ignored) {}
+        }
+        // 2) One of the rival's own satellite towns — inter-city movement.
+        if (roll < satelliteChance && city.satellites != null && !city.satellites.isEmpty()) {
+            int[] s = city.satellites.get(world.rand.nextInt(city.satellites.size()));
+            BlockPos sc = new BlockPos((s[0] << 4) + 8, 0, (s[1] << 4) + 8);
+            if (sc.distanceSq(center) > 40 * 40) return sc; // skip the capital's own footprint entry
+        }
+        // 3) Open frontier — a far random bearing ("heading out").
+        double a = world.rand.nextDouble() * Math.PI * 2;
+        int far = 150 + world.rand.nextInt(140);
+        return new BlockPos(center.getX() + (int) Math.round(Math.cos(a) * far), 0,
+                center.getZ() + (int) Math.round(Math.sin(a) * far));
+    }
+
+    /** Insert {@code mids} jittered waypoints along the straight line from -> to (a wandering road). */
+    private static void addJitteredLeg(WorldServer world, java.util.List<BlockPos> route,
+                                       BlockPos from, BlockPos to, int mids) {
+        for (int i = 1; i <= mids; i++) {
+            double f = i / (double) (mids + 1);
+            int mx = (int) Math.round(from.getX() + (to.getX() - from.getX()) * f) + world.rand.nextInt(49) - 24;
+            int mz = (int) Math.round(from.getZ() + (to.getZ() - from.getZ()) * f) + world.rand.nextInt(49) - 24;
+            route.add(new BlockPos(mx, 0, mz));
+        }
     }
 
     private static void logRaise(WorldServer world, String kind, String key, int lvl) {
