@@ -50,11 +50,12 @@ public final class StrategicMissionManager {
         final double risk;
         final long completeTick;
         final java.util.UUID player;
+        final java.util.UUID markerId; // the travelling map icon (StrategicMapData), removed on return
         Mission(int dim, int type, int x, int z, int characters, int citizens, double risk,
-                long completeTick, java.util.UUID player) {
+                long completeTick, java.util.UUID player, java.util.UUID markerId) {
             this.dim = dim; this.type = type; this.x = x; this.z = z;
             this.characters = characters; this.citizens = citizens; this.risk = risk;
-            this.completeTick = completeTick; this.player = player;
+            this.completeTick = completeTick; this.player = player; this.markerId = markerId;
         }
     }
 
@@ -98,8 +99,33 @@ public final class StrategicMissionManager {
         if (type < 0 || type >= NAMES.length) return;
         double risk = computeRisk(type, characterSkillUnits, citizens);
         int dur = DURATION_SEC[type] * 20;
+
+        // TRAVELLING MAP ICON: drop a mission marker that leaves the settlement (the dispatching
+        // player's position), crosses to the objective and heads home over the mission's run time, so
+        // the player can watch the expedition move on the strategic map. Removed when it returns.
+        java.util.UUID markerId = null;
+        try {
+            MissionMarker mk = new MissionMarker();
+            mk.missionName = NAMES[type];
+            mk.strength = Math.max(1, citizens);
+            double ox = (p != null) ? p.posX : x, oz = (p != null) ? p.posZ : z;
+            BlockPos origin = new BlockPos((int) ox, 0, (int) oz);
+            BlockPos dest = new BlockPos(x, 0, z);
+            mk.route.add(origin);
+            mk.route.add(dest);
+            mk.route.add(origin); // and back home before it's collected
+            mk.x = ox; mk.z = oz;
+            double leg = Math.sqrt((x - ox) * (x - ox) + (z - oz) * (z - oz));
+            double durSec = Math.max(1, DURATION_SEC[type]);
+            mk.speed = Math.max(1.5, Math.min(12.0, (2.0 * leg) / (durSec * 0.9))); // round-trip within run time
+            studio.ERM.strategic.StrategicMapData.get(world).add(mk);
+            markerId = mk.id;
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.warn("[Mission] map-icon spawn failed: " + t);
+        }
+
         MISSIONS.add(new Mission(world.provider.getDimension(), type, x, z, characterSkillUnits, citizens,
-                risk, world.getTotalWorldTime() + dur, p != null ? p.getUniqueID() : null));
+                risk, world.getTotalWorldTime() + dur, p != null ? p.getUniqueID() : null, markerId));
         if (p != null) {
             p.sendMessage(new TextComponentString(TextFormatting.GREEN + NAMES[type] + " dispatched to "
                     + x + ", " + z + " — " + citizens + " escort(s), risk "
@@ -124,6 +150,10 @@ public final class StrategicMissionManager {
     }
 
     private static void complete(WorldServer world, Mission m) {
+        // The expedition returned — pull its travelling icon off the strategic map.
+        if (m.markerId != null) {
+            try { studio.ERM.strategic.StrategicMapData.get(world).remove(m.markerId); } catch (Throwable ignored) {}
+        }
         net.minecraft.entity.player.EntityPlayer p = m.player != null ? world.getPlayerEntityByUUID(m.player) : null;
 
         // CASUALTIES: each escort risks the mission's risk; CHARACTERS never die. Lost citizens are

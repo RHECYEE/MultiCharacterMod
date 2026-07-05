@@ -2235,7 +2235,7 @@ public class GuiTacticalWarMap extends GuiScreen {
     private static final int OUTLINE_NEUTRAL = 0xAAFFEB3B;
 
     private static net.minecraft.item.ItemStack[] markerIconStacks;
-    private static net.minecraft.item.ItemStack icTrader, icPatrol, icSquad, icVehicle, icEnemyCamp;
+    private static net.minecraft.item.ItemStack icTrader, icPatrol, icSquad, icVehicle, icEnemyCamp, icMission;
 
     private static void initIconStacks() {
         if (markerIconStacks != null) return;
@@ -2259,6 +2259,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         icSquad = new net.minecraft.item.ItemStack(net.minecraft.init.Items.IRON_SWORD);
         icVehicle = new net.minecraft.item.ItemStack(net.minecraft.init.Items.MINECART);
         icEnemyCamp = new net.minecraft.item.ItemStack(net.minecraft.init.Items.BANNER);
+        icMission = new net.minecraft.item.ItemStack(net.minecraft.init.Items.COMPASS); // dispatched expedition
 
         // LEFT tool-list icons. Military row 0 = Troop Allocation, then the marker types above.
         milToolIcons = new net.minecraft.item.ItemStack[MIL_TOOL_NAMES.length];
@@ -2321,7 +2322,7 @@ public class GuiTacticalWarMap extends GuiScreen {
         for (studio.ERM.war.map.net.S2CStrategicSync.Data d : objs) {
             // Tab filter: CIVILIAN = the economy (traders/carts); MILITARY = military traffic +
             // reinforcement deliveries. New archetypes default to military.
-            boolean civilian = "trader".equals(d.type);
+            boolean civilian = "trader".equals(d.type) || "mission".equals(d.type);
             if (activeTab == 1 && !civilian) continue;
             if (activeTab == 2 && civilian) continue;
             int[] scr = worldToScreen(d.x, d.z);
@@ -2332,7 +2333,9 @@ public class GuiTacticalWarMap extends GuiScreen {
 
             net.minecraft.item.ItemStack icon;
             int outline;
-            if ("trader".equals(d.type)) {
+            if ("mission".equals(d.type)) {
+                icon = icMission; outline = OUTLINE_FRIENDLY;
+            } else if ("trader".equals(d.type)) {
                 icon = icTrader; outline = OUTLINE_NEUTRAL;
             } else if ("reinforcement".equals(d.type)) {
                 icon = (d.label != null && d.label.startsWith("Vehicle")) ? icVehicle : icSquad;

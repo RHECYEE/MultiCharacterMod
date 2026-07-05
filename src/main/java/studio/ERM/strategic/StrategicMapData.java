@@ -32,6 +32,7 @@ public class StrategicMapData extends WorldSavedData {
         FACTORIES.put("reinforcement", StrategicReinforcement::new);
         FACTORIES.put("convoy", StrategicConvoy::new);
         FACTORIES.put("roamer", StrategicRoamer::new);
+        FACTORIES.put("mission", studio.ERM.strategic.civil.MissionMarker::new);
     }
 
     public final Map<UUID, StrategicObject> objects = new LinkedHashMap<>();
@@ -87,6 +88,7 @@ public class StrategicMapData extends WorldSavedData {
     public NBTTagCompound writeToNBT(NBTTagCompound nbt) {
         NBTTagList list = new NBTTagList();
         for (StrategicObject o : objects.values()) {
+            if ("mission".equals(o.typeId())) continue; // transient: mission icons cancel on restart
             try { list.appendTag(o.writeToNBT(new NBTTagCompound())); } catch (Throwable ignored) {}
         }
         nbt.setTag("objects", list);
