@@ -36,6 +36,18 @@ public final class ClientCivilPlanCache {
         return deposits;
     }
 
+    private static volatile boolean radarActive;
+    private static volatile int aaScore;
+
+    public static void updateAirDefense(boolean active, int score) {
+        radarActive = active;
+        aaScore = score;
+    }
+
+    /** A manned radar exists — the map may draw aircraft contacts (green bars). */
+    public static boolean radarActive() { return radarActive; }
+    public static int aaScore() { return aaScore; }
+
     public static void updateStats(int availWorkers, int totalWorkers, int availBeds, int totalBeds) {
         ClientCivilPlanCache.availWorkers = availWorkers;
         ClientCivilPlanCache.totalWorkers = totalWorkers;

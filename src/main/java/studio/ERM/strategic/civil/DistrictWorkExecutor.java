@@ -135,9 +135,11 @@ public final class DistrictWorkExecutor {
         List<CivilMarker> districts = new ArrayList<>();
         for (CivilMarker m : plan.markers) {
             // Quarry mines, Warehouse organizes, Research generates points — all staff without a table.
+            // Radar/AA man their assembly seats (AirDefenseManager runs the stations).
             boolean workable = DistrictOutputConfig.produces(m.configKey())
                     || m.kind == CivilMarker.QUARRY || m.kind == CivilMarker.WAREHOUSE
-                    || m.kind == CivilMarker.RESEARCH || m.kind == CivilMarker.FACTORY;
+                    || m.kind == CivilMarker.RESEARCH || m.kind == CivilMarker.FACTORY
+                    || m.kind == CivilMarker.RADAR || m.kind == CivilMarker.AA_BATTERY;
             if (!m.isRoad() && m.hasDepot() && workable) {
                 districts.add(m);
             }
@@ -575,8 +577,10 @@ public final class DistrictWorkExecutor {
         }
 
         // FACTORY: no output table here — assembly SEATS craft in FactoryManager, driven by the
-        // worker count. The workers just man the line.
-        if (district.kind == CivilMarker.FACTORY) {
+        // worker count. The workers just man the line. RADAR/AA_BATTERY are the same shape:
+        // operators man the station's seats; AirDefenseManager runs detection + flak off the count.
+        if (district.kind == CivilMarker.FACTORY
+                || district.kind == CivilMarker.RADAR || district.kind == CivilMarker.AA_BATTERY) {
             return;
         }
 

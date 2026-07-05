@@ -127,7 +127,9 @@ public class GuiTacticalWarMap extends GuiScreen {
             0xFF33691E, // LUMBER deep green
             0xFFD4E157, // FARM lime
             0xFF757575, // MINING gray
-            0xFF6D4C41  // HUNTING dark brown
+            0xFF6D4C41, // HUNTING dark brown
+            0xFF00E676, // RADAR signal green
+            0xFF455A64  // AA BATTERY gunmetal
     };
 
     // Mouse position captured each frame for marker hover readouts.
@@ -522,15 +524,10 @@ public class GuiTacticalWarMap extends GuiScreen {
         if (activeTab == 1 && civilMode < 0 && mouseButton == 0) {
             studio.ERM.strategic.civil.CivilMarker hit = civilMarkerAt(mouseX, mouseY);
             if (hit != null) {
-                if (hit.isRoad()) {
-                    net.minecraft.util.math.BlockPos c = hit.center();
-                    setStatus(TextFormatting.AQUA + "Road" + TextFormatting.GRAY + "  "
-                            + hit.points.size() + " pts, centre " + c.getX() + ", " + c.getZ());
-                } else {
-                    civPanelUid = hit.uid;
-                    civPanelX = Math.min(mouseX, canvasLeft + canvasSize - 124);
-                    civPanelY = Math.min(mouseY, canvasTop + canvasSize - 92);
-                }
+                // Roads open the SAME panel as districts now (material, repair state, DELETE).
+                civPanelUid = hit.uid;
+                civPanelX = Math.min(mouseX, canvasLeft + canvasSize - 124);
+                civPanelY = Math.min(mouseY, canvasTop + canvasSize - 92);
                 return;
             }
         }
@@ -841,6 +838,10 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         // Strategic traffic (filtered per tab: civilian on CIVILIAN, military on MILITARY).
         if (activeTab != 0) drawStrategicMarkers();
+
+        // RADAR CONTACTS: with a MANNED radar, enemy aircraft in the net draw as GREEN BARS.
+        if (activeTab != 0 && studio.ERM.war.map.client.ClientCivilPlanCache.radarActive())
+            drawAircraftContacts();
 
         // "ENEMY CAMP GATHERING HERE" siege alert (all tabs -- the player must never miss it).
         drawSiegeAlert();
@@ -1284,9 +1285,12 @@ public class GuiTacticalWarMap extends GuiScreen {
             if (m.isAssignable()) assigned += m.assigned;
         }
         int have = studio.ERM.war.map.client.ClientStrategicCache.friendlyCount();
+        int aa = studio.ERM.war.map.client.ClientCivilPlanCache.aaScore();
         String[] lines = {
                 TextFormatting.GOLD + "Military",
                 TextFormatting.YELLOW + "Assigned: " + assigned + "/" + have,
+                TextFormatting.GREEN + "AA score: " + aa
+                        + (studio.ERM.war.map.client.ClientCivilPlanCache.radarActive() ? " (radar up)" : ""),
                 TextFormatting.GRAY + "Tools: list on left",
                 TextFormatting.GRAY + "Click map to use",
                 TextFormatting.GRAY + "R-click to confirm",
@@ -1298,6 +1302,24 @@ public class GuiTacticalWarMap extends GuiScreen {
         Gui.drawRect(x0 - 3, y0 - 3, x0 + SIDEBAR_WIDTH - 6, y0 + h - 3, 0x99000000);
         for (int i = 0; i < lines.length; i++) {
             fontRenderer.drawStringWithShadow(lines[i], x0, y0 + i * 10, 0xFFFFFFFF);
+        }
+    }
+
+    /** RADAR CONTACTS: every loaded enemy aircraft as a GREEN BAR (the radar-scope look) — only
+     *  drawn while a manned Radar district is on the air (ClientCivilPlanCache.radarActive). */
+    private void drawAircraftContacts() {
+        if (mc.world == null) return;
+        for (Object o : mc.world.loadedEntityList) {
+            if (!(o instanceof studio.ERM.war.air.EntityGhostAircraft)) continue;
+            net.minecraft.entity.Entity a = (net.minecraft.entity.Entity) o;
+            if (a.isDead) continue;
+            int[] s = worldToScreen((int) a.posX, (int) a.posZ);
+            if (s == null) continue;
+            int sx = s[0], sy = s[1];
+            if (sx < canvasLeft + 6 || sx >= canvasLeft + canvasSize - 6
+                    || sy < canvasTop + 4 || sy >= canvasTop + canvasSize - 4) continue;
+            Gui.drawRect(sx - 5, sy - 1, sx + 6, sy + 2, 0xFF00E676);       // the green bar
+            Gui.drawRect(sx - 5, sy - 1, sx + 6, sy, 0xFF69F0AE);           // scope highlight
         }
     }
 
@@ -1640,6 +1662,26 @@ public class GuiTacticalWarMap extends GuiScreen {
         fontRenderer.drawStringWithShadow(
                 studio.ERM.strategic.civil.CivilMarker.nameOf(m.kind) + " District", x0 + 4, y0 + 3, color);
         fontRenderer.drawStringWithShadow("x", x0 + 112, y0 + 3, 0xFFFF5252);
+
+        // ROAD PANEL: material + repair state + segment count (repair crews read the same data),
+        // then the shared DELETE. No depot/worker rows — a road has neither.
+        if (m.isRoad()) {
+            String label = "";
+            for (String l : m.segLabel) { if (l != null && !l.isEmpty()) { label = l; break; } }
+            int cond = m.worstCondition();
+            String condName = studio.ERM.strategic.civil.CivilMarker.CONDITION_NAMES[
+                    Math.max(0, Math.min(cond, studio.ERM.strategic.civil.CivilMarker.CONDITION_NAMES.length - 1))];
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Block: " + TextFormatting.WHITE
+                    + (label.isEmpty() ? "unsampled" : label), x0 + 4, y0 + 17, 0xFFFFFFFF);
+            int condColor = cond <= 1 ? 0xFF69F0AE : cond == 2 ? 0xFFFFD54F : 0xFFFF8A80;
+            fontRenderer.drawStringWithShadow(TextFormatting.GRAY + "Repair: ", x0 + 4, y0 + 31, 0xFFCCCCCC);
+            fontRenderer.drawStringWithShadow(condName, x0 + 44, y0 + 31, condColor);
+            fontRenderer.drawStringWithShadow(TextFormatting.DARK_GRAY + "" + m.points.size()
+                    + " point(s)", x0 + 4, y0 + 45, 0xFF777777);
+            Gui.drawRect(x0 + 4, y0 + 74, x0 + 118, y0 + 86, 0xFF3E1010);
+            fontRenderer.drawStringWithShadow("DELETE ROAD", x0 + 34, y0 + 76, 0xFFFF5252);
+            return;
+        }
 
         // Depot status.
         boolean depot = m.depotPos != null;

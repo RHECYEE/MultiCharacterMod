@@ -41,10 +41,15 @@ public class CivilMarker {
     public static final int QUARRY = 13;      // alias — MINING is the quarry now
     public static final int HUNTING = 14;     // open wilderness (Strategic Mission, not a district)
 
+    // MILITARY MODERN LAYER: both are manned via ASSEMBLY SEATS inside the polygon (the factory
+    // chair mechanic) — seats dictate employees; manned seats run the station (AirDefenseManager).
+    public static final int RADAR = 15;        // manned radar: detection + warnings + map contacts
+    public static final int AA_BATTERY = 16;   // manned battery: flak at detected enemy aircraft
+
     public static final String[] NAMES = {
             "Road", "Residential", "Barracks", "Warehouse", "Armory",
             "Kitchen", "Hospital", "Factory", "Research", "Trade Depot",
-            "Fishing", "Lumber", "Farm", "Quarry", "Hunting" };
+            "Fishing", "Lumber", "Farm", "Quarry", "Hunting", "Radar", "AA Battery" };
 
     public int kind = ROAD;
     /** Polyline points (ROAD) or polygon vertices in draw order (districts). Y is ignored. */

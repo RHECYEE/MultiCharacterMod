@@ -39,6 +39,8 @@ public class S2CCivilPlanSync implements IMessage {
     private int availWorkers, totalWorkers, availBeds, totalBeds;
     private List<JobLine> jobs = new ArrayList<>();
     private List<Deposit> deposits = new ArrayList<>();
+    private boolean radarActive;
+    private int aaScore;
 
     public S2CCivilPlanSync() {}
 
@@ -62,6 +64,12 @@ public class S2CCivilPlanSync implements IMessage {
 
     public S2CCivilPlanSync withDeposits(List<Deposit> deps) {
         this.deposits = deps != null ? deps : new ArrayList<>();
+        return this;
+    }
+
+    public S2CCivilPlanSync withAirDefense(boolean radarActive, int aaScore) {
+        this.radarActive = radarActive;
+        this.aaScore = aaScore;
         return this;
     }
 
@@ -95,6 +103,8 @@ public class S2CCivilPlanSync implements IMessage {
             d.name = net.minecraftforge.fml.common.network.ByteBufUtils.readUTF8String(buf);
             deposits.add(d);
         }
+        radarActive = buf.readBoolean();
+        aaScore = buf.readShort();
     }
 
     @Override
@@ -122,6 +132,8 @@ public class S2CCivilPlanSync implements IMessage {
             net.minecraftforge.fml.common.network.ByteBufUtils.writeUTF8String(
                     buf, d.name == null ? "" : d.name);
         }
+        buf.writeBoolean(radarActive);
+        buf.writeShort(aaScore);
     }
 
     public static class Handler implements IMessageHandler<S2CCivilPlanSync, IMessage> {
@@ -133,6 +145,7 @@ public class S2CCivilPlanSync implements IMessage {
                         msg.availWorkers, msg.totalWorkers, msg.availBeds, msg.totalBeds);
                 ClientCivilPlanCache.updateJobs(msg.jobs);
                 ClientCivilPlanCache.updateDeposits(msg.deposits);
+                ClientCivilPlanCache.updateAirDefense(msg.radarActive, msg.aaScore);
             });
             return null;
         }

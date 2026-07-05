@@ -199,7 +199,7 @@ public class EntityFormationCarrier extends EntityCreature {
         // periodically (or immediately when the path finished / the target genuinely moved).
         boolean sameTarget = lastMoveTarget != null && target.distanceSq(lastMoveTarget) <= 2.25;
         if (sameTarget && !this.getNavigator().noPath()
-                && this.ticksExisted - lastMoveIssueTick < 20) {
+                && this.ticksExisted - lastMoveIssueTick < 10) { // 10t refresh: tighter order-following
             return;
         }
         lastMoveTarget = target;

@@ -151,7 +151,9 @@ public class C2SCivilPlanEdit implements IMessage {
 
             TacticalWarMapNetwork.sendTo(new S2CCivilPlanSync(
                     plan.markers, st.availWorkers, st.totalWorkers, st.availBeds, st.totalBeds)
-                    .withJobs(lines).withDeposits(deps), player);
+                    .withJobs(lines).withDeposits(deps)
+                    .withAirDefense(studio.ERM.war.air.AirDefenseManager.isRadarActive(),
+                            studio.ERM.war.air.AirDefenseManager.getAaScore()), player);
         }
 
         /** Null when the marker is allowed; otherwise the player-facing reason it was refused. */

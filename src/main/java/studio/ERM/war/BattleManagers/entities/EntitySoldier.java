@@ -334,11 +334,13 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
             if (!adjacentFight) {
                 double dObj = this.getDistanceSq(marchObjective.getX() + 0.5, marchObjective.getY(),
                         marchObjective.getZ() + 0.5);
-                if (dObj > 6.25 && (this.getNavigator().noPath() || this.ticksExisted % 15 == 0)) {
+                // ORDER TIGHTNESS: re-path every 10t (was 15) and hold a 2-block arrival radius
+                // (was 2.5) — troops correct course faster and stop closer to where they're told.
+                if (dObj > 4.0 && (this.getNavigator().noPath() || this.ticksExisted % 10 == 0)) {
                     // March speed scales with the config walk multiplier (WarLevelsConfig siege.walkSpeedMultiplier),
-                    // capped so the navigator doesn't overshoot. Default 3x -> ~2.7x march.
-                    double marchMult = Math.max(1.0, Math.min(3.2,
-                            0.9 * studio.ERM.war.config.WarLevelsConfig.walkSpeedMultiplier()));
+                    // capped so the navigator doesn't overshoot. Default 3x -> ~3.0x march.
+                    double marchMult = Math.max(1.0, Math.min(3.4,
+                            1.0 * studio.ERM.war.config.WarLevelsConfig.walkSpeedMultiplier()));
                     double gx = marchObjective.getX() + 0.5, gz = marchObjective.getZ() + 0.5;
                     double ddx = gx - posX, ddz = gz - posZ;
                     double dH = Math.sqrt(ddx * ddx + ddz * ddz);
@@ -494,7 +496,17 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         double ty = target.posY + target.height * 0.5 + (rand.nextDouble() - 0.5) * spread * 0.5;
         double tz = target.posZ + (rand.nextDouble() - 0.5) * spread;
 
-        target.attackEntityFrom(DamageSource.causeMobDamage(this), (float) (2.0 + warLevel));
+        // AT/AP/AA DOCTRINE: the held weapon's class scales its damage against this target category
+        // (living target = infantry). An AT gunner wastes his rocket on a rifleman; the rifleman's
+        // AP round is the baseline. (Armor/air categories apply where those damage paths live.)
+        double classMult = 1.0;
+        try {
+            classMult = studio.ERM.war.config.WeaponClassConfig.mult(
+                    studio.ERM.war.config.WeaponClassConfig.classify(
+                            getHeldItemMainhand().getItem().getRegistryName().toString()),
+                    studio.ERM.war.config.WeaponClassConfig.TARGET_INFANTRY);
+        } catch (Throwable ignored) {}
+        target.attackEntityFrom(DamageSource.causeMobDamage(this), (float) ((2.0 + warLevel) * classMult));
         // SOUNDBOARD rifle voice: a sharp high ballista snap at the muzzle + the bolt thudding into
         // the target (replaces the blaze-hurt placeholder; both no-op cleanly when AW2 is absent).
         studio.ERM.war.sound.WarSoundboard.rifleSnap(world, posX, posY + getEyeHeight(), posZ);

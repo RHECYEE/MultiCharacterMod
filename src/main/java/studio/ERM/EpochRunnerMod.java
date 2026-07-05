@@ -72,6 +72,7 @@ public class EpochRunnerMod {
                 studio.ERM.war.config.SchematicCatalog.load(cfgDir);
                 studio.ERM.strategic.patrol.PatrolConfig.load(cfgDir);
                 studio.ERM.war.config.CampConfig.load(cfgDir);
+                studio.ERM.war.config.WeaponClassConfig.load(cfgDir);
                 studio.ERM.war.config.ResearchConfig.load(cfgDir);
                 studio.ERM.war.config.FactoryConfig.load(cfgDir);
                 logger.info("[Config] WarMaster + WarLevels + DistrictOutput + TradePrice + Research + Factory configs loaded from " + cfgDir);
@@ -287,6 +288,12 @@ public class EpochRunnerMod {
             // clash/rob each other (rumors in chat; casualties + cargo losses persist).
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.StrategicEncounterManager.class);
             logger.info("[Strategic] encounter manager registered (the roads are alive)");
+
+            // MILITARY MODERN LAYER — the air defense net (manned Radar/AA districts, flak, AA
+            // score, map contacts) + the armory motor pool (AI mounts Flan vehicles from depot stock).
+            MinecraftForge.EVENT_BUS.register(studio.ERM.war.air.AirDefenseManager.class);
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.defense.VehicleDepotManager.class);
+            logger.info("[War] air defense net + motor pool registered");
 
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(

@@ -196,6 +196,13 @@ public final class WarSoundboard {
         at(w, x, y, z, NPC + "teleport_out", 1.5f, 1.4f, 3); // rocket whoosh away
     }
 
+    /** FLAK: the battery's launch thump at the gun + the shell cracking in the sky a beat later. */
+    public static void flakBurst(World w, double gx, double gy, double gz, double ax, double ay, double az) {
+        at(w, gx, gy, gz, VEH + "ballista_launch", 3.0f, rr(0.70f, 0.80f), 0);
+        at(w, ax, ay, az, STR + "wizard_explosion_2", 3.5f, rr(1.15f, 1.35f), 3 + R.nextInt(3));
+        at(w, ax, ay, az, VEH + "battering_ram_hit_iron", 1.2f, rr(1.2f, 1.4f), 6); // shrapnel ping
+    }
+
     /** Rocket landing: small sharp blast + debris. */
     public static void rocketImpact(World w, double x, double y, double z) {
         at(w, x, y, z, STR + "wizard_explosion_2", 3.0f, rr(1.05f, 1.20f), 1);
