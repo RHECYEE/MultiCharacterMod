@@ -95,6 +95,9 @@ public class BlockDistrictMarker extends Block {
         if (world.isRemote || !(placer instanceof EntityPlayer)) return;
         CivilMarker district = DistrictRegistry.bindDepot(world, pos);
         if (district != null) {
+            // SOUNDBOARD: the claim-flag flourish + a coin clink — a district coming to life.
+            studio.ERM.war.sound.WarSoundboard.districtCreated(world,
+                    pos.getX() + 0.5, pos.getY() + 1.0, pos.getZ() + 0.5);
             placer.sendMessage(new TextComponentString(TextFormatting.GREEN + "Depot bound: "
                     + TextFormatting.AQUA + CivilMarker.nameOf(district.kind) + " district"
                     + TextFormatting.GRAY + " #" + (district.uid & 0xFFFF)));

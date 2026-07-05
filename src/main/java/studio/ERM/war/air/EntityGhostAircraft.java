@@ -435,6 +435,21 @@ public class EntityGhostAircraft extends EntityLiving {
             // first mission move kicks in (the spawn-fall the player saw).
             this.motionX = 0; this.motionY = 0; this.motionZ = 0;
             this.setNoGravity(true);
+
+            // SOUNDBOARD ambience: helis CHOP (a drums-over-hum pulse re-armed every second); planes
+            // WHOOSH past when they cross near a player. Cheap, throttled, and AW2-absent safe.
+            if (ticksExisted % 20 == 0 && isHeli()) {
+                boolean heavy = false;
+                try {
+                    heavy = AirDoctrine.getProfile(getAircraftType()).role
+                            == AirDoctrine.AircraftRole.TRANSPORT;
+                } catch (Throwable ignored) {}
+                studio.ERM.war.sound.WarSoundboard.heliRotorPulse(world, posX, posY, posZ, heavy);
+            } else if (ticksExisted % 80 == 0 && !isHeli()
+                    && world.getClosestPlayer(posX, posY, posZ, 56, false) != null) {
+                studio.ERM.war.sound.WarSoundboard.jetFlyby(world, posX, posY, posZ);
+            }
+
             if (isOnMission) {
                 ticksOnMission++;
 
@@ -896,6 +911,10 @@ public class EntityGhostAircraft extends EntityLiving {
             tnt.motionZ = lastMoveDirection.z * 0.4 + (rand.nextDouble() - 0.5) * 0.25;
             tnt.motionY = -1.0;                       // strong downward kick so it actually reaches the ground
             world.spawnEntity(tnt);
+            // SOUNDBOARD: trebuchet release at the bay + the volcano/gong ground-shock layered to land
+            // exactly on the TNT fuse — the bomb is HEARD as the world being hit, not a firecracker.
+            studio.ERM.war.sound.WarSoundboard.bombRelease(world, posX, posY, posZ, bombDmg >= 3.5f);
+            studio.ERM.war.sound.WarSoundboard.bombShockwave(world, bx, groundY, bz, fuse);
             EpochRunnerMod.logger.info("[AIR] Bomb away (fuse " + fuse + ")");
         } catch (Throwable t) {
             BlockPos g = world.getTopSolidOrLiquidBlock(new BlockPos((int) Math.floor(bx), (int) posY, (int) Math.floor(bz)));

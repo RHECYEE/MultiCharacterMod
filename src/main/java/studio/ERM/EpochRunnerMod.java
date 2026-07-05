@@ -271,6 +271,11 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.war.sound.WarSoundboard.class);
             logger.info("[War] soundboard registered (AW2 sound recipes are LIVE)");
 
+            // STRATEGIC RESOURCE EXPANSION — finite resource nodes, rival engineer convoys, AW2
+            // extraction camps, daily production, capture. The frontier between civilizations.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.resource.ResourceCampManager.class);
+            logger.info("[Strategic] resource camp manager registered (the frontier is LIVE)");
+
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(
                     instance, new studio.ERM.strategic.defense.ErmGuiHandler());

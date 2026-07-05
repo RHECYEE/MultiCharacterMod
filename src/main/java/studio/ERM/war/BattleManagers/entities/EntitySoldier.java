@@ -495,7 +495,11 @@ public class EntitySoldier extends EntityCreature implements ISkinnable {
         double tz = target.posZ + (rand.nextDouble() - 0.5) * spread;
 
         target.attackEntityFrom(DamageSource.causeMobDamage(this), (float) (2.0 + warLevel));
-        this.playSound(SoundEvents.ENTITY_BLAZE_HURT, 0.7F, 1.7F); // sharp report
+        // SOUNDBOARD rifle voice: a sharp high ballista snap at the muzzle + the bolt thudding into
+        // the target (replaces the blaze-hurt placeholder; both no-op cleanly when AW2 is absent).
+        studio.ERM.war.sound.WarSoundboard.rifleSnap(world, posX, posY + getEyeHeight(), posZ);
+        studio.ERM.war.sound.WarSoundboard.bulletHitEntity(world, target.posX,
+                target.posY + target.height * 0.5, target.posZ);
 
         if (world instanceof net.minecraft.world.WorldServer) {
             net.minecraft.world.WorldServer ws = (net.minecraft.world.WorldServer) world;

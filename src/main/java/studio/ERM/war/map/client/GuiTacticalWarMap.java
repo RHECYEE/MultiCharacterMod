@@ -147,10 +147,13 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int civPanelX, civPanelY;
 
     // STRATEGIC MISSION MENU (Civilian tab, Inspect mode, right-click): dispatch a party to the
-    // cursor. For now the only mission is Hunting Party (returns 2-16 raw porkchops to a depot).
+    // cursor. Row index == the server-side StrategicMissionManager type constant. Survey missions
+    // chart strategic resource deposits; Establish Camp founds an AW2 extraction camp on one.
     private boolean missionMenuOpen = false;
     private int missionMenuX, missionMenuY, missionWorldX, missionWorldZ;
-    private static final String[] MISSION_NAMES = {"Hunting Party"};
+    private static final String[] MISSION_NAMES = {
+            "Hunting Party", "Survey Frontier", "Search for Minerals",
+            "Explore Territory", "Scout Route", "Engineering Survey", "Establish Camp"};
 
     // NATION DIPLOMACY DROPDOWN (Claims tab): click a nation's land to open Send Envoy / Buy Claim /
     // Purchase Trade Agreement.

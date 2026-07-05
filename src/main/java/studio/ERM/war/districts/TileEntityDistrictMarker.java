@@ -58,6 +58,21 @@ public class TileEntityDistrictMarker extends TileEntity {
     };
     private final int[] loadoutCounts = new int[LOADOUTS];
 
+    /** Deliveries addressed here while the chunk was UNLOADED (missions, camp output) sit in the
+     *  persistent depot inbox; they land in the physical chest the moment the world arrives —
+     *  the no-force-load doctrine: the data is the ledger, the blocks are its projection. */
+    @Override
+    public void onLoad() {
+        if (world == null || world.isRemote) return;
+        try {
+            int n = studio.ERM.strategic.civil.DepotInboxData.get(world).drainInto(pos, depot);
+            if (n > 0) {
+                studio.ERM.EpochRunnerMod.logger.info("[Depot] inbox drained: " + n
+                        + " stack(s) delivered @ " + pos.getX() + "," + pos.getY() + "," + pos.getZ());
+            }
+        } catch (Throwable ignored) {}
+    }
+
     public DistrictType getDistrictType() {
         return districtType;
     }

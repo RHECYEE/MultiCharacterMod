@@ -26,16 +26,18 @@ import java.util.Random;
 public final class StrategicMissionManager {
 
     // Mission types.
-    public static final int HUNTING = 0, SURVEY = 1, MINERALS = 2, EXPLORE = 3, SCOUT = 4, ENGINEERING = 5;
+    public static final int HUNTING = 0, SURVEY = 1, MINERALS = 2, EXPLORE = 3, SCOUT = 4, ENGINEERING = 5,
+            SETUP_CAMP = 6;
     public static final String[] NAMES = {
             "Hunting Expedition", "Survey Frontier", "Search for Minerals",
-            "Explore Territory", "Scout Route", "Engineering Survey"};
+            "Explore Territory", "Scout Route", "Engineering Survey", "Establish Camp"};
     public static final String[] REWARDS = {
             "Raw meat for the larder", "A written survey of the area", "Ores hauled to the warehouse",
-            "Exploration notes + finds", "A scouted route report", "Building materials"};
+            "Exploration notes + finds", "A scouted route report", "Building materials",
+            "A working extraction camp"};
     /** Base danger of each mission before any party reduces it (0..1). */
-    private static final double[] BASE_RISK = {0.20, 0.28, 0.42, 0.50, 0.30, 0.24};
-    private static final int[] DURATION_SEC = {60, 120, 150, 180, 90, 120};
+    private static final double[] BASE_RISK = {0.20, 0.28, 0.42, 0.50, 0.30, 0.24, 0.30};
+    private static final int[] DURATION_SEC = {60, 120, 150, 180, 90, 120, 150};
 
     private static final Random RNG = new Random();
 
@@ -75,6 +77,7 @@ public final class StrategicMissionManager {
         if (r.contains("soldier") || r.contains("king")) return 2;            // combat/leadership: all missions
         if (type == MINERALS && r.contains("miner")) return 3;
         if (type == ENGINEERING && r.contains("engineer")) return 3;
+        if (type == SETUP_CAMP && (r.contains("engineer") || r.contains("miner"))) return 3;
         if ((type == EXPLORE || type == SCOUT || type == SURVEY) && r.contains("nomad")) return 3;
         if (type == HUNTING && (r.contains("lumber") || r.contains("miner"))) return 2;
         if (r.contains("magician")) return 2;
@@ -125,12 +128,16 @@ public final class StrategicMissionManager {
 
         // CASUALTIES: each escort risks the mission's risk; CHARACTERS never die. Lost citizens are
         // culled from the settlement (the ongoing cost of expansion) — up to what's actually there.
+        // Camp crews are exempt: the escorts who survive the road BECOME the camp's staff.
         int lost = 0;
-        for (int i = 0; i < m.citizens; i++) if (RNG.nextDouble() < m.risk) lost++;
-        if (lost > 0) cullCitizens(world, m, lost);
+        if (m.type != SETUP_CAMP) {
+            for (int i = 0; i < m.citizens; i++) if (RNG.nextDouble() < m.risk) lost++;
+            if (lost > 0) cullCitizens(world, m, lost);
+        }
 
         // REWARD by type: hunting/minerals/engineering -> the warehouse; survey/explore/scout -> a
-        // written report handed to the player.
+        // written report handed to the player (now with real DEPOSIT DISCOVERY rolls); camp -> a
+        // founded extraction camp on a surveyed deposit.
         String report;
         switch (m.type) {
             case HUNTING: {
@@ -148,6 +155,9 @@ public final class StrategicMissionManager {
                 report = depotReward(world, mats, p, mats.getCount() + " building stone");
                 break;
             }
+            case SETUP_CAMP:
+                report = establishCamp(world, m, p);
+                break;
             case SURVEY:
             case EXPLORE:
             case SCOUT:
@@ -181,8 +191,36 @@ public final class StrategicMissionManager {
         return desc + " (no warehouse — dropped at your feet)";
     }
 
-    /** Survey/Explore/Scout return a WRITTEN paper handed to the player (the "piece of paper written on"). */
+    /** Survey/Explore/Scout return a WRITTEN paper handed to the player — and roll REAL DEPOSIT
+     *  DISCOVERY against the strategic resource-node layer: a successful survey marks the nearest
+     *  unknown node as player-known and writes its type/position/reserve into the report. */
     private static String givePaper(WorldServer world, Mission m, net.minecraft.entity.player.EntityPlayer p) {
+        String finding = surveyFinding(m.type);
+        String headline = "a written report was added to your inventory";
+        try {
+            studio.ERM.strategic.resource.ResourceNodeData nodes =
+                    studio.ERM.strategic.resource.ResourceNodeData.get(world);
+            nodes.ensureSeeded(world);
+            studio.ERM.strategic.resource.ResourceNodeData.Node n =
+                    nodes.nearestUndiscovered(m.x, m.z, true, 240);
+            if (n != null) {
+                // Surveys are the dedicated instrument; explorers/scouts stumble onto deposits less often.
+                double chance = (m.type == SURVEY ? 0.55 : 0.28)
+                        + m.characters * 0.10 + m.citizens * 0.02
+                        - 0.15 * (n.difficulty - 1);
+                if (RNG.nextDouble() < Math.max(0.05, Math.min(0.95, chance))) {
+                    n.playerKnown = true;
+                    nodes.markDirty();
+                    finding = "DEPOSIT FOUND: " + n.typeName() + "\nat " + n.pos.getX() + ", " + n.pos.getZ()
+                            + "\nEstimated reserve: ~" + n.remaining + " units"
+                            + "\nSurvey difficulty: " + n.difficulty + "/3"
+                            + "\n\nDispatch an 'Establish Camp' mission to that spot to exploit it.";
+                    headline = "a " + n.typeName() + " DEPOSIT was charted at "
+                            + n.pos.getX() + ", " + n.pos.getZ();
+                }
+            }
+        } catch (Throwable ignored) {}
+
         ItemStack book = new ItemStack(Items.WRITTEN_BOOK);
         net.minecraft.nbt.NBTTagCompound tag = new net.minecraft.nbt.NBTTagCompound();
         tag.setString("author", "Expedition");
@@ -190,14 +228,41 @@ public final class StrategicMissionManager {
         net.minecraft.nbt.NBTTagList pages = new net.minecraft.nbt.NBTTagList();
         String body = NAMES[m.type] + "\n\nTarget: " + m.x + ", " + m.z
                 + "\nEscorts: " + m.citizens + "\nRisk: " + (int) Math.round(m.risk * 100) + "%\n\n"
-                + surveyFinding(m.type);
+                + finding;
         pages.appendTag(new net.minecraft.nbt.NBTTagString("\"" + body.replace("\"", "'") + "\""));
         tag.setTag("pages", pages);
         book.setTagCompound(tag);
         if (p != null && !p.inventory.addItemStackToInventory(book)) {
             net.minecraft.inventory.InventoryHelper.spawnItemStack(world, p.posX, p.posY, p.posZ, book);
         }
-        return "a written report was added to your inventory";
+        return headline;
+    }
+
+    /**
+     * ESTABLISH CAMP — the player's expansion move: the crew founds an extraction camp on a
+     * SURVEYED, unclaimed deposit near the mission target. The camp is PENDING until its chunk
+     * loads naturally, then the AW2 schematic appears and daily output ships to the warehouse
+     * (ResourceCampManager owns the rest of the lifecycle).
+     */
+    private static String establishCamp(WorldServer world, Mission m, net.minecraft.entity.player.EntityPlayer p) {
+        try {
+            studio.ERM.strategic.resource.ResourceNodeData nodes =
+                    studio.ERM.strategic.resource.ResourceNodeData.get(world);
+            nodes.ensureSeeded(world);
+            studio.ERM.strategic.resource.ResourceNodeData.Node n = nodes.nearestClaimable(m.x, m.z, true, 80);
+            if (n == null) {
+                return "the crew found no surveyed, unclaimed deposit at the site (survey it first) and returned";
+            }
+            n.owner = studio.ERM.strategic.resource.ResourceNodeData.OWNER_PLAYER;
+            n.campState = studio.ERM.strategic.resource.ResourceNodeData.CAMP_PENDING;
+            nodes.markDirty();
+            EpochRunnerMod.logger.info("[Mission] player founded a " + n.typeName() + " camp @ "
+                    + n.pos.getX() + "," + n.pos.getZ());
+            return "your " + n.typeName() + " extraction camp was founded at " + n.pos.getX() + ", "
+                    + n.pos.getZ() + " — the buildings rise when you next travel there";
+        } catch (Throwable t) {
+            return "the founding party got lost in the paperwork (" + t.getClass().getSimpleName() + ")";
+        }
     }
 
     private static String surveyFinding(int type) {
@@ -225,23 +290,34 @@ public final class StrategicMissionManager {
 
     /**
      * Deposit the haul into the WAREHOUSE (then KITCHEN) depot — the party returns to the settlement.
-     * The depot chunk is force-loaded first so an UNLOADED warehouse still receives the goods (the
-     * "reward went to the player instead of the warehouse" bug was depotOf() returning null when the
-     * settlement wasn't loaded at completion time). Returns the depot pos, or null only when there is
-     * genuinely no warehouse/kitchen depot anywhere.
+     * NO FORCE-LOADING: a LOADED depot receives the goods directly (draining any earlier queued mail
+     * first); an UNLOADED depot gets the delivery written into the persistent DEPOT INBOX
+     * ({@link DepotInboxData}) — the district data is the ledger, and the physical chest fills the
+     * moment its chunk loads naturally (TileEntityDistrictMarker drains its inbox in onLoad).
+     * Returns the depot pos, or null only when there is genuinely no warehouse/kitchen depot (or
+     * every loaded one is full).
      */
     private static BlockPos deliver(WorldServer world, ItemStack haul) {
         CivilPlanData plan = CivilPlanData.get(world);
+        // Pass 1: loaded depots take the goods physically, right now.
         for (int kind : new int[]{CivilMarker.WAREHOUSE, CivilMarker.KITCHEN}) {
             for (CivilMarker mk : plan.markers) {
                 if (mk.kind != kind || !mk.hasDepot()) continue;
-                // Force-load the depot chunk so an unloaded warehouse still receives the haul.
-                world.getChunkProvider().provideChunk(mk.depotPos.getX() >> 4, mk.depotPos.getZ() >> 4);
+                if (!world.isBlockLoaded(mk.depotPos, false)) continue;
                 net.minecraft.tileentity.TileEntity te = world.getTileEntity(mk.depotPos);
                 if (!(te instanceof TileEntityDistrictMarker)) continue;
+                DepotInboxData.get(world).drainInto(mk.depotPos, ((TileEntityDistrictMarker) te).depot);
                 ItemStack left = ItemHandlerHelper.insertItemStacked(
                         ((TileEntityDistrictMarker) te).depot, haul.copy(), false);
                 if (left.isEmpty()) return mk.depotPos;
+            }
+        }
+        // Pass 2: no loaded depot took it — write it to the first UNLOADED depot's inbox instead.
+        for (int kind : new int[]{CivilMarker.WAREHOUSE, CivilMarker.KITCHEN}) {
+            for (CivilMarker mk : plan.markers) {
+                if (mk.kind != kind || !mk.hasDepot()) continue;
+                if (world.isBlockLoaded(mk.depotPos, false)) continue;
+                if (DepotInboxData.get(world).queue(mk.depotPos, haul)) return mk.depotPos;
             }
         }
         return null;

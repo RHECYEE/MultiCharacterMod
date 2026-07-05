@@ -326,6 +326,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
         // line and catapults spawn on solid, level ground instead of out on open water.
         buildCamp(world);
 
+        // SOUNDBOARD: war is coming — drums at the victim's base, a horn from the hills, the bell.
+        studio.ERM.war.sound.WarSoundboard.raidWarning(world,
+                site.getX() + 0.5, site.getY() + 1.0, site.getZ() + 0.5);
+
         beginDeployment(world);
     }
 
@@ -2037,7 +2041,15 @@ public class SiegeDirector implements IPhasedBattleDirector {
             openGroundBreach(world, breachCorridor);
             levelBreachPath(world, breachCorridor);
             breachOpened = true;
+            // The wall comes down AUDIBLY: gate-break + a rain of stone with the pitch falling away.
+            studio.ERM.war.sound.WarSoundboard.buildingCollapse(world,
+                    breachCorridor.getX() + 0.5, breachCorridor.getY() + 1.0, breachCorridor.getZ() + 0.5, true);
             EpochRunnerMod.logger.info("[Siege] surge: wall was not fully breached in time -> barrage collapse failsafe");
+        }
+        // SOUNDBOARD: the charge — a horn over the field as the army goes in.
+        if (breachCorridor != null) {
+            studio.ERM.war.sound.WarSoundboard.chargeHorn(world,
+                    breachCorridor.getX() + 0.5, breachCorridor.getY() + 2.0, breachCorridor.getZ() + 0.5);
         }
         EpochRunnerMod.logger.info("[Siege] -> SURGE: invasion through the breach (warLevel=" + warLevel + ")");
 
@@ -3192,6 +3204,10 @@ public class SiegeDirector implements IPhasedBattleDirector {
                     EpochRunnerMod.logger.info("[Siege] occupation: army rallied -> departing for the rival city via "
                             + xyz(departPoint));
                     announceStageDebug(world, departPoint, "ARMY DEPARTS FOR THE RIVAL CITY");
+                    // A long horn + drums fading into the distance as the column marches out.
+                    BlockPos sc = (stagingCenter != null) ? stagingCenter : site;
+                    studio.ERM.war.sound.WarSoundboard.armyDeparts(world,
+                            sc.getX() + 0.5, sc.getY() + 2.0, sc.getZ() + 0.5);
                 }
                 break;
             }
@@ -3565,6 +3581,9 @@ public class SiegeDirector implements IPhasedBattleDirector {
                 // DEVASTATING: a big crater per round (scaled by tech level) so the bombardment actually
                 // tears the base apart. Block-only (no entity damage) keeps it friendly-safe.
                 breachWall(world, impact, (warLevel >= 8) ? 5 : (warLevel >= 6) ? 4 : 3);
+                // SOUNDBOARD: the boulder landing — dirt thud + stone cracks at the crater.
+                studio.ERM.war.sound.WarSoundboard.catapultImpact(world,
+                        impact.getX() + 0.5, impact.getY() + 1.0, impact.getZ() + 0.5);
                 if (alive) s.block.setDead();
                 it.remove();
             }

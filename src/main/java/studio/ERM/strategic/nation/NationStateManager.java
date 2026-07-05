@@ -100,42 +100,26 @@ public final class NationStateManager {
         }
     }
 
-    /** Tier 1: a tribal camp — a few Level 0 templates pitched around the home block, or simple
-     *  procedural teepees when no .aws templates are loaded (so the nation is always VISIBLE). */
+    // Keyword fallbacks (matched against EVERYTHING AW2 has loaded) so an empty catalog still
+    // yields REAL buildings — the rival city already proved these templates; no procedural tents.
+    private static final String[] CAMP_KEYWORDS =
+            {"tribal", "tent", "camp", "hut", "primitive", "village", "shack", "cottage"};
+    private static final String[] TOWN_KEYWORDS =
+            {"village", "house", "cottage", "town", "hall", "farm", "smith", "inn", "church", "market"};
+
+    /** Tier 1: a tribal camp — Level 0 catalog templates around the home block, with a keyword
+     *  sweep over ALL loaded AW2 templates as the fallback. AW2 structures or nothing: a nation
+     *  with no placeable template stays invisible until packs load (never a procedural teepee). */
     private static void buildCamp(WorldServer world, NationStateData.Nation n) {
-        List<String> pool = SchematicCatalog.existing(SchematicCatalog.TRIBAL, null);
         int placed = 0;
         for (int i = 0; i < 3; i++) {
             BlockPos at = surfaceNear(world, n.center, i == 0 ? 0 : 14 + RNG.nextInt(10));
             if (at == null) continue;
-            if (!pool.isEmpty() && placeTemplate(world, pool.get(RNG.nextInt(pool.size())), at)) placed++;
-            else { buildFallbackTent(world, at); placed++; } // no template -> a procedural teepee
+            String tmpl = studio.ERM.strategic.Aw2Structures.pick(SchematicCatalog.TRIBAL, null, CAMP_KEYWORDS);
+            if (tmpl != null && placeTemplate(world, tmpl, at)) placed++;
         }
-        EpochRunnerMod.logger.info("[Nations] " + n.name + " camp: " + placed + " tent(s) pitched"
-                + (pool.isEmpty() ? " (procedural — no Tribal templates loaded)" : ""));
-    }
-
-    /** A simple procedural teepee: a central spruce-log pole inside a tapering brown-wool cone, with
-     *  a front door gap and a small fire pit. Reads as a tribal tent without any schematic assets. */
-    private static void buildFallbackTent(WorldServer world, BlockPos c) {
-        try {
-            net.minecraft.block.state.IBlockState log = net.minecraft.init.Blocks.LOG.getStateFromMeta(1); // spruce
-            net.minecraft.block.state.IBlockState wool = net.minecraft.init.Blocks.WOOL.getStateFromMeta(12); // brown
-            // Cone walls: radius-2 ring at the base, radius-1 ring above.
-            for (int dx = -2; dx <= 2; dx++) for (int dz = -2; dz <= 2; dz++) {
-                if (Math.abs(dx) == 2 || Math.abs(dz) == 2) world.setBlockState(c.add(dx, 0, dz), wool, 2);
-            }
-            for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
-                if (Math.abs(dx) == 1 || Math.abs(dz) == 1) world.setBlockState(c.add(dx, 1, dz), wool, 2);
-            }
-            // Central pole poking out the top.
-            for (int dy = 0; dy <= 3; dy++) world.setBlockState(c.up(dy), log, 2);
-            // Door gap (south face) + a fire pit at the entrance.
-            world.setBlockToAir(c.add(0, 0, 2));
-            world.setBlockToAir(c.add(0, 1, 2));
-            world.setBlockState(c.add(0, 0, 3), net.minecraft.init.Blocks.NETHERRACK.getDefaultState(), 2);
-            world.setBlockState(c.add(0, 1, 3), net.minecraft.init.Blocks.FIRE.getDefaultState(), 2);
-        } catch (Throwable ignored) {}
+        EpochRunnerMod.logger.info("[Nations] " + n.name + " camp: " + placed + " AW2 structure(s) raised"
+                + (placed == 0 ? " (no matching templates loaded — camp deferred)" : ""));
     }
 
     /**
@@ -151,27 +135,22 @@ public final class NationStateManager {
             pool.addAll(SchematicCatalog.existing(SchematicCatalog.OUTPOSTS_CAMPS, pack));
         }
         if (pool.isEmpty()) pool = SchematicCatalog.existing(SchematicCatalog.NATION_STATES, null);
-        if (pool.isEmpty()) {
-            // No town templates loaded -> a cluster of procedural teepees so the town is still visible.
-            for (int i = 0; i < 6; i++) {
-                double ang = Math.PI * 2 * i / 6;
-                BlockPos at = surfaceNear(world, n.center.add((int) (Math.cos(ang) * (18 + i * 4)), 0,
-                        (int) (Math.sin(ang) * (18 + i * 4))), 3);
-                if (at != null) buildFallbackTent(world, at);
-            }
-            EpochRunnerMod.logger.info("[Nations] " + n.name + " town: procedural (no town templates loaded)");
-        } else {
-            int placed = 0;
-            // Two rings of lots around the centre: 4 close, 4 far, offset bearings.
-            for (int i = 0; i < 8; i++) {
-                double ang = Math.PI * 2 * i / 8 + (i >= 4 ? Math.PI / 8 : 0);
-                int r = i < 4 ? 22 : 44;
-                BlockPos at = surfaceNear(world,
-                        n.center.add((int) (Math.cos(ang) * r), 0, (int) (Math.sin(ang) * r)), 0);
-                if (at != null && placeTemplate(world, pool.get(RNG.nextInt(pool.size())), at)) placed++;
-            }
-            EpochRunnerMod.logger.info("[Nations] " + n.name + " built its town (" + placed + " structures)");
+        int placed = 0;
+        // Two rings of lots around the centre: 4 close, 4 far, offset bearings. Every lot gets a
+        // REAL AW2 structure: the culture pool when available, else a keyword sweep over everything
+        // AW2 loaded (the rival city's own doctrine) — never a procedural tent.
+        for (int i = 0; i < 8; i++) {
+            double ang = Math.PI * 2 * i / 8 + (i >= 4 ? Math.PI / 8 : 0);
+            int r = i < 4 ? 22 : 44;
+            BlockPos at = surfaceNear(world,
+                    n.center.add((int) (Math.cos(ang) * r), 0, (int) (Math.sin(ang) * r)), 0);
+            if (at == null) continue;
+            String tmpl = !pool.isEmpty() ? pool.get(RNG.nextInt(pool.size()))
+                    : studio.ERM.strategic.Aw2Structures.pick(null, null, TOWN_KEYWORDS);
+            if (tmpl != null && placeTemplate(world, tmpl, at)) placed++;
         }
+        EpochRunnerMod.logger.info("[Nations] " + n.name + " built its town (" + placed + " structures"
+                + (placed == 0 ? " — no matching templates loaded" : "") + ")");
         claimHalo(world, n, TOWN_CLAIM_CHUNKS);
         n.tier = 2;
         for (EntityPlayer p : world.playerEntities) {
