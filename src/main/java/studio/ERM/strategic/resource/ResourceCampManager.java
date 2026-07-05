@@ -189,6 +189,18 @@ public final class ResourceCampManager {
             if (at == null) at = Aw2Structures.surfaceNear(world, n.pos, 12);
             String tmpl = Aw2Structures.pick(SchematicCatalog.OUTPOSTS_CAMPS, null, campKeywordsFor(n.type));
             boolean placed = at != null && tmpl != null && Aw2Structures.placeRandomFacing(world, tmpl, at);
+            if (placed && n.owner == ResourceNodeData.OWNER_RIVAL) {
+                // Rebrand the template's ADVANCED SPAWNERS to a faction this install actually has
+                // (the rival's own) — pack spawner NBT can carry unresolvable factions, the exact
+                // "Ticking entity" NPE source. The join-time crash guard is the backstop.
+                try {
+                    String faction = studio.ERM.war.util.Aw2FactionCrashGuard.repairName();
+                    if (faction != null) {
+                        studio.ERM.war.util.AdvancedSpawnerFactionSwapper.swapSpawnerFactionsNear(
+                                world, at, 40, -8, 40, faction);
+                    }
+                } catch (Throwable ignored) {}
+            }
             // Even if AW2 had nothing to offer, the camp still OPERATES (strategic truth first);
             // a later pass retries placement in case packs load templates lazily.
             if (placed) {

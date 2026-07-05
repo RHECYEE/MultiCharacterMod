@@ -121,19 +121,9 @@ public final class BattleDirectorRegistry {
                 }
         ));
 
-        // Debug circle - for testing (FREE)
-        register(new BattleDirectorEntry(
-                "debug_circle",
-                "[Debug] Circle Test",
-                "Debug formation test. Spawns orbiting unit.",
-                0,   // CP cost
-                0,   // Min level (always available)
-                () -> {
-                    UnitCard card = UnitCardRegistry.get("ShieldWall");
-                    if (card == null) card = UnitCardRegistry.getDefault();
-                    return new DebugCircleDirector(card);
-                }
-        ));
+        // Debug circle retired from the player-facing deploy menu (it was a formation test rig).
+        // DebugCircleDirector stays in the codebase for /war debug work; it just isn't registered,
+        // so the dropdown only offers real Player-Created Battles.
     }
 
     /**

@@ -147,13 +147,14 @@ public class GuiTacticalWarMap extends GuiScreen {
     private int civPanelX, civPanelY;
 
     // STRATEGIC MISSION MENU (Civilian tab, Inspect mode, right-click): dispatch a party to the
-    // cursor. Row index == the server-side StrategicMissionManager type constant. Survey missions
-    // chart strategic resource deposits; Establish Camp founds an AW2 extraction camp on one.
+    // cursor. The PRUNED list: Search for Minerals IS the surveying (it charts deposits), Scout
+    // Route explores, Establish Camp founds an AW2 extraction camp on a charted deposit.
+    // MISSION_TYPES maps each row to its server-side StrategicMissionManager type constant.
     private boolean missionMenuOpen = false;
     private int missionMenuX, missionMenuY, missionWorldX, missionWorldZ;
     private static final String[] MISSION_NAMES = {
-            "Hunting Party", "Survey Frontier", "Search for Minerals",
-            "Explore Territory", "Scout Route", "Engineering Survey", "Establish Camp"};
+            "Hunting Party", "Search for Minerals", "Scout Route", "Establish Camp"};
+    private static final int[] MISSION_TYPES = {0, 2, 4, 6};
 
     // NATION DIPLOMACY DROPDOWN (Claims tab): click a nation's land to open Send Envoy / Buy Claim /
     // Purchase Trade Agreement.
@@ -307,8 +308,8 @@ public class GuiTacticalWarMap extends GuiScreen {
         if (missionMenuOpen) {
             int row = missionRowAt(mouseX, mouseY);
             if (mouseButton == 0 && row >= 0) {
-                TacticalWarMapNetwork.sendToServer(
-                        new studio.ERM.war.map.net.C2SStrategicMission(row, missionWorldX, missionWorldZ));
+                TacticalWarMapNetwork.sendToServer(new studio.ERM.war.map.net.C2SStrategicMission(
+                        MISSION_TYPES[row], missionWorldX, missionWorldZ));
                 setStatus(TextFormatting.GREEN + MISSION_NAMES[row] + " dispatched to "
                         + missionWorldX + ", " + missionWorldZ + ".");
             }
@@ -486,6 +487,22 @@ public class GuiTacticalWarMap extends GuiScreen {
             if (handleCivPanelClick(mouseX, mouseY)) return;
             civPanelUid = -1;
             return;
+        }
+
+        // DEPOSIT ICONS (Civilian tab, Inspect mode, LEFT-click): clicking a charted camp-site icon
+        // opens the mission menu PRE-TARGETED at the deposit — Establish Camp is one click away.
+        if (activeTab == 1 && civilMode < 0 && mouseButton == 0) {
+            studio.ERM.war.map.net.S2CCivilPlanSync.Deposit dep = depositIconAt(mouseX, mouseY);
+            if (dep != null) {
+                missionWorldX = dep.x;
+                missionWorldZ = dep.z;
+                missionMenuX = Math.min(mouseX, canvasLeft + canvasSize - 96);
+                missionMenuY = Math.min(mouseY, canvasTop + canvasSize - 40);
+                missionMenuOpen = true;
+                setStatus(TextFormatting.GOLD + dep.name + " deposit" + TextFormatting.GRAY
+                        + " @ " + dep.x + ", " + dep.z + " — dispatch Establish Camp to claim it.");
+                return;
+            }
         }
 
         // STRATEGIC MISSION (Civilian tab, Inspect mode, RIGHT-click): open the mission menu at the
@@ -814,6 +831,10 @@ public class GuiTacticalWarMap extends GuiScreen {
         // CITIZEN DOTS (Civilian tab): every loaded civilian worker as a white fleck — the city's
         // life, visible at a glance (mirror of the Military tab's green soldier dots).
         if (activeTab == 1) drawCitizenDots();
+
+        // CHARTED DEPOSITS (Civilian tab): diamond camp-site icons from survey charts — click one
+        // (Inspect mode) to dispatch Establish Camp straight onto the deposit.
+        if (activeTab == 1) drawDepositIcons();
 
         // LIVE UNIT DOTS (Military tab): every loaded friendly soldier + red enemy dots.
         if (activeTab == 2) drawUnitDots();
@@ -1266,11 +1287,10 @@ public class GuiTacticalWarMap extends GuiScreen {
         String[] lines = {
                 TextFormatting.GOLD + "Military",
                 TextFormatting.YELLOW + "Assigned: " + assigned + "/" + have,
-                TextFormatting.GRAY + "Tools: left list",
-                TextFormatting.GRAY + "Click marker: edit",
-                TextFormatting.GRAY + "R-click line: finish",
-                TextFormatting.GRAY + "R-click map: deploy",
-                TextFormatting.GRAY + "Zone: centre+edge",
+                TextFormatting.GRAY + "Tools: list on left",
+                TextFormatting.GRAY + "Click map to use",
+                TextFormatting.GRAY + "R-click to confirm",
+                TextFormatting.GRAY + "R-click map: battle",
         };
         int h = lines.length * 10 + 8;
         int x0 = canvasLeft + canvasSize + 6;                  // the sidebar column
@@ -1279,6 +1299,40 @@ public class GuiTacticalWarMap extends GuiScreen {
         for (int i = 0; i < lines.length; i++) {
             fontRenderer.drawStringWithShadow(lines[i], x0, y0 + i * 10, 0xFFFFFFFF);
         }
+    }
+
+    /** Charted resource deposits as DIAMOND icons: white = charted, gold = camp pending, green =
+     *  your camp, red = the rival's camp, gray = exhausted. First letter of the resource beside it. */
+    private void drawDepositIcons() {
+        for (studio.ERM.war.map.net.S2CCivilPlanSync.Deposit d
+                : studio.ERM.war.map.client.ClientCivilPlanCache.deposits()) {
+            int[] s = worldToScreen(d.x, d.z);
+            if (s == null) continue;
+            int sx = s[0], sy = s[1];
+            if (sx < canvasLeft + 5 || sx >= canvasLeft + canvasSize - 5
+                    || sy < canvasTop + 5 || sy >= canvasTop + canvasSize - 5) continue;
+            int color = d.state == 2 ? 0xFF40FF60 : d.state == 3 ? 0xFFFF5050
+                    : d.state == 1 ? 0xFFFFC940 : d.state == 4 ? 0xFF909090 : 0xFFFFFFFF;
+            for (int i = -4; i <= 4; i++) { // filled diamond via shrinking strips
+                int half = 4 - Math.abs(i);
+                Gui.drawRect(sx - half, sy + i, sx + half + 1, sy + i + 1, color);
+            }
+            Gui.drawRect(sx, sy, sx + 1, sy + 1, 0xFF202020); // centre dot so it reads as a site
+            if (!d.name.isEmpty()) {
+                fontRenderer.drawStringWithShadow(d.name.substring(0, 1), sx + 6, sy - 4, color);
+            }
+        }
+    }
+
+    /** The deposit icon under the cursor (5px pick radius), or null. */
+    private studio.ERM.war.map.net.S2CCivilPlanSync.Deposit depositIconAt(int mouseX, int mouseY) {
+        for (studio.ERM.war.map.net.S2CCivilPlanSync.Deposit d
+                : studio.ERM.war.map.client.ClientCivilPlanCache.deposits()) {
+            int[] s = worldToScreen(d.x, d.z);
+            if (s == null) continue;
+            if (Math.abs(mouseX - s[0]) <= 5 && Math.abs(mouseY - s[1]) <= 5) return d;
+        }
+        return null;
     }
 
     /** Sidebar EVACUATE button bounds (Civilian tab), below the chrome column. */

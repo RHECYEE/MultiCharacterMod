@@ -290,12 +290,20 @@ public class RivalCityManager {
             // pre-existing /war rival city / status lookups (getNearestCity, etc.).
             RivalCityState state = getOrCreateCity(world, "RIVAL");
 
-            double angle = rand.nextDouble() * Math.PI * 2.0;
-            int span = Math.max(1, RivalCityConfig.maxSpawnDistance - RivalCityConfig.minSpawnDistance);
-            int distance = RivalCityConfig.minSpawnDistance + rand.nextInt(span);
-            int x = (int) (player.posX + Math.cos(angle) * distance);
-            int z = (int) (player.posZ + Math.sin(angle) * distance);
+            // LAND-SEEKING SITE PICK: the old single random probe happily seeded the capital in the
+            // open OCEAN (city floating on water, nothing under it). Sample many bearings/distances,
+            // reject ocean biomes cheaply (biome provider — no chunk loads), then score finalists by
+            // the dry-land fraction of a 3x3 surface sample; first solid hit wins, else best found.
+            BlockPos site = pickLandSite(world, player.posX, player.posZ,
+                    RivalCityConfig.minSpawnDistance, RivalCityConfig.maxSpawnDistance);
+            int x = site.getX(), z = site.getZ();
             int y = world.getTopSolidOrLiquidBlock(new BlockPos(x, 0, z)).getY();
+
+            // TERRAFORM THE FOUNDATION: if the chosen column (best of a bad coastline) still sits
+            // over water, fill a bounded pad down to the seabed so the city is GROUNDED, not afloat.
+            if (world.getBlockState(new BlockPos(x, y - 1, z)).getMaterial().isLiquid()) {
+                y = buildFoundationPad(world, x, y, z);
+            }
 
             state.center = new BlockPos(x, y, z);
             state.level = Math.max(1, level);
@@ -316,6 +324,72 @@ public class RivalCityManager {
         } finally {
             isGenerating = false;
         }
+    }
+
+    /**
+     * Sample up to 28 candidate sites in the spawn ring and return the LANDIEST one. Ocean biomes
+     * are rejected via the biome provider (no chunk generation); surviving candidates pay for one
+     * 3x3 surface probe (step 16). A candidate with >=8/9 dry columns wins immediately.
+     */
+    private static BlockPos pickLandSite(World world, double px, double pz, int minDist, int maxDist) {
+        int span = Math.max(1, maxDist - minDist);
+        BlockPos best = null;
+        int bestDry = -1;
+        for (int attempt = 0; attempt < 28; attempt++) {
+            double angle = rand.nextDouble() * Math.PI * 2.0;
+            int distance = minDist + rand.nextInt(span);
+            int x = (int) (px + Math.cos(angle) * distance);
+            int z = (int) (pz + Math.sin(angle) * distance);
+            try {
+                net.minecraft.world.biome.Biome b = world.getBiomeProvider().getBiome(new BlockPos(x, 64, z));
+                String bn = (b != null && b.getBiomeName() != null) ? b.getBiomeName().toLowerCase() : "";
+                if (bn.contains("ocean") || bn.contains("deep")) continue; // cheap reject, no chunks touched
+            } catch (Throwable ignored) {}
+            int dry = 0;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    try {
+                        BlockPos s = world.getTopSolidOrLiquidBlock(new BlockPos(x + dx * 16, 0, z + dz * 16));
+                        if (!world.getBlockState(s.down()).getMaterial().isLiquid()) dry++;
+                    } catch (Throwable ignored) {}
+                }
+            }
+            if (dry > bestDry) { bestDry = dry; best = new BlockPos(x, 64, z); }
+            if (dry >= 8) break; // solid ground — take it
+        }
+        if (best == null) best = new BlockPos((int) (px + minDist), 64, (int) pz); // pathological all-ocean world
+        EpochRunnerMod.logger.info("[RivalCity] land-seeking site pick: " + best.getX() + "," + best.getZ()
+                + " (dry " + Math.max(0, bestDry) + "/9)");
+        return best;
+    }
+
+    /**
+     * Ground a wet core column: fill a 20-radius disc from one below sea surface DOWN to the seabed
+     * (bounded 12 deep) with dirt, capped with grass — the city stands ON land it made, instead of
+     * floating on the water table. Returns the new surface Y for the city centre.
+     */
+    private static int buildFoundationPad(World world, int x, int surfaceY, int z) {
+        int padTop = surfaceY; // the old liquid-surface Y becomes the pad's walkable top
+        int placed = 0;
+        for (int dx = -20; dx <= 20; dx++) {
+            for (int dz = -20; dz <= 20; dz++) {
+                if (dx * dx + dz * dz > 20 * 20) continue;
+                BlockPos col = new BlockPos(x + dx, padTop - 1, z + dz);
+                if (!world.getBlockState(col).getMaterial().isLiquid()
+                        && !world.isAirBlock(col)) continue; // already ground — leave the coastline alone
+                for (int dy = 0; dy < 12; dy++) {
+                    BlockPos p = new BlockPos(x + dx, padTop - 1 - dy, z + dz);
+                    net.minecraft.block.state.IBlockState st = world.getBlockState(p);
+                    if (!st.getMaterial().isLiquid() && !world.isAirBlock(p)) break; // hit the seabed
+                    world.setBlockState(p, dy == 0
+                            ? net.minecraft.init.Blocks.GRASS.getDefaultState()
+                            : net.minecraft.init.Blocks.DIRT.getDefaultState(), 2);
+                    placed++;
+                }
+            }
+        }
+        EpochRunnerMod.logger.info("[RivalCity] wet core column -> foundation pad built (" + placed + " blocks)");
+        return padTop;
     }
 
     // =====================================================================

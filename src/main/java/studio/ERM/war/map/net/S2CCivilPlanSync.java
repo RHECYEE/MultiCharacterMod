@@ -27,9 +27,18 @@ public class S2CCivilPlanSync implements IMessage {
         public byte progress = -1;
     }
 
+    /** One PLAYER-KNOWN strategic resource deposit for the map: a clickable camp-site icon. */
+    public static class Deposit {
+        public int x, z;
+        public int type;   // ResourceNodeData type index (names client-side via TYPE_NAMES)
+        public int state;  // 0 charted, 1 camp pending, 2 your camp, 3 rival camp, 4 exhausted
+        public String name = "";
+    }
+
     private List<CivilMarker> markers = new ArrayList<>();
     private int availWorkers, totalWorkers, availBeds, totalBeds;
     private List<JobLine> jobs = new ArrayList<>();
+    private List<Deposit> deposits = new ArrayList<>();
 
     public S2CCivilPlanSync() {}
 
@@ -48,6 +57,11 @@ public class S2CCivilPlanSync implements IMessage {
 
     public S2CCivilPlanSync withJobs(List<JobLine> jobLines) {
         this.jobs = jobLines != null ? jobLines : new ArrayList<>();
+        return this;
+    }
+
+    public S2CCivilPlanSync withDeposits(List<Deposit> deps) {
+        this.deposits = deps != null ? deps : new ArrayList<>();
         return this;
     }
 
@@ -71,6 +85,16 @@ public class S2CCivilPlanSync implements IMessage {
             j.label = net.minecraftforge.fml.common.network.ByteBufUtils.readUTF8String(buf);
             jobs.add(j);
         }
+        deposits.clear();
+        int dn = buf.readShort();
+        for (int i = 0; i < dn; i++) {
+            Deposit d = new Deposit();
+            d.x = buf.readInt(); d.z = buf.readInt();
+            d.type = buf.readByte();
+            d.state = buf.readByte();
+            d.name = net.minecraftforge.fml.common.network.ByteBufUtils.readUTF8String(buf);
+            deposits.add(d);
+        }
     }
 
     @Override
@@ -90,6 +114,14 @@ public class S2CCivilPlanSync implements IMessage {
             net.minecraftforge.fml.common.network.ByteBufUtils.writeUTF8String(
                     buf, j.label == null ? "" : j.label);
         }
+        buf.writeShort(deposits.size());
+        for (Deposit d : deposits) {
+            buf.writeInt(d.x); buf.writeInt(d.z);
+            buf.writeByte(d.type);
+            buf.writeByte(d.state);
+            net.minecraftforge.fml.common.network.ByteBufUtils.writeUTF8String(
+                    buf, d.name == null ? "" : d.name);
+        }
     }
 
     public static class Handler implements IMessageHandler<S2CCivilPlanSync, IMessage> {
@@ -100,6 +132,7 @@ public class S2CCivilPlanSync implements IMessage {
                 ClientCivilPlanCache.updateStats(
                         msg.availWorkers, msg.totalWorkers, msg.availBeds, msg.totalBeds);
                 ClientCivilPlanCache.updateJobs(msg.jobs);
+                ClientCivilPlanCache.updateDeposits(msg.deposits);
             });
             return null;
         }

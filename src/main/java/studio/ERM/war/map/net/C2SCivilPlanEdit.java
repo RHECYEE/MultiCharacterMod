@@ -128,9 +128,30 @@ public class C2SCivilPlanEdit implements IMessage {
             // Trade shipments ride the same channel: teal lines with REAL progress on the map.
             lines.addAll(studio.ERM.strategic.civil.trade.TradeShipmentManager
                     .shipmentLines((net.minecraft.world.WorldServer) player.world));
+
+            // PLAYER-KNOWN resource deposits -> clickable camp-site icons on the Civilian tab
+            // (the survey chart's coordinates, made visual: click one to dispatch Establish Camp).
+            java.util.List<S2CCivilPlanSync.Deposit> deps = new java.util.ArrayList<>();
+            try {
+                studio.ERM.strategic.resource.ResourceNodeData nd =
+                        studio.ERM.strategic.resource.ResourceNodeData.get(player.world);
+                for (studio.ERM.strategic.resource.ResourceNodeData.Node n : nd.nodes) {
+                    if (!n.playerKnown) continue;
+                    S2CCivilPlanSync.Deposit d = new S2CCivilPlanSync.Deposit();
+                    d.x = n.pos.getX(); d.z = n.pos.getZ();
+                    d.type = n.type;
+                    d.state = (n.campState == studio.ERM.strategic.resource.ResourceNodeData.CAMP_EXHAUSTED) ? 4
+                            : (n.campState == studio.ERM.strategic.resource.ResourceNodeData.CAMP_NONE) ? 0
+                            : (n.owner == studio.ERM.strategic.resource.ResourceNodeData.OWNER_PLAYER) ? 2
+                            : (n.owner == studio.ERM.strategic.resource.ResourceNodeData.OWNER_RIVAL) ? 3 : 1;
+                    d.name = n.typeName();
+                    deps.add(d);
+                }
+            } catch (Throwable ignored) {}
+
             TacticalWarMapNetwork.sendTo(new S2CCivilPlanSync(
                     plan.markers, st.availWorkers, st.totalWorkers, st.availBeds, st.totalBeds)
-                    .withJobs(lines), player);
+                    .withJobs(lines).withDeposits(deps), player);
         }
 
         /** Null when the marker is allowed; otherwise the player-facing reason it was refused. */

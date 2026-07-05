@@ -11,6 +11,7 @@ public final class ClientCivilPlanCache {
     private static volatile List<CivilMarker> markers = new ArrayList<>();
     private static volatile int availWorkers, totalWorkers, availBeds, totalBeds;
     private static volatile List<studio.ERM.war.map.net.S2CCivilPlanSync.JobLine> jobs = new ArrayList<>();
+    private static volatile List<studio.ERM.war.map.net.S2CCivilPlanSync.Deposit> deposits = new ArrayList<>();
 
     private ClientCivilPlanCache() {}
 
@@ -24,6 +25,15 @@ public final class ClientCivilPlanCache {
 
     public static List<studio.ERM.war.map.net.S2CCivilPlanSync.JobLine> jobs() {
         return jobs;
+    }
+
+    public static void updateDeposits(List<studio.ERM.war.map.net.S2CCivilPlanSync.Deposit> list) {
+        deposits = (list != null) ? list : new ArrayList<>();
+    }
+
+    /** Player-known strategic resource deposits — the map's clickable camp-site icons. */
+    public static List<studio.ERM.war.map.net.S2CCivilPlanSync.Deposit> deposits() {
+        return deposits;
     }
 
     public static void updateStats(int availWorkers, int totalWorkers, int availBeds, int totalBeds) {

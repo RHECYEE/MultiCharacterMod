@@ -148,6 +148,14 @@ public final class StrategicMissionManager {
             case MINERALS: {
                 ItemStack ore = rollOre();
                 report = depotReward(world, ore, p, ore.getCount() + "x " + ore.getDisplayName());
+                // "Search for Minerals" IS the surveying now (Survey Frontier/Engineering Survey are
+                // retired from the menu): a successful sweep also CHARTS the nearest unknown deposit.
+                studio.ERM.strategic.resource.ResourceNodeData.Node found = rollDeposit(world, m, 0.60);
+                if (found != null) {
+                    giveDepositChart(world, m, p, found);
+                    report += "; a " + found.typeName() + " DEPOSIT was charted at "
+                            + found.pos.getX() + ", " + found.pos.getZ();
+                }
                 break;
             }
             case ENGINEERING: {
@@ -191,35 +199,66 @@ public final class StrategicMissionManager {
         return desc + " (no warehouse — dropped at your feet)";
     }
 
-    /** Survey/Explore/Scout return a WRITTEN paper handed to the player — and roll REAL DEPOSIT
-     *  DISCOVERY against the strategic resource-node layer: a successful survey marks the nearest
-     *  unknown node as player-known and writes its type/position/reserve into the report. */
-    private static String givePaper(WorldServer world, Mission m, net.minecraft.entity.player.EntityPlayer p) {
-        String finding = surveyFinding(m.type);
-        String headline = "a written report was added to your inventory";
+    /**
+     * Roll REAL DEPOSIT DISCOVERY against the strategic resource-node layer: on success the nearest
+     * unknown node within 240 of the mission target becomes player-known and is returned. Shared by
+     * Search for Minerals (the surveyor, high odds) and Scout Route (stumbles onto deposits).
+     */
+    private static studio.ERM.strategic.resource.ResourceNodeData.Node rollDeposit(
+            WorldServer world, Mission m, double baseChance) {
         try {
             studio.ERM.strategic.resource.ResourceNodeData nodes =
                     studio.ERM.strategic.resource.ResourceNodeData.get(world);
             nodes.ensureSeeded(world);
             studio.ERM.strategic.resource.ResourceNodeData.Node n =
                     nodes.nearestUndiscovered(m.x, m.z, true, 240);
-            if (n != null) {
-                // Surveys are the dedicated instrument; explorers/scouts stumble onto deposits less often.
-                double chance = (m.type == SURVEY ? 0.55 : 0.28)
-                        + m.characters * 0.10 + m.citizens * 0.02
-                        - 0.15 * (n.difficulty - 1);
-                if (RNG.nextDouble() < Math.max(0.05, Math.min(0.95, chance))) {
-                    n.playerKnown = true;
-                    nodes.markDirty();
-                    finding = "DEPOSIT FOUND: " + n.typeName() + "\nat " + n.pos.getX() + ", " + n.pos.getZ()
-                            + "\nEstimated reserve: ~" + n.remaining + " units"
-                            + "\nSurvey difficulty: " + n.difficulty + "/3"
-                            + "\n\nDispatch an 'Establish Camp' mission to that spot to exploit it.";
-                    headline = "a " + n.typeName() + " DEPOSIT was charted at "
-                            + n.pos.getX() + ", " + n.pos.getZ();
-                }
-            }
-        } catch (Throwable ignored) {}
+            if (n == null) return null;
+            double chance = baseChance + m.characters * 0.10 + m.citizens * 0.02
+                    - 0.15 * (n.difficulty - 1);
+            if (RNG.nextDouble() >= Math.max(0.05, Math.min(0.95, chance))) return null;
+            n.playerKnown = true;
+            nodes.markDirty();
+            return n;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** The deposit CHART: a written book carrying the node's type/position/reserve + instructions. */
+    private static void giveDepositChart(WorldServer world, Mission m,
+                                         net.minecraft.entity.player.EntityPlayer p,
+                                         studio.ERM.strategic.resource.ResourceNodeData.Node n) {
+        ItemStack book = new ItemStack(Items.WRITTEN_BOOK);
+        net.minecraft.nbt.NBTTagCompound tag = new net.minecraft.nbt.NBTTagCompound();
+        tag.setString("author", "Expedition");
+        tag.setString("title", n.typeName() + " deposit @ " + n.pos.getX() + "," + n.pos.getZ());
+        net.minecraft.nbt.NBTTagList pages = new net.minecraft.nbt.NBTTagList();
+        String body = "DEPOSIT CHART\n\n" + n.typeName() + "\nat " + n.pos.getX() + ", " + n.pos.getZ()
+                + "\nEstimated reserve: ~" + n.remaining + " units"
+                + "\nSurvey difficulty: " + n.difficulty + "/3"
+                + "\n\nDispatch an 'Establish Camp' mission to that spot to exploit it.";
+        pages.appendTag(new net.minecraft.nbt.NBTTagString("\"" + body.replace("\"", "'") + "\""));
+        tag.setTag("pages", pages);
+        book.setTagCompound(tag);
+        if (p != null && !p.inventory.addItemStackToInventory(book)) {
+            net.minecraft.inventory.InventoryHelper.spawnItemStack(world, p.posX, p.posY, p.posZ, book);
+        }
+    }
+
+    /** Scout/legacy report missions return a WRITTEN paper — scouts also stumble onto deposits. */
+    private static String givePaper(WorldServer world, Mission m, net.minecraft.entity.player.EntityPlayer p) {
+        String finding = surveyFinding(m.type);
+        String headline = "a written report was added to your inventory";
+        studio.ERM.strategic.resource.ResourceNodeData.Node n =
+                rollDeposit(world, m, m.type == SURVEY ? 0.55 : m.type == SCOUT ? 0.35 : 0.28);
+        if (n != null) {
+            finding = "DEPOSIT FOUND: " + n.typeName() + "\nat " + n.pos.getX() + ", " + n.pos.getZ()
+                    + "\nEstimated reserve: ~" + n.remaining + " units"
+                    + "\nSurvey difficulty: " + n.difficulty + "/3"
+                    + "\n\nDispatch an 'Establish Camp' mission to that spot to exploit it.";
+            headline = "a " + n.typeName() + " DEPOSIT was charted at "
+                    + n.pos.getX() + ", " + n.pos.getZ();
+        }
 
         ItemStack book = new ItemStack(Items.WRITTEN_BOOK);
         net.minecraft.nbt.NBTTagCompound tag = new net.minecraft.nbt.NBTTagCompound();

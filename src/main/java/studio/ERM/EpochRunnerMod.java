@@ -276,6 +276,12 @@ public class EpochRunnerMod {
             MinecraftForge.EVENT_BUS.register(studio.ERM.strategic.resource.ResourceCampManager.class);
             logger.info("[Strategic] resource camp manager registered (the frontier is LIVE)");
 
+            // TICKING-ENTITY NPE KILLER — every AW2 faction NPC is faction-verified as it joins the
+            // world; unresolvable factions (template spawner NBT) are repaired or removed BEFORE
+            // their first targeting tick can crash the server.
+            MinecraftForge.EVENT_BUS.register(studio.ERM.war.util.Aw2FactionCrashGuard.class);
+            logger.info("[War] AW2 faction crash guard registered");
+
             // PHASE 2 -- container GUIs (the RECRUIT loadout screen).
             net.minecraftforge.fml.common.network.NetworkRegistry.INSTANCE.registerGuiHandler(
                     instance, new studio.ERM.strategic.defense.ErmGuiHandler());
