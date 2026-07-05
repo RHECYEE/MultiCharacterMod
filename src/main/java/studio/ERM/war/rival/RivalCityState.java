@@ -147,6 +147,20 @@ public class RivalCityState {
     // when the settlement first reaches level 2 — level 1 is the tribal tent camp.
     public boolean coreStructurePlaced = false;
 
+    // CLAIM-DRIVEN GROWTH: the player's claimed chunks accumulate as credits; every
+    // playerClaimsPerBatch credits banks one growth batch; each batch grows the city by
+    // growthChunksPerBatch chunks (consumed by the manager's growth tick, level 2+ only).
+    public int claimCredits = 0;
+    public int growthBatches = 0;
+
+    // Ring-growth bookkeeping: grid cells currently holding FARMS (the organic frontier). When a
+    // farm cell becomes interior (two rings inside the frontier), it is rebuilt as housing/civic
+    // and the fields effectively migrate outward.
+    public final Set<Long> farmCells = new HashSet<>();
+
+    // One-shot LANDMARKS already raised (config key strings), e.g. the L6 factory, L8 skyscraper.
+    public final Set<String> placedLandmarks = new HashSet<>();
+
     // Stats integration
     public RivalFactionStats stats;
     public RivalExpansionManager expansionManager;
@@ -182,6 +196,19 @@ public class RivalCityState {
         nbt.setInteger("size", size);
         nbt.setInteger("ringRadius", currentRingRadius);
         nbt.setBoolean("corePlaced", coreStructurePlaced);
+        nbt.setInteger("claimCredits", claimCredits);
+        nbt.setInteger("growthBatches", growthBatches);
+        // Packed grid-cell longs stored as (gx, gz) int pairs (1.12 has no long-array getter).
+        int[] farms = new int[farmCells.size() * 2];
+        int fi = 0;
+        for (Long f : farmCells) {
+            farms[fi++] = (int) (f >> 32);
+            farms[fi++] = (int) (long) f;
+        }
+        nbt.setIntArray("farmCells", farms);
+        NBTTagList lmList = new NBTTagList();
+        for (String lm : placedLandmarks) lmList.appendTag(new net.minecraft.nbt.NBTTagString(lm));
+        nbt.setTag("landmarks", lmList);
         nbt.setInteger("gridPlotSize", gridPlotSize);
         nbt.setInteger("gridRoadWidth", gridRoadWidth);
         nbt.setInteger("gridSpacing", gridSpacing);
@@ -247,6 +274,18 @@ public class RivalCityState {
         size = nbt.getInteger("size");
         currentRingRadius = nbt.getInteger("ringRadius");
         coreStructurePlaced = nbt.getBoolean("corePlaced");
+        claimCredits = nbt.getInteger("claimCredits");
+        growthBatches = nbt.getInteger("growthBatches");
+        farmCells.clear();
+        int[] farms = nbt.getIntArray("farmCells");
+        for (int i = 0; i + 1 < farms.length; i += 2) {
+            farmCells.add((((long) farms[i]) << 32) ^ (farms[i + 1] & 0xFFFFFFFFL));
+        }
+        placedLandmarks.clear();
+        NBTTagList lmList = nbt.getTagList("landmarks", net.minecraftforge.common.util.Constants.NBT.TAG_STRING);
+        for (int i = 0; i < lmList.tagCount(); i++) {
+            placedLandmarks.add(lmList.getStringTagAt(i));
+        }
 
         // Grid layout
         gridPlotSize = nbt.hasKey("gridPlotSize") ? nbt.getInteger("gridPlotSize") : RivalCityConfig.plotSize;

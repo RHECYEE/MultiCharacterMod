@@ -106,6 +106,13 @@ public class WarClaimHandler {
 
         if (claimed > 0) {
             data.markDirty();
+            // CLAIM-DRIVEN RIVAL GROWTH: every chunk the player claims feeds the rival's growth
+            // bank (30 claims -> one 25-chunk growth surge; both configurable in war_levels.json).
+            try {
+                studio.ERM.war.rival.RivalCityManager.onPlayerClaimedChunks(player.world, player, claimed);
+            } catch (Throwable t) {
+                studio.ERM.EpochRunnerMod.logger.error("[ERM-Map] rival growth credit failed", t);
+            }
         }
 
         BatchClaimResult result = new BatchClaimResult(claimed, failed, totalCost);

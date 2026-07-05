@@ -6,8 +6,10 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Blocks;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.World;
 import studio.ERM.EpochRunnerMod;
+import studio.ERM.war.world.WarWorldData;
 import studio.ERM.war.rival.ProceduralBuildingGenerator;
 import studio.ERM.war.rival.RivalFactionStats;
 
@@ -108,6 +110,16 @@ public class RivalCityGenerator {
             return;
         }
 
+        // THE NATIVE AW2 TOWN GENERATOR: the first time the settlement reaches level 2+, generate
+        // the whole walled town through AW2's own TownGenerator (terrain leveling, patterned walls
+        // with gates, interior grid + roads, exterior FARM ring, lamps, villagers — all from the
+        // town template). Our plot machinery then grows RINGS around it. Falls back to the legacy
+        // single-castle core when no town templates are loaded.
+        if (!state.coreStructurePlaced && tryGenerateAw2TownCore(world, state, level)) {
+            checkLandmarks(world, state);
+            return; // the town IS this pass's content — its own walls, roads and farm ring
+        }
+
         // Determine mix of AW2 templates vs procedural buildings
         float proceduralRatio = Math.min(0.7f, (level - 3) * 0.15f);
         proceduralRatio = Math.max(0f, proceduralRatio);
@@ -158,6 +170,235 @@ public class RivalCityGenerator {
         state.currentRingRadius = Math.max(state.currentRingRadius, 34);
         EpochRunnerMod.logger.info("[RivalCity] L1 tribal camp: " + placed + " tent(s) raised ("
                 + (existing + placed) + " standing)");
+    }
+
+    // =====================================================================
+    // NATIVE AW2 TOWN GENERATION (the level-2 urbanization)
+    // =====================================================================
+
+    /**
+     * Generate the city core through AW2's OWN town generator: it levels the whole footprint,
+     * raises patterned walls with gates, lays the interior grid + roads, rings the outside with
+     * the template's exterior structures (farms/cottages) and lights it — everything the walled
+     * city needs, at a footprint scaled by rival level. Returns false when AW2 or its town
+     * templates are absent so the caller can use the legacy castle path.
+     */
+    public static boolean tryGenerateAw2TownCore(World world, RivalCityState state, int level) {
+        try {
+            studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning cfg =
+                    studio.ERM.war.config.WarLevelsConfig.cityGrowth();
+
+            net.shadowmage.ancientwarfare.structure.town.TownTemplateManager mgr =
+                    net.shadowmage.ancientwarfare.structure.town.TownTemplateManager.INSTANCE;
+            net.shadowmage.ancientwarfare.structure.town.TownTemplate tt =
+                    mgr.getTemplate(cfg.townTemplate).orElse(null);
+            if (tt == null) {
+                for (net.shadowmage.ancientwarfare.structure.town.TownTemplate cand : mgr.getTemplates()) {
+                    if (cand != null && cand.isValid()) { tt = cand; break; }
+                }
+            }
+            if (tt == null) {
+                EpochRunnerMod.logger.warn("[RivalCity] no AW2 town templates loaded — legacy core path");
+                return false;
+            }
+
+            // Footprint in chunks, scaled by level, clamped to what the template supports.
+            int size = cfg.townSizeBaseChunks + Math.max(0, level - 2) * cfg.townSizeChunksPerLevel;
+            size = Math.max(tt.getMinSize(), Math.min(tt.getMaxSize(), size));
+
+            ChunkPos cc = new ChunkPos(state.center);
+            int half = size / 2;
+            // Ctor order is (chunkMinX, chunkMinZ, chunkMaxX, chunkMaxZ, minY, maxY).
+            net.shadowmage.ancientwarfare.structure.town.TownBoundingArea area =
+                    new net.shadowmage.ancientwarfare.structure.town.TownBoundingArea(
+                            cc.x - half, cc.z - half, cc.x - half + size - 1, cc.z - half + size - 1, 1, 255);
+            int surfaceY = world.getTopSolidOrLiquidBlock(
+                    new BlockPos(state.center.getX(), 0, state.center.getZ())).getY() - 1;
+            area.setSurfaceY(Math.max(2, surfaceY));
+
+            EpochRunnerMod.logger.info("[RivalCity] AW2 town generation: '" + tt.getTownTypeName()
+                    + "' " + size + "x" + size + " chunks @ " + state.center.getX() + "," + state.center.getZ()
+                    + " (surfaceY=" + surfaceY + ")");
+            net.shadowmage.ancientwarfare.structure.town.WorldTownGenerator.INSTANCE.generate(world, area, tt);
+
+            // Bookkeeping: the town owns its footprint. Mark every grid cell it covers OCCUPIED so
+            // ring growth starts OUTSIDE the walls, widen the claim radius, remember the centre.
+            state.coreStructurePlaced = true;
+            state.majorIntersections.add(state.center);
+            int spacing = Math.max(8, state.gridSpacing);
+            int blocksHalf = (size * 16) / 2 + 8;
+            int cellsHalf = blocksHalf / spacing + 1;
+            for (int gx = -cellsHalf; gx <= cellsHalf; gx++) {
+                for (int gz = -cellsHalf; gz <= cellsHalf; gz++) {
+                    state.occupiedGridCells.add(packGridCell(gx, gz));
+                }
+            }
+            state.currentGridRadius = Math.max(state.currentGridRadius, cellsHalf);
+            state.currentRingRadius = Math.max(state.currentRingRadius, blocksHalf);
+            state.size = Math.max(state.size, blocksHalf); // claimChunksForRival covers the town
+            state.stats.onStructureBuilt(RivalFactionStats.StructureType.HOUSING);
+            state.stats.onStructureBuilt(RivalFactionStats.StructureType.MILITARY_FORT);
+            return true;
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.error("[RivalCity] AW2 town generation failed — legacy core path", t);
+            return false;
+        }
+    }
+
+    // =====================================================================
+    // RING GROWTH — the claim-driven batches (farms out, buildings in)
+    // =====================================================================
+
+    /**
+     * Grow the city outward by ~{@code chunkBudget} newly-claimed chunks of construction: plots are
+     * taken ring-by-ring from the grid (outside the AW2 town footprint), FRONTIER plots bias toward
+     * farms, interior plots take district buildings, and farms that have become interior are
+     * rebuilt as housing/civic — the fields migrate outward organically. Returns chunks claimed.
+     */
+    public static int growRing(World world, RivalCityState state, int chunkBudget) {
+        if (state.center == null) return 0;
+        Set<String> templates;
+        try {
+            Class.forName("net.shadowmage.ancientwarfare.structure.template.StructureTemplateManager");
+            templates = net.shadowmage.ancientwarfare.structure.template.StructureTemplateManager.getTemplates();
+        } catch (Throwable t) {
+            templates = null;
+        }
+        if (templates == null || templates.isEmpty()) return 0;
+
+        RivalCityConfig.applyDensityByLevel(state);
+        WarWorldData wd = WarWorldData.get(world);
+        EntityPlayer target = world.getClosestPlayer(state.center.getX() + 0.5, state.center.getY() + 0.5,
+                state.center.getZ() + 0.5, 2048, false);
+
+        Set<Long> newChunks = new HashSet<>();
+        int spacing = Math.max(8, state.gridSpacing);
+        int guard = 0;
+        while (newChunks.size() < chunkBudget && guard++ < 80) {
+            GridCell cell = pickNextGridCell(world, state, target);
+            if (cell == null) break;
+            long key = packGridCell(cell.gx, cell.gz);
+            state.occupiedGridCells.add(key);
+
+            BlockPos plotOrigin = gridCellToWorld(state, cell.gx, cell.gz);
+            if (!world.isBlockLoaded(plotOrigin, false)) continue;
+            BlockPos surface = world.getTopSolidOrLiquidBlock(plotOrigin).down();
+            preparePlotAndRoads(world, state, surface, cell.gx, cell.gz);
+
+            // FRONTIER plots lean agricultural; the city keeps its fields on the edge.
+            int cheb = Math.max(Math.abs(cell.gx), Math.abs(cell.gz));
+            boolean frontier = cheb >= state.currentGridRadius;
+            RivalCityState.DistrictType district = (frontier && rand.nextFloat() < 0.6f)
+                    ? RivalCityState.DistrictType.AGRICULTURE
+                    : pickDistrictForCell(state, cell.gx, cell.gz, target);
+            generateTemplateStructure(world, state, surface, cell, district, state.level, target, templates);
+            if (district == RivalCityState.DistrictType.AGRICULTURE) state.farmCells.add(key);
+
+            // Claim the plot's chunk coverage; only chunks NEW to the rival count against the budget.
+            for (int bx = plotOrigin.getX() - 4; bx <= plotOrigin.getX() + spacing + 4; bx += 16) {
+                for (int bz = plotOrigin.getZ() - 4; bz <= plotOrigin.getZ() + spacing + 4; bz += 16) {
+                    ChunkPos cp = new ChunkPos(bx >> 4, bz >> 4);
+                    if ("NEUTRAL".equals(wd.getOwner(cp))) {
+                        wd.setOwner(cp, RivalCityState.RIVAL_FACTION_NAME);
+                        newChunks.add(net.minecraft.util.math.ChunkPos.asLong(cp.x, cp.z));
+                    }
+                }
+            }
+        }
+
+        convertInteriorFarms(world, state, templates, target);
+        wd.markDirty();
+        return newChunks.size();
+    }
+
+    /**
+     * Farms two rings inside the frontier are no longer countryside: rebuild a few per batch as
+     * housing/civic (the new structure levels its own plot as it builds) and drop them from the
+     * farm ledger — combined with the frontier's farm bias, the fields "move outward" organically.
+     */
+    private static void convertInteriorFarms(World world, RivalCityState state, Set<String> templates,
+                                             EntityPlayer target) {
+        List<Long> interior = new ArrayList<>();
+        for (Long key : state.farmCells) {
+            int gx = unpackGridX(key), gz = unpackGridZ(key);
+            if (Math.max(Math.abs(gx), Math.abs(gz)) <= state.currentGridRadius - 2) interior.add(key);
+        }
+        int converted = 0;
+        for (Long key : interior) {
+            if (converted >= 3) break; // gentle: a handful of conversions per batch
+            int gx = unpackGridX(key), gz = unpackGridZ(key);
+            BlockPos plotOrigin = gridCellToWorld(state, gx, gz);
+            if (!world.isBlockLoaded(plotOrigin, false)) continue;
+            BlockPos surface = world.getTopSolidOrLiquidBlock(plotOrigin).down();
+            RivalCityState.DistrictType district = rand.nextBoolean()
+                    ? RivalCityState.DistrictType.RESIDENTIAL : RivalCityState.DistrictType.CIVIC_CORE;
+            generateTemplateStructure(world, state, surface, new GridCell(gx, gz), district,
+                    state.level, target, templates);
+            state.farmCells.remove(key);
+            converted++;
+        }
+        if (converted > 0) {
+            EpochRunnerMod.logger.info("[RivalCity] urbanization: " + converted
+                    + " interior farm plot(s) rebuilt as city blocks");
+        }
+    }
+
+    // =====================================================================
+    // LANDMARKS — one-shot monuments per level (L6 factory, L8 skyscraper...)
+    // =====================================================================
+
+    /** Raise any config landmark whose level the city has reached and which isn't standing yet.
+     *  Missing templates are skipped silently and retried on later growth passes. */
+    public static void checkLandmarks(World world, RivalCityState state) {
+        if (state.center == null) return;
+        List<studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning.LandmarkEntry> entries =
+                studio.ERM.war.config.WarLevelsConfig.cityGrowth().landmarks;
+        if (entries == null) return;
+        int spacing = Math.max(8, state.gridSpacing);
+
+        for (studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning.LandmarkEntry e : entries) {
+            if (e == null || state.level < e.level) continue;
+            String lmKey = e.level + ":" + (!e.template.isEmpty() ? e.template : e.keywords);
+            if (state.placedLandmarks.contains(lmKey)) continue;
+
+            String tmpl = null;
+            try {
+                if (!e.template.isEmpty()
+                        && net.shadowmage.ancientwarfare.structure.template.StructureTemplateManager.getTemplate(e.template).isPresent()) {
+                    tmpl = e.template;
+                }
+                if (tmpl == null && !e.keywords.isEmpty()) {
+                    tmpl = studio.ERM.strategic.Aw2Structures.pick(null, null,
+                            e.keywords.toLowerCase(java.util.Locale.ROOT).split("\\s*,\\s*"));
+                }
+            } catch (Throwable ignored) {}
+            if (tmpl == null) continue; // not loaded (yet) — retried next growth pass
+
+            // Site: just beyond the current built ring, on dry loaded ground.
+            boolean placed = false;
+            for (int attempt = 0; attempt < 8 && !placed; attempt++) {
+                double ang = rand.nextDouble() * Math.PI * 2;
+                int dist = (state.currentGridRadius + 2) * spacing;
+                BlockPos probe = state.center.add((int) (Math.cos(ang) * dist), 0, (int) (Math.sin(ang) * dist));
+                if (!world.isBlockLoaded(probe, false)) continue;
+                BlockPos at = world.getTopSolidOrLiquidBlock(probe);
+                if (world.getBlockState(at.down()).getMaterial().isLiquid()) continue;
+                placed = placeAW2TemplateSafe(world, tmpl, at,
+                        EnumFacing.HORIZONTALS[rand.nextInt(4)], state);
+                if (placed) {
+                    state.placedLandmarks.add(lmKey);
+                    state.placedStructures.add(at);
+                    EpochRunnerMod.logger.info("[RivalCity] LANDMARK raised (L" + e.level + "): " + tmpl
+                            + " @ " + at.getX() + "," + at.getZ());
+                    for (EntityPlayer p : world.playerEntities) {
+                        p.sendMessage(new net.minecraft.util.text.TextComponentString(
+                                net.minecraft.util.text.TextFormatting.RED
+                                        + "The rival empire has raised a great work: "
+                                        + net.minecraft.util.text.TextFormatting.YELLOW + tmpl));
+                    }
+                }
+            }
+        }
     }
 
     // =====================================================================

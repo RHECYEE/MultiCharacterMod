@@ -111,6 +111,13 @@ public final class WarLevelsConfig {
         return Math.max(0, r.vehicleDefaultCostCB);
     }
 
+    // ── RIVAL CITY GROWTH knobs ──
+    private static final CityGrowthTuning CITY_GROWTH_DEFAULTS = new CityGrowthTuning();
+    /** The rival-city growth tuning block (claim-driven batches, AW2 town template, landmarks). */
+    public static CityGrowthTuning cityGrowth() {
+        return (data != null && data.cityGrowth != null) ? data.cityGrowth : CITY_GROWTH_DEFAULTS;
+    }
+
     /**
      * Legacy hook: older code called this during init to ensure
      * server/client had their config loaded.
@@ -327,6 +334,7 @@ public final class WarLevelsConfig {
         public SiegeTuning siege = new SiegeTuning();
         public TrafficTuning traffic = new TrafficTuning();
         public RecruitTuning recruit = new RecruitTuning();
+        public CityGrowthTuning cityGrowth = new CityGrowthTuning();
 
         private void sanitize() {
             if (levels == null || levels.length == 0) {
@@ -343,6 +351,74 @@ public final class WarLevelsConfig {
             traffic.sanitize();
             if (recruit == null) recruit = new RecruitTuning();
             recruit.sanitize();
+            if (cityGrowth == null) cityGrowth = new CityGrowthTuning();
+            cityGrowth.sanitize();
+        }
+    }
+
+    /**
+     * RIVAL CITY GROWTH — the claim-driven expansion economy plus the AW2 native town generator.
+     * The rival only grows at level 2+ (level 1 is its tent camp). For every
+     * {@code playerClaimsPerBatch} chunks the PLAYER claims, the rival banks one growth batch;
+     * each batch expands the city by {@code growthChunksPerBatch} chunks (a ~5x5 area), built as
+     * a ring: farms at the frontier, houses/civic replacing farms as they become interior.
+     */
+    public static final class CityGrowthTuning {
+        /** Master switch: growth is driven by player claims. When false, the capital instead grows
+         *  one small pass on a slow timer (the legacy ambient behavior). */
+        public boolean claimDrivenGrowth = true;
+        /** How many chunks the player must claim to bank ONE rival growth batch. */
+        public int playerClaimsPerBatch = 30;
+        /** How many chunks of city each banked batch grows (25 = a 5x5 area). */
+        public int growthChunksPerBatch = 25;
+        /** AW2 TOWN template for the level-2 core (walled city + its own exterior farm ring).
+         *  Falls back to any loaded town template, then to the legacy castle if none exist. */
+        public String townTemplate = "EmpireWalledCity";
+        /** Town footprint in CHUNKS at level 2 (clamped to the template's min/max). */
+        public int townSizeBaseChunks = 14;
+        /** Extra chunks of town footprint per level above 2 (clamped to the template's max). */
+        public int townSizeChunksPerLevel = 1;
+        /** LANDMARKS: one-shot monuments placed when the city reaches their level. `template` is an
+         *  exact AW2 template name (preferred); blank template = keyword sweep over loaded templates. */
+        public List<LandmarkEntry> landmarks = defaultLandmarks();
+
+        public static final class LandmarkEntry {
+            public int level = 6;
+            public String template = "";
+            public String keywords = "";
+        }
+
+        private static List<LandmarkEntry> defaultLandmarks() {
+            List<LandmarkEntry> l = new ArrayList<>();
+            LandmarkEntry factory = new LandmarkEntry();
+            factory.level = 6;
+            factory.keywords = "factory,industrial,manufactory,refinery";
+            l.add(factory);
+            LandmarkEntry skyscraper = new LandmarkEntry();
+            skyscraper.level = 8;
+            skyscraper.keywords = "skyscraper,highrise,high_rise";
+            l.add(skyscraper);
+            LandmarkEntry reactor = new LandmarkEntry();
+            reactor.level = 8;
+            reactor.keywords = "reactor,cooling,nuclear";
+            l.add(reactor);
+            return l;
+        }
+
+        public void sanitize() {
+            if (playerClaimsPerBatch < 1) playerClaimsPerBatch = 30;
+            if (growthChunksPerBatch < 1) growthChunksPerBatch = 25;
+            if (growthChunksPerBatch > 200) growthChunksPerBatch = 200;
+            if (townTemplate == null) townTemplate = "EmpireWalledCity";
+            if (townSizeBaseChunks < 4) townSizeBaseChunks = 14;
+            if (townSizeChunksPerLevel < 0) townSizeChunksPerLevel = 1;
+            if (landmarks == null) landmarks = defaultLandmarks();
+            for (LandmarkEntry e : landmarks) {
+                if (e == null) continue;
+                if (e.level < 1) e.level = 6;
+                if (e.template == null) e.template = "";
+                if (e.keywords == null) e.keywords = "";
+            }
         }
     }
 

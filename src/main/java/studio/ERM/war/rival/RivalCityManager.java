@@ -194,54 +194,77 @@ public class RivalCityManager {
     }
 
     // =====================================================================
-    // AUTO-GROWTH — the capital keeps expanding on its own
+    // CLAIM-DRIVEN GROWTH — the rival answers the player's expansion
     // =====================================================================
-    // "The rival keeps expanding/repairing; nations stay static" is the design line, but growth
-    // only ever ran from a command. A gentle heartbeat: every ~15 minutes, if the capital (level
-    // 2+) has its centre loaded, run one small expansion pass. Camps (level 1) never auto-sprawl.
+    // For every cityGrowth.playerClaimsPerBatch chunks the PLAYER claims, the capital banks one
+    // growth batch; each batch grows the city by cityGrowth.growthChunksPerBatch chunks (a ~5x5
+    // area) as an outward ring — farms at the frontier, buildings replacing interior farms. Growth
+    // is LEVEL 2+ only (level 1 is the tent camp); credits still accrue at level 1 and cash in
+    // when the settlement urbanizes.
 
-    private static final long AUTO_GROW_INTERVAL = 15 * 60 * 20L;
-    private static long lastAutoGrowTick = 0;
+    /** Called by WarClaimHandler after a successful player batch claim. Banks credits -> batches. */
+    public static void onPlayerClaimedChunks(World world, net.minecraft.entity.player.EntityPlayerMP player, int chunksClaimed) {
+        if (world == null || world.isRemote || chunksClaimed <= 0) return;
+        studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning cfg =
+                studio.ERM.war.config.WarLevelsConfig.cityGrowth();
+        if (!cfg.claimDrivenGrowth) return;
+        RivalCityState state = getAnyCity(world);
+        if (state == null || state.center == null) return;
+
+        state.claimCredits += chunksClaimed;
+        int banked = 0;
+        while (state.claimCredits >= cfg.playerClaimsPerBatch) {
+            state.claimCredits -= cfg.playerClaimsPerBatch;
+            state.growthBatches++;
+            banked++;
+        }
+        if (banked > 0 && player != null) {
+            player.sendMessage(new TextComponentString(TextFormatting.RED
+                    + "Your expansion has not gone unnoticed — the rival empire mobilizes to grow ("
+                    + state.growthBatches + " growth surge" + (state.growthBatches == 1 ? "" : "s") + " pending)."));
+        }
+        saveCities(world);
+    }
+
+    private static final long GROWTH_CHECK_INTERVAL = 30 * 20L;      // consume batches every ~30s
+    private static final long AMBIENT_GROW_INTERVAL = 15 * 60 * 20L; // legacy ambient mode (config off)
+    private static long lastGrowthCheckTick = 0;
 
     @SubscribeEvent
-    public static void onAutoGrowTick(TickEvent.WorldTickEvent e) {
+    public static void onGrowthTick(TickEvent.WorldTickEvent e) {
         if (e.phase != TickEvent.Phase.END || e.side.isClient() || e.world == null || e.world.isRemote) return;
         World world = e.world;
         long now = world.getTotalWorldTime();
-        if (now - lastAutoGrowTick < AUTO_GROW_INTERVAL || isGenerating) return;
-        lastAutoGrowTick = now;
+        studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning cfg =
+                studio.ERM.war.config.WarLevelsConfig.cityGrowth();
+        long interval = cfg.claimDrivenGrowth ? GROWTH_CHECK_INTERVAL : AMBIENT_GROW_INTERVAL;
+        if (now - lastGrowthCheckTick < interval || isGenerating) return;
+        lastGrowthCheckTick = now;
 
         RivalCityState state = getAnyCity(world);
-        if (state == null || state.center == null || state.level < 2) return;
+        if (state == null || state.center == null || state.level < 2) return; // camps never grow
         if (!world.isBlockLoaded(state.center, false)) return; // grows only while its chunks exist
+        if (cfg.claimDrivenGrowth && state.growthBatches <= 0) return;
 
         isGenerating = true;
         try {
-            if (!state.expansionManager.isInitialized()) {
-                state.expansionManager.initialize(world, state.center);
-            }
-            List<RivalExpansionManager.ExpansionNode> newNodes =
-                    state.expansionManager.expand(world, state.stats);
-            int built = 0;
-            if (newNodes != null) {
-                for (RivalExpansionManager.ExpansionNode node : newNodes) {
-                    if (node == null || node.position == null) continue;
-                    ChunkPos cp = new ChunkPos(node.position);
-                    WarWorldData data = WarWorldData.get(world);
-                    data.setOwner(cp, "RIVAL");
-                    data.markDirty();
-                    RivalCitySpawner.generateBuildingAtExpansionNode(world, state, node);
-                    built++;
-                }
-            }
+            int grown = RivalCityGenerator.growRing(world, state, cfg.growthChunksPerBatch);
+            if (cfg.claimDrivenGrowth) state.growthBatches--;
+            RivalCityGenerator.checkLandmarks(world, state);
             updateLegacyFields(state);
+            WarMapOverlay.setRivalCityMarker(state.center, state.level);
             saveCities(world);
-            if (built > 0) {
-                EpochRunnerMod.logger.info("[RivalCity] auto-growth: capital L" + state.level
-                        + " expanded by " + built + " node(s)");
+            EpochRunnerMod.logger.info("[RivalCity] growth surge: capital L" + state.level + " grew "
+                    + grown + " chunk(s)" + (cfg.claimDrivenGrowth
+                    ? " (" + state.growthBatches + " batch(es) still banked)" : " (ambient)"));
+            net.minecraft.entity.player.EntityPlayer p = world.getClosestPlayer(
+                    state.center.getX(), state.center.getY(), state.center.getZ(), 2048, false);
+            if (p != null && grown > 0) {
+                p.sendMessage(new TextComponentString(TextFormatting.RED
+                        + "The rival city is expanding — " + grown + " chunks of new construction."));
             }
         } catch (Throwable t) {
-            EpochRunnerMod.logger.error("[RivalCity] auto-growth failed (guarded)", t);
+            EpochRunnerMod.logger.error("[RivalCity] growth surge failed (guarded)", t);
         } finally {
             isGenerating = false;
         }
@@ -664,6 +687,10 @@ public class RivalCityManager {
                     state.stats.levelUp();
                     RivalCityConfig.applyDensityByLevel(state);
                     RivalCityGenerator.generateCityLevel(world, state, state.level);
+                }
+                // One-shot monuments for any level threshold just crossed (L6 factory, L8 skyscraper...).
+                try { RivalCityGenerator.checkLandmarks(world, state); } catch (Throwable t) {
+                    EpochRunnerMod.logger.error("[RivalCity] landmark check failed", t);
                 }
             } else if (targetLevel < oldLevel) {
                 player.sendMessage(new TextComponentString(
