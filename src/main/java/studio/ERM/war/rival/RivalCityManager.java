@@ -476,8 +476,11 @@ public class RivalCityManager {
             // open OCEAN (city floating on water, nothing under it). Sample many bearings/distances,
             // reject ocean biomes cheaply (biome provider — no chunk loads), then score finalists by
             // the dry-land fraction of a 3x3 surface sample; first solid hit wins, else best found.
+            // SPAWN FAR (2.5x): the rival claims a huge homeland, so seed the capital well away or the
+            // player has no room to expand. 2.5 x (300..600) = 750..1500 blocks from the player.
             BlockPos site = pickLandSite(world, player.posX, player.posZ,
-                    RivalCityConfig.minSpawnDistance, RivalCityConfig.maxSpawnDistance);
+                    (int) (RivalCityConfig.minSpawnDistance * 2.5),
+                    (int) (RivalCityConfig.maxSpawnDistance * 2.5));
             int x = site.getX(), z = site.getZ();
             int y = world.getTopSolidOrLiquidBlock(new BlockPos(x, 0, z)).getY();
 

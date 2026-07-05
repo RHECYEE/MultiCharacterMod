@@ -38,7 +38,9 @@ import java.util.Random;
  */
 public final class NationStateManager {
 
-    private static final int RING_MIN = 520, RING_MAX = 760;
+    // Nations ring 1.5x further than before so the rival's huge homeland doesn't box the player in
+    // (they also key off the player position, and the rival now spawns 2.5x out).
+    private static final int RING_MIN = 780, RING_MAX = 1140;
     private static final int NATION_COUNT = 4;
     private static final int CAMP_CLAIM_CHUNKS = 2, TOWN_CLAIM_CHUNKS = 4;
     private static final long PATROL_EVERY = 7 * 60 * 20L;   // ~7 min per nation

@@ -1455,16 +1455,20 @@ public class GuiTacticalWarMap extends GuiScreen {
         // "ceil(chunkPx)+1" step over-painted a pixel into the east/south neighbour -- at 8bpp
         // (2px chunks) that blacked out HALF of every adjacent explored chunk, eating the claim
         // overlay along every fog boundary ("claims don't stay after I explore").
+        // Per-chunk fog OPACITY by staleness: fresh intel is clear, ground nobody has re-charted in
+        // the last in-game hour fades to full black. Un-charted chunks come back as alpha 255.
+        long now = mc.world != null ? mc.world.getTotalWorldTime() : 0L;
         for (int cx = cxMin; cx <= cxMax; cx++) {
             for (int cz = czMin; cz <= czMax; cz++) {
-                if (studio.ERM.war.map.client.ClientFogCache.isExplored(cx, cz)) continue;
+                int alpha = studio.ERM.war.map.client.ClientFogCache.fogAlpha(cx, cz, now);
+                if (alpha <= 4) continue; // fresh enough to read clear
                 int[] s = worldToScreen(cx << 4, cz << 4);
                 int[] sEnd = worldToScreen((cx + 1) << 4, (cz + 1) << 4);
                 if (s == null || sEnd == null) continue;
                 int x1 = Math.max(s[0], canvasLeft), y1 = Math.max(s[1], canvasTop);
                 int x2 = Math.min(Math.max(s[0] + 1, sEnd[0]), canvasLeft + canvasSize);
                 int y2 = Math.min(Math.max(s[1] + 1, sEnd[1]), canvasTop + canvasSize);
-                if (x2 > x1 && y2 > y1) Gui.drawRect(x1, y1, x2, y2, 0xFF060608);
+                if (x2 > x1 && y2 > y1) Gui.drawRect(x1, y1, x2, y2, (alpha << 24) | 0x060608);
             }
         }
     }

@@ -11,8 +11,8 @@ import studio.ERM.strategic.ExploredMapData;
 import studio.ERM.war.map.client.ClientFogCache;
 
 /**
- * FOG OF WAR sync. FULL chart on map open (C2S request -> S2C full=TRUE replaces the client set);
- * live deltas ride the 2s civil-plan feed as the recent ring. Chunks travel as packed ChunkPos longs.
+ * FOG OF WAR sync. FULL chart on map open (C2S request -> S2C full=TRUE replaces the client set).
+ * Payload is packed [chunk, lastSeenTick] long PAIRS so the client can age each chunk toward black.
  */
 public class S2CFogSync implements IMessage {
 

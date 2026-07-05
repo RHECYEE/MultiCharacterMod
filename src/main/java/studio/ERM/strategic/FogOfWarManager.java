@@ -32,15 +32,16 @@ public final class FogOfWarManager {
         WorldServer world = (WorldServer) e.world;
         try {
             ExploredMapData data = ExploredMapData.get(world);
+            long now = world.getTotalWorldTime();
             for (EntityPlayer p : world.playerEntities) {
-                data.markAround(p.getPosition(), PLAYER_RADIUS);
+                data.markAround(p.getPosition(), PLAYER_RADIUS, now);
             }
             for (Object o : world.loadedEntityList) {
                 if (!(o instanceof EntityCreature)) continue;
                 EntityCreature c = (EntityCreature) o;
                 if (c.isDead) continue;
                 if (DistrictWorkExecutor.isAnyWorker(c) || Aw2Npc.isPlayerOwnedCombat(c)) {
-                    data.markAround(c.getPosition(), CITIZEN_RADIUS);
+                    data.markAround(c.getPosition(), CITIZEN_RADIUS, now);
                 }
             }
         } catch (Throwable t) {
