@@ -218,31 +218,36 @@ public final class NationStateManager {
                 data.markDirty();
             }
 
-            // PATROL: a PERSISTENT strategic roamer walking a circuit around the settlement — the
+            // PATROL: PERSISTENT strategic roamers walking circuits around the settlement — the
             // unified background-life path (exists on the map while unloaded, materializes as the
             // nation_guard_patrol composition when the player crosses it, casualties persist).
-            // One circuit per nation; destroyed patrols re-raise on the next roll.
-            if (now - n.lastPatrol > PATROL_EVERY && RNG.nextInt(3) == 0) {
+            // ESCALATION: patrol count and cadence scale with the RIVAL's level — at L10 each
+            // nation runs several concurrent circuits and re-raises them fast (the busy world).
+            long patrolEvery = PATROL_EVERY / (1 + rivalLevel / 4);
+            int patrolCap = 1 + rivalLevel / 3;
+            if (now - n.lastPatrol > patrolEvery && RNG.nextInt(Math.max(1, 3 - rivalLevel / 4)) == 0) {
                 n.lastPatrol = now;
                 try {
                     String homeKey = "nationroam:" + (n.center.getX() >> 4) + "," + (n.center.getZ() >> 4);
-                    boolean alive = false;
+                    int alivePatrols = 0;
                     for (studio.ERM.strategic.StrategicObject o
                             : studio.ERM.strategic.StrategicMapData.get(world).objects.values()) {
                         if (o instanceof studio.ERM.strategic.StrategicRoamer && homeKey.equals(o.homeKey)) {
-                            alive = true; break;
+                            alivePatrols++;
                         }
                     }
-                    if (!alive) {
+                    if (alivePatrols < patrolCap) {
                         studio.ERM.strategic.StrategicRoamer r = new studio.ERM.strategic.StrategicRoamer();
                         r.defName = "nation_guard_patrol";
                         r.displayName = n.name + " patrol";
                         r.faction = "NATION:" + n.name;
                         r.homeKey = homeKey;
-                        r.strength = 3 + RNG.nextInt(2);
+                        r.strength = 3 + RNG.nextInt(2) + rivalLevel / 3; // bigger squads as eras pass
+                        // Each concurrent circuit rings at a different radius so they don't stack.
+                        int ringBase = 40 + alivePatrols * 28;
                         for (int wp = 0; wp < 6; wp++) { // the circuit: a 6-point ring around home
                             double wa = Math.PI * 2 * wp / 6;
-                            int wr = 40 + RNG.nextInt(24);
+                            int wr = ringBase + RNG.nextInt(24);
                             r.route.add(new BlockPos(n.center.getX() + (int) (Math.cos(wa) * wr), 0,
                                     n.center.getZ() + (int) (Math.sin(wa) * wr)));
                         }
@@ -256,23 +261,38 @@ public final class NationStateManager {
                 }
             }
 
-            // TRADER NOISE: a strategic caravan routed from the nation PAST the player — commerce
-            // the player can watch materialize on the road (the sim already handles the rest).
-            if (now - n.lastTrader > TRADER_EVERY && RNG.nextInt(3) == 0 && !world.playerEntities.isEmpty()) {
+            // TRADER NOISE: strategic caravans routed from the nation PAST the player — commerce
+            // the player can watch materialize on the road. ESCALATION: cadence quickens and more
+            // caravans run concurrently as the rival's level climbs (level 10 = busy trade roads).
+            long traderEvery = TRADER_EVERY / (1 + rivalLevel / 5);
+            int traderCap = 1 + rivalLevel / 4;
+            if (now - n.lastTrader > traderEvery && RNG.nextInt(Math.max(1, 3 - rivalLevel / 5)) == 0
+                    && !world.playerEntities.isEmpty()) {
                 n.lastTrader = now;
                 try {
-                    EntityPlayer p = world.playerEntities.get(0);
-                    studio.ERM.strategic.StrategicTrader t = new studio.ERM.strategic.StrategicTrader();
-                    t.faction = "NATION:" + n.name; // encounters + intel read the flag, not the skin
-                    t.level = Math.max(1, rivalLevel);
-                    t.escorts = rivalLevel >= 3 ? 2 : 0;
-                    t.route.add(new BlockPos(n.center.getX(), 0, n.center.getZ()));
-                    t.route.add(new BlockPos((int) p.posX + RNG.nextInt(60) - 30, 0,
-                            (int) p.posZ + RNG.nextInt(60) - 30));
-                    t.x = n.center.getX() + 0.5;
-                    t.z = n.center.getZ() + 0.5;
-                    studio.ERM.strategic.StrategicMapData.get(world).add(t);
-                    EpochRunnerMod.logger.info("[Nations] trader caravan departed " + n.name);
+                    int aliveTraders = 0;
+                    String tFaction = "NATION:" + n.name;
+                    for (studio.ERM.strategic.StrategicObject o
+                            : studio.ERM.strategic.StrategicMapData.get(world).objects.values()) {
+                        if (o instanceof studio.ERM.strategic.StrategicTrader && tFaction.equals(o.faction)) {
+                            aliveTraders++;
+                        }
+                    }
+                    if (aliveTraders < traderCap) {
+                        EntityPlayer p = world.playerEntities.get(0);
+                        studio.ERM.strategic.StrategicTrader t = new studio.ERM.strategic.StrategicTrader();
+                        t.faction = tFaction; // encounters + intel read the flag, not the skin
+                        t.level = Math.max(1, rivalLevel);
+                        t.escorts = rivalLevel >= 6 ? 3 : rivalLevel >= 3 ? 2 : 0;
+                        t.route.add(new BlockPos(n.center.getX(), 0, n.center.getZ()));
+                        t.route.add(new BlockPos((int) p.posX + RNG.nextInt(60) - 30, 0,
+                                (int) p.posZ + RNG.nextInt(60) - 30));
+                        t.x = n.center.getX() + 0.5;
+                        t.z = n.center.getZ() + 0.5;
+                        studio.ERM.strategic.StrategicMapData.get(world).add(t);
+                        EpochRunnerMod.logger.info("[Nations] trader caravan departed " + n.name
+                                + " (" + (aliveTraders + 1) + "/" + traderCap + ")");
+                    }
                 } catch (Throwable ignored) {}
             }
           } catch (Throwable outer) {

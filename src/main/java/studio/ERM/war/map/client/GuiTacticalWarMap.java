@@ -186,6 +186,7 @@ public class GuiTacticalWarMap extends GuiScreen {
     private static final int COLOR_SELECTION_BOX = 0xAAFFFFFF;  // white selection rectangle
     private static final int COLOR_BG = 0xFF111122;             // dark background
     private static final int COLOR_FOG = 0xFF1a1a2e;            // fog of war
+    private static final int COLOR_FOG_BAKED = 0xFF060608;      // fog baked into the terrain cache (all zooms)
     private static final int COLOR_GRID = 0x22FFFFFF;           // faint chunk grid
     private static final int COLOR_UNEXPLORED = 0xFF0E0F14;     // chunk not loaded on the client
 
@@ -913,6 +914,13 @@ public class GuiTacticalWarMap extends GuiScreen {
 
         World world = mc.world;
         if (world != null) {
+            // Fog is baked into the terrain cache (see rebuildTerrainCache), so a grown chart must
+            // invalidate it — this was the declared-but-never-wired fogCacheVersion field.
+            int fogVer = studio.ERM.war.map.client.ClientFogCache.version();
+            if (fogVer != fogCacheVersion) {
+                fogCacheVersion = fogVer;
+                terrainCacheValid = false;
+            }
             if (!terrainCacheValid
                     || terrainCacheCenterX != viewCenterX || terrainCacheCenterZ != viewCenterZ
                     || terrainCacheBpp != bpp || terrainCacheCanvas != canvasSize) {
@@ -941,6 +949,8 @@ public class GuiTacticalWarMap extends GuiScreen {
         int half = canvasSize / 2;
         BlockPos.MutableBlockPos mp = new BlockPos.MutableBlockPos();
 
+        boolean fogReady = studio.ERM.war.map.client.ClientFogCache.ready();
+
         try {
             // Pass 1 — base map colour + surface height per cell.
             for (int gy = 0; gy < gh; gy++) {
@@ -950,6 +960,16 @@ public class GuiTacticalWarMap extends GuiScreen {
                     int py = gy * step + step / 2;
                     int wx = viewCenterX + (int) Math.floor((px - half) * bpp);
                     int wz = viewCenterZ + (int) Math.floor((py - half) * bpp);
+
+                    // FOG OF WAR, baked per-cell: un-charted chunks read as fog at EVERY zoom.
+                    // The per-chunk drawFog() pass skips itself beyond 8bpp (sub-pixel chunks /
+                    // cost cap), which left 16/32bpp fully revealed — this cache pass has no such
+                    // limit because it's already O(cells), not O(chunks).
+                    if (fogReady && !studio.ERM.war.map.client.ClientFogCache.isExplored(wx >> 4, wz >> 4)) {
+                        colors[idx] = COLOR_FOG_BAKED;
+                        heights[idx] = -1;
+                        continue;
+                    }
 
                     Chunk chunk = world.getChunkProvider().getLoadedChunk(wx >> 4, wz >> 4);
                     if (chunk == null) { colors[idx] = 0; heights[idx] = -1; continue; }
@@ -972,7 +992,7 @@ public class GuiTacticalWarMap extends GuiScreen {
                 for (int gx = 0; gx < gw; gx++) {
                     int idx = gy * gw + gx;
                     int rgb = colors[idx];
-                    if (rgb == 0) continue; // leave unexplored as 0
+                    if (rgb == 0 || rgb == COLOR_FOG_BAKED) continue; // unexplored/fog: no relief shading
                     int h = heights[idx];
                     int hN = (gy > 0) ? heights[idx - gw] : h;
                     int shade = 1;

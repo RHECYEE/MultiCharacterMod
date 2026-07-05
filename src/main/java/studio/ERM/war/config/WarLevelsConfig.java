@@ -378,6 +378,22 @@ public final class WarLevelsConfig {
         public int townSizeBaseChunks = 14;
         /** Extra chunks of town footprint per level above 2 (clamped to the template's max). */
         public int townSizeChunksPerLevel = 1;
+        /** SATELLITE TOWNS: each growth batch/level-up runs the town generator AGAIN — a randomly
+         *  sized district linked by road off one of the capital's cardinal roads. Unwalled template
+         *  is used for satellites below satelliteWalledMinChunks (small footprints can't fit a wall
+         *  pattern). */
+        public String satelliteUnwalledTemplate = "EmpireUnwalledTown";
+        public int satelliteMinChunks = 5;
+        public int satelliteMaxChunks = 9;
+        /** Satellites at/above this footprint roll 50/50 walled vs unwalled. */
+        public int satelliteWalledMinChunks = 10;
+        /** Chance a growth batch founds a FAR town instead (a long road out to fresh land). */
+        public double farTownChance = 0.25;
+        /** Far-town road length in CHUNKS beyond the city edge (min..max). */
+        public int farTownMinChunks = 10;
+        public int farTownMaxChunks = 18;
+        /** RIVAL claim halo around every town footprint (the frontier buffer), in chunks. */
+        public int claimBufferChunks = 2;
         /** LANDMARKS: one-shot monuments placed when the city reaches their level. `template` is an
          *  exact AW2 template name (preferred); blank template = keyword sweep over loaded templates. */
         public List<LandmarkEntry> landmarks = defaultLandmarks();
@@ -412,6 +428,15 @@ public final class WarLevelsConfig {
             if (townTemplate == null) townTemplate = "EmpireWalledCity";
             if (townSizeBaseChunks < 4) townSizeBaseChunks = 14;
             if (townSizeChunksPerLevel < 0) townSizeChunksPerLevel = 1;
+            if (satelliteUnwalledTemplate == null) satelliteUnwalledTemplate = "EmpireUnwalledTown";
+            if (satelliteMinChunks < 3) satelliteMinChunks = 5;
+            if (satelliteMaxChunks < satelliteMinChunks) satelliteMaxChunks = satelliteMinChunks;
+            if (satelliteWalledMinChunks < 8) satelliteWalledMinChunks = 10;
+            if (farTownChance < 0) farTownChance = 0;
+            if (farTownChance > 1) farTownChance = 1;
+            if (farTownMinChunks < 2) farTownMinChunks = 10;
+            if (farTownMaxChunks < farTownMinChunks) farTownMaxChunks = farTownMinChunks;
+            if (claimBufferChunks < 0) claimBufferChunks = 2;
             if (landmarks == null) landmarks = defaultLandmarks();
             for (LandmarkEntry e : landmarks) {
                 if (e == null) continue;

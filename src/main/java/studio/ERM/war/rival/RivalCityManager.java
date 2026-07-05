@@ -248,20 +248,21 @@ public class RivalCityManager {
 
         isGenerating = true;
         try {
-            int grown = RivalCityGenerator.growRing(world, state, cfg.growthChunksPerBatch);
+            int grown = RivalCityGenerator.growSatelliteTown(world, state, cfg.growthChunksPerBatch);
             if (cfg.claimDrivenGrowth) state.growthBatches--;
             RivalCityGenerator.checkLandmarks(world, state);
             updateLegacyFields(state);
             WarMapOverlay.setRivalCityMarker(state.center, state.level);
             saveCities(world);
-            EpochRunnerMod.logger.info("[RivalCity] growth surge: capital L" + state.level + " grew "
-                    + grown + " chunk(s)" + (cfg.claimDrivenGrowth
+            EpochRunnerMod.logger.info("[RivalCity] growth surge: capital L" + state.level
+                    + " founded a satellite (" + grown + " chunk(s) claimed)" + (cfg.claimDrivenGrowth
                     ? " (" + state.growthBatches + " batch(es) still banked)" : " (ambient)"));
             net.minecraft.entity.player.EntityPlayer p = world.getClosestPlayer(
-                    state.center.getX(), state.center.getY(), state.center.getZ(), 2048, false);
+                    state.center.getX(), state.center.getY(), state.center.getZ(), 4096, false);
             if (p != null && grown > 0) {
                 p.sendMessage(new TextComponentString(TextFormatting.RED
-                        + "The rival city is expanding — " + grown + " chunks of new construction."));
+                        + "The rival empire has founded a new settlement — "
+                        + grown + " chunks of territory claimed."));
             }
         } catch (Throwable t) {
             EpochRunnerMod.logger.error("[RivalCity] growth surge failed (guarded)", t);

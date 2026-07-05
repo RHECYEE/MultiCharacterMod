@@ -161,6 +161,10 @@ public class RivalCityState {
     // One-shot LANDMARKS already raised (config key strings), e.g. the L6 factory, L8 skyscraper.
     public final Set<String> placedLandmarks = new HashSet<>();
 
+    // SATELLITE TOWNS raised by growth batches: {centerChunkX, centerChunkZ, halfSizeChunks} per
+    // entry. Used to keep new satellites from overlapping existing ones and to route link roads.
+    public final List<int[]> satellites = new ArrayList<>();
+
     // Stats integration
     public RivalFactionStats stats;
     public RivalExpansionManager expansionManager;
@@ -209,6 +213,14 @@ public class RivalCityState {
         NBTTagList lmList = new NBTTagList();
         for (String lm : placedLandmarks) lmList.appendTag(new net.minecraft.nbt.NBTTagString(lm));
         nbt.setTag("landmarks", lmList);
+        int[] sats = new int[satellites.size() * 3];
+        int si = 0;
+        for (int[] s : satellites) {
+            sats[si++] = s[0];
+            sats[si++] = s[1];
+            sats[si++] = s[2];
+        }
+        nbt.setIntArray("satellites", sats);
         nbt.setInteger("gridPlotSize", gridPlotSize);
         nbt.setInteger("gridRoadWidth", gridRoadWidth);
         nbt.setInteger("gridSpacing", gridSpacing);
@@ -285,6 +297,11 @@ public class RivalCityState {
         NBTTagList lmList = nbt.getTagList("landmarks", net.minecraftforge.common.util.Constants.NBT.TAG_STRING);
         for (int i = 0; i < lmList.tagCount(); i++) {
             placedLandmarks.add(lmList.getStringTagAt(i));
+        }
+        satellites.clear();
+        int[] sats = nbt.getIntArray("satellites");
+        for (int i = 0; i + 2 < sats.length; i += 3) {
+            satellites.add(new int[]{sats[i], sats[i + 1], sats[i + 2]});
         }
 
         // Grid layout

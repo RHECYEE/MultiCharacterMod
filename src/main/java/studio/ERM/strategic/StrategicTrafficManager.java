@@ -47,8 +47,10 @@ public final class StrategicTrafficManager {
 
             int lvl = Math.max(1, city.level);
             double density = studio.ERM.war.config.WarLevelsConfig.trafficDensity();
-            int patrolCap = Math.max(0, (int) Math.round((1 + lvl / 3.0) * density));
-            int traderCap = Math.max(0, (int) Math.round((1 + lvl / 4.0) * density));
+            // STEEP level scaling: the world must FEEL the rival's tier. L1 ≈ 2 patrols/1 trader;
+            // L10 ≈ 9 patrols + 6 traders per city (× density) — a genuinely busy strategic map.
+            int patrolCap = Math.max(0, (int) Math.round((1 + lvl * 0.8) * density));
+            int traderCap = Math.max(0, (int) Math.round((1 + lvl * 0.5) * density));
 
             int patrols = 0, traders = 0;
             for (StrategicObject o : data.objects.values()) {
@@ -57,8 +59,16 @@ public final class StrategicTrafficManager {
                 else if (o instanceof StrategicTrader) traders++;
             }
 
-            if (patrols < patrolCap) { data.add(makePatrol(world, c, lvl, key)); logRaise(world, "patrol", key, lvl); }
-            if (traders < traderCap) { data.add(makeTrader(world, c, lvl, key)); logRaise(world, "trader", key, lvl); }
+            // Top-up rate scales with level too: a high-tier city raises its traffic FAST after losses.
+            int topUps = Math.max(1, lvl / 3);
+            for (int i = 0; i < topUps && patrols < patrolCap; i++, patrols++) {
+                data.add(makePatrol(world, c, lvl, key));
+                logRaise(world, "patrol", key, lvl);
+            }
+            for (int i = 0; i < topUps && traders < traderCap; i++, traders++) {
+                data.add(makeTrader(world, c, lvl, key));
+                logRaise(world, "trader", key, lvl);
+            }
         }
     }
 

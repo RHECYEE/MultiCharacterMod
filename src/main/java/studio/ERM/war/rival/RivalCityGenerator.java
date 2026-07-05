@@ -113,11 +113,23 @@ public class RivalCityGenerator {
         // THE NATIVE AW2 TOWN GENERATOR: the first time the settlement reaches level 2+, generate
         // the whole walled town through AW2's own TownGenerator (terrain leveling, patterned walls
         // with gates, interior grid + roads, exterior FARM ring, lamps, villagers — all from the
-        // town template). Our plot machinery then grows RINGS around it. Falls back to the legacy
-        // single-castle core when no town templates are loaded.
+        // town template). Falls back to the legacy single-castle core when no town templates load.
         if (!state.coreStructurePlaced && tryGenerateAw2TownCore(world, state, level)) {
             checkLandmarks(world, state);
             return; // the town IS this pass's content — its own walls, roads and farm ring
+        }
+
+        // Once a core exists, EVERY further pass (level-up or growth surge) founds a SATELLITE
+        // town through the same AW2 pipeline instead of scattering hand-placed plots — the plot
+        // path neither cleared land nor respected water and read as random buildings. Legacy plot
+        // growth survives only as the fallback when no town templates are loaded at all.
+        if (state.coreStructurePlaced) {
+            int claimed = growSatelliteTown(world, state,
+                    studio.ERM.war.config.WarLevelsConfig.cityGrowth().growthChunksPerBatch);
+            if (claimed > 0 || hasTownTemplates()) {
+                checkLandmarks(world, state);
+                return;
+            }
         }
 
         // Determine mix of AW2 templates vs procedural buildings
@@ -236,6 +248,7 @@ public class RivalCityGenerator {
             state.currentGridRadius = Math.max(state.currentGridRadius, cellsHalf);
             state.currentRingRadius = Math.max(state.currentRingRadius, blocksHalf);
             state.size = Math.max(state.size, blocksHalf); // claimChunksForRival covers the town
+            state.satellites.add(new int[]{cc.x, cc.z, half + 1}); // the capital's own footprint rect
             state.stats.onStructureBuilt(RivalFactionStats.StructureType.HOUSING);
             state.stats.onStructureBuilt(RivalFactionStats.StructureType.MILITARY_FORT);
             return true;
@@ -246,101 +259,257 @@ public class RivalCityGenerator {
     }
 
     // =====================================================================
-    // RING GROWTH — the claim-driven batches (farms out, buildings in)
+    // SATELLITE-TOWN GROWTH — every expansion re-runs the AW2 town generator
     // =====================================================================
+    // The city grows by FOUNDING, not by scattering plots: pick a cardinal direction off the
+    // capital's road cross, generate ANOTHER AW2 town there (random size, walled or unwalled),
+    // pave a link road, and claim the town + a buffer halo. Occasionally the road runs FAR out
+    // and founds a distant second town. The claims stay consistent blobs: buffer -> contested
+    // countryside -> city, exactly the frontier layering the war map needs.
 
     /**
-     * Grow the city outward by ~{@code chunkBudget} newly-claimed chunks of construction: plots are
-     * taken ring-by-ring from the grid (outside the AW2 town footprint), FRONTIER plots bias toward
-     * farms, interior plots take district buildings, and farms that have become interior are
-     * rebuilt as housing/civic — the fields migrate outward organically. Returns chunks claimed.
+     * One growth surge = one new satellite town. Returns the number of newly claimed chunks
+     * (0 = no valid site / no town templates loaded — the caller may fall back to plot growth).
      */
-    public static int growRing(World world, RivalCityState state, int chunkBudget) {
+    public static int growSatelliteTown(World world, RivalCityState state, int chunkBudget) {
         if (state.center == null) return 0;
-        Set<String> templates;
         try {
-            Class.forName("net.shadowmage.ancientwarfare.structure.template.StructureTemplateManager");
-            templates = net.shadowmage.ancientwarfare.structure.template.StructureTemplateManager.getTemplates();
-        } catch (Throwable t) {
-            templates = null;
-        }
-        if (templates == null || templates.isEmpty()) return 0;
+            studio.ERM.war.config.WarLevelsConfig.CityGrowthTuning cfg =
+                    studio.ERM.war.config.WarLevelsConfig.cityGrowth();
+            net.shadowmage.ancientwarfare.structure.town.TownTemplateManager mgr =
+                    net.shadowmage.ancientwarfare.structure.town.TownTemplateManager.INSTANCE;
 
-        RivalCityConfig.applyDensityByLevel(state);
-        WarWorldData wd = WarWorldData.get(world);
-        EntityPlayer target = world.getClosestPlayer(state.center.getX() + 0.5, state.center.getY() + 0.5,
-                state.center.getZ() + 0.5, 2048, false);
-
-        Set<Long> newChunks = new HashSet<>();
-        int spacing = Math.max(8, state.gridSpacing);
-        int guard = 0;
-        while (newChunks.size() < chunkBudget && guard++ < 80) {
-            GridCell cell = pickNextGridCell(world, state, target);
-            if (cell == null) break;
-            long key = packGridCell(cell.gx, cell.gz);
-            state.occupiedGridCells.add(key);
-
-            BlockPos plotOrigin = gridCellToWorld(state, cell.gx, cell.gz);
-            if (!world.isBlockLoaded(plotOrigin, false)) continue;
-            BlockPos surface = world.getTopSolidOrLiquidBlock(plotOrigin).down();
-            preparePlotAndRoads(world, state, surface, cell.gx, cell.gz);
-
-            // FRONTIER plots lean agricultural; the city keeps its fields on the edge.
-            int cheb = Math.max(Math.abs(cell.gx), Math.abs(cell.gz));
-            boolean frontier = cheb >= state.currentGridRadius;
-            RivalCityState.DistrictType district = (frontier && rand.nextFloat() < 0.6f)
-                    ? RivalCityState.DistrictType.AGRICULTURE
-                    : pickDistrictForCell(state, cell.gx, cell.gz, target);
-            generateTemplateStructure(world, state, surface, cell, district, state.level, target, templates);
-            if (district == RivalCityState.DistrictType.AGRICULTURE) state.farmCells.add(key);
-
-            // Claim the plot's chunk coverage; only chunks NEW to the rival count against the budget.
-            for (int bx = plotOrigin.getX() - 4; bx <= plotOrigin.getX() + spacing + 4; bx += 16) {
-                for (int bz = plotOrigin.getZ() - 4; bz <= plotOrigin.getZ() + spacing + 4; bz += 16) {
-                    ChunkPos cp = new ChunkPos(bx >> 4, bz >> 4);
-                    if ("NEUTRAL".equals(wd.getOwner(cp))) {
-                        wd.setOwner(cp, RivalCityState.RIVAL_FACTION_NAME);
-                        newChunks.add(net.minecraft.util.math.ChunkPos.asLong(cp.x, cp.z));
-                    }
+            int size = cfg.satelliteMinChunks
+                    + rand.nextInt(Math.max(1, cfg.satelliteMaxChunks - cfg.satelliteMinChunks + 1));
+            boolean walled = size >= cfg.satelliteWalledMinChunks && rand.nextBoolean();
+            net.shadowmage.ancientwarfare.structure.town.TownTemplate tt =
+                    mgr.getTemplate(walled ? cfg.townTemplate : cfg.satelliteUnwalledTemplate).orElse(null);
+            if (tt == null) tt = mgr.getTemplate(cfg.satelliteUnwalledTemplate).orElse(null);
+            if (tt == null) tt = mgr.getTemplate(cfg.townTemplate).orElse(null);
+            if (tt == null) {
+                for (net.shadowmage.ancientwarfare.structure.town.TownTemplate cand : mgr.getTemplates()) {
+                    if (cand != null && cand.isValid()) { tt = cand; break; }
                 }
             }
-        }
+            if (tt == null) return 0; // no town templates loaded at all
 
-        convertInteriorFarms(world, state, templates, target);
-        wd.markDirty();
-        return newChunks.size();
+            boolean far = rand.nextDouble() < cfg.farTownChance;
+            int half = size / 2;
+            ChunkPos capChunk = new ChunkPos(state.center);
+            int capHalf = capitalHalfChunks(state);
+
+            // Try the four cardinal directions in random order; take the first dry, non-overlapping site.
+            int[][] dirs = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+            for (int i = dirs.length - 1; i > 0; i--) { // shuffle
+                int j = rand.nextInt(i + 1);
+                int[] tmp = dirs[i]; dirs[i] = dirs[j]; dirs[j] = tmp;
+            }
+
+            for (int[] dir : dirs) {
+                int gap = far ? cfg.farTownMinChunks
+                        + rand.nextInt(Math.max(1, cfg.farTownMaxChunks - cfg.farTownMinChunks + 1))
+                        : 1 + rand.nextInt(2);
+                int centerDist = capHalf + gap + half + 1;
+
+                // Push outward past any satellite already sitting on this bearing.
+                ChunkPos sc = null;
+                for (int push = 0; push < 40; push++) {
+                    ChunkPos cand = new ChunkPos(capChunk.x + dir[0] * (centerDist + push),
+                            capChunk.z + dir[1] * (centerDist + push));
+                    if (!overlapsExistingTown(state, capChunk, capHalf, cand, half + 1)) { sc = cand; break; }
+                }
+                if (sc == null) continue;
+
+                // Dry-land check: a 3x3 surface sample over the footprint (forces chunk gen — one-off).
+                BlockPos scBlock = new BlockPos((sc.x << 4) + 8, 64, (sc.z << 4) + 8);
+                int dry = 0;
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        try {
+                            BlockPos s = world.getTopSolidOrLiquidBlock(
+                                    scBlock.add(dx * half * 12, 0, dz * half * 12));
+                            if (!world.getBlockState(s.down()).getMaterial().isLiquid()) dry++;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+                if (dry < 6) continue; // too wet — a town shouldn't drown; try another bearing
+
+                // GENERATE the satellite through AW2's own pipeline (leveling, borders, roads, all).
+                net.shadowmage.ancientwarfare.structure.town.TownBoundingArea area =
+                        new net.shadowmage.ancientwarfare.structure.town.TownBoundingArea(
+                                sc.x - half, sc.z - half, sc.x - half + size - 1, sc.z - half + size - 1, 1, 255);
+                int surfaceY = world.getTopSolidOrLiquidBlock(scBlock).getY() - 1;
+                area.setSurfaceY(Math.max(2, surfaceY));
+                EpochRunnerMod.logger.info("[RivalCity] SATELLITE town: '" + tt.getTownTypeName() + "' "
+                        + size + "x" + size + " chunks @ " + (sc.x << 4) + "," + (sc.z << 4)
+                        + (far ? " (FAR settlement)" : "") + (walled ? " [walled]" : " [open]"));
+                net.shadowmage.ancientwarfare.structure.town.WorldTownGenerator.INSTANCE.generate(world, area, tt);
+                state.satellites.add(new int[]{sc.x, sc.z, half + 1});
+
+                // LINK ROAD: both towns run cardinal roads out of their bounds; the satellite is
+                // axis-aligned with the capital, so one straight cobble avenue joins the two.
+                BlockPos roadFrom = new BlockPos(
+                        state.center.getX() + dir[0] * (capHalf * 16),
+                        0, state.center.getZ() + dir[1] * (capHalf * 16));
+                BlockPos roadTo = new BlockPos(
+                        (sc.x << 4) + 8 - dir[0] * (half * 16),
+                        0, (sc.z << 4) + 8 - dir[1] * (half * 16));
+                createMainRoad(world, state, roadFrom, roadTo);
+
+                // CLAIMS: the town + its buffer halo, plus a corridor along the link road.
+                int claimed = claimRectForRival(world,
+                        sc.x - half - cfg.claimBufferChunks, sc.z - half - cfg.claimBufferChunks,
+                        sc.x + half + cfg.claimBufferChunks, sc.z + half + cfg.claimBufferChunks);
+                claimed += claimCorridorForRival(world, capChunk, sc);
+
+                state.currentRingRadius = Math.max(state.currentRingRadius,
+                        (Math.max(Math.abs(sc.x - capChunk.x), Math.abs(sc.z - capChunk.z)) + half) * 16);
+                state.stats.onStructureBuilt(RivalFactionStats.StructureType.HOUSING);
+                return claimed;
+            }
+            EpochRunnerMod.logger.info("[RivalCity] satellite growth: no dry non-overlapping site this pass");
+            return 0;
+        } catch (Throwable t) {
+            EpochRunnerMod.logger.error("[RivalCity] satellite town generation failed", t);
+            return 0;
+        }
     }
 
     /**
-     * Farms two rings inside the frontier are no longer countryside: rebuild a few per batch as
-     * housing/civic (the new structure levels its own plot as it builds) and drop them from the
-     * farm ledger — combined with the frontier's farm bias, the fields "move outward" organically.
+     * Level a landmark building pad with SMOOTHED EDGES: the pad flattens to the local median
+     * height, then a skirt blends linearly back to natural terrain over ~6 blocks — cleared land
+     * gets soft borders instead of sheer cut walls. Watery sites (2+ of 5 samples liquid) are
+     * rejected. Returns the pad's surface position, or null when the site is unusable.
      */
-    private static void convertInteriorFarms(World world, RivalCityState state, Set<String> templates,
-                                             EntityPlayer target) {
-        List<Long> interior = new ArrayList<>();
-        for (Long key : state.farmCells) {
-            int gx = unpackGridX(key), gz = unpackGridZ(key);
-            if (Math.max(Math.abs(gx), Math.abs(gz)) <= state.currentGridRadius - 2) interior.add(key);
+    private static BlockPos prepareLandmarkPad(World world, BlockPos center, int radius) {
+        try {
+            // Median target height from the centre + four corner samples; reject wet sites.
+            int[] samples = new int[5];
+            int wet = 0;
+            int[][] offs = {{0, 0}, {-radius, -radius}, {radius, -radius}, {-radius, radius}, {radius, radius}};
+            for (int i = 0; i < offs.length; i++) {
+                BlockPos top = world.getTopSolidOrLiquidBlock(center.add(offs[i][0], 0, offs[i][1]));
+                samples[i] = top.getY();
+                if (world.getBlockState(top.down()).getMaterial().isLiquid()) wet++;
+            }
+            if (wet >= 2) return null;
+            java.util.Arrays.sort(samples);
+            int padY = samples[2]; // median
+
+            int skirt = 6;
+            for (int dx = -(radius + skirt); dx <= radius + skirt; dx++) {
+                for (int dz = -(radius + skirt); dz <= radius + skirt; dz++) {
+                    int d = Math.max(Math.abs(dx), Math.abs(dz));
+                    int x = center.getX() + dx, z = center.getZ() + dz;
+                    BlockPos natural = world.getTopSolidOrLiquidBlock(new BlockPos(x, 64, z));
+                    int targetY;
+                    if (d <= radius) {
+                        targetY = padY;
+                    } else {
+                        // Skirt: linear blend from pad height back to the natural surface.
+                        float t = (d - radius) / (float) skirt;
+                        targetY = Math.round(padY + (natural.getY() - padY) * t);
+                    }
+                    // Fill up to target (dirt, grass cap), clear a working headroom above it.
+                    for (int y = Math.min(natural.getY(), targetY) - 1; y < targetY; y++) {
+                        BlockPos p = new BlockPos(x, y, z);
+                        net.minecraft.block.state.IBlockState st = world.getBlockState(p);
+                        if (st.getMaterial().isLiquid() || world.isAirBlock(p)
+                                || !st.getMaterial().blocksMovement()) {
+                            world.setBlockState(p, y == targetY - 1
+                                    ? Blocks.GRASS.getDefaultState()
+                                    : Blocks.DIRT.getDefaultState(), 2);
+                        }
+                    }
+                    if (natural.getY() > targetY) {
+                        // Cut down to target; re-grass the new surface.
+                        for (int y = natural.getY(); y >= targetY; y--) {
+                            world.setBlockToAir(new BlockPos(x, y, z));
+                        }
+                        BlockPos ground = new BlockPos(x, targetY - 1, z);
+                        if (world.getBlockState(ground).getMaterial().blocksMovement()) {
+                            world.setBlockState(ground, Blocks.GRASS.getDefaultState(), 2);
+                        }
+                    } else if (d <= radius) {
+                        // Clear headroom over the pad so the template doesn't merge into trees.
+                        for (int y = targetY; y < targetY + 14; y++) {
+                            BlockPos p = new BlockPos(x, y, z);
+                            if (!world.isAirBlock(p)) world.setBlockToAir(p);
+                        }
+                    }
+                }
+            }
+            return new BlockPos(center.getX(), padY, center.getZ());
+        } catch (Throwable t) {
+            return null;
         }
-        int converted = 0;
-        for (Long key : interior) {
-            if (converted >= 3) break; // gentle: a handful of conversions per batch
-            int gx = unpackGridX(key), gz = unpackGridZ(key);
-            BlockPos plotOrigin = gridCellToWorld(state, gx, gz);
-            if (!world.isBlockLoaded(plotOrigin, false)) continue;
-            BlockPos surface = world.getTopSolidOrLiquidBlock(plotOrigin).down();
-            RivalCityState.DistrictType district = rand.nextBoolean()
-                    ? RivalCityState.DistrictType.RESIDENTIAL : RivalCityState.DistrictType.CIVIC_CORE;
-            generateTemplateStructure(world, state, surface, new GridCell(gx, gz), district,
-                    state.level, target, templates);
-            state.farmCells.remove(key);
-            converted++;
+    }
+
+    /** True when AW2 has ANY town templates loaded (satellite growth is possible at all). */
+    private static boolean hasTownTemplates() {
+        try {
+            return !net.shadowmage.ancientwarfare.structure.town.TownTemplateManager.INSTANCE
+                    .getTemplates().isEmpty();
+        } catch (Throwable t) {
+            return false;
         }
-        if (converted > 0) {
-            EpochRunnerMod.logger.info("[RivalCity] urbanization: " + converted
-                    + " interior farm plot(s) rebuilt as city blocks");
+    }
+
+    /** The capital's half-footprint in chunks (satellites[0] when the AW2 core recorded itself,
+     *  else derived from the built radius). */
+    private static int capitalHalfChunks(RivalCityState state) {
+        for (int[] s : state.satellites) {
+            ChunkPos cc = new ChunkPos(state.center);
+            if (s[0] == cc.x && s[1] == cc.z) return Math.max(3, s[2]);
         }
+        return Math.max(3, state.currentRingRadius / 16);
+    }
+
+    /** Rect-vs-rect overlap against the capital and every satellite (1-chunk breathing room). */
+    private static boolean overlapsExistingTown(RivalCityState state, ChunkPos capChunk, int capHalf,
+                                                ChunkPos cand, int candHalf) {
+        if (Math.abs(cand.x - capChunk.x) <= capHalf + candHalf
+                && Math.abs(cand.z - capChunk.z) <= capHalf + candHalf) return true;
+        for (int[] s : state.satellites) {
+            if (Math.abs(cand.x - s[0]) <= s[2] + candHalf
+                    && Math.abs(cand.z - s[1]) <= s[2] + candHalf) return true;
+        }
+        return false;
+    }
+
+    /** Claim a chunk rect for the rival (NEUTRAL chunks only). Returns chunks flipped. */
+    private static int claimRectForRival(World world, int minCx, int minCz, int maxCx, int maxCz) {
+        WarWorldData wd = WarWorldData.get(world);
+        int flipped = 0;
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cz = minCz; cz <= maxCz; cz++) {
+                ChunkPos cp = new ChunkPos(cx, cz);
+                if ("NEUTRAL".equals(wd.getOwner(cp))) {
+                    wd.setOwner(cp, RivalCityState.RIVAL_FACTION_NAME);
+                    flipped++;
+                }
+            }
+        }
+        wd.markDirty();
+        return flipped;
+    }
+
+    /** Claim the 1-wide chunk corridor along the (axis-aligned) link road between two towns. */
+    private static int claimCorridorForRival(World world, ChunkPos from, ChunkPos to) {
+        int flipped = 0;
+        int stepX = Integer.compare(to.x, from.x);
+        int stepZ = Integer.compare(to.z, from.z);
+        int len = Math.max(Math.abs(to.x - from.x), Math.abs(to.z - from.z));
+        WarWorldData wd = WarWorldData.get(world);
+        for (int i = 0; i <= len; i++) {
+            ChunkPos cp = new ChunkPos(from.x + stepX * i, from.z + stepZ * i);
+            if ("NEUTRAL".equals(wd.getOwner(cp))) {
+                wd.setOwner(cp, RivalCityState.RIVAL_FACTION_NAME);
+                flipped++;
+            }
+        }
+        wd.markDirty();
+        return flipped;
     }
 
     // =====================================================================
@@ -374,15 +543,16 @@ public class RivalCityGenerator {
             } catch (Throwable ignored) {}
             if (tmpl == null) continue; // not loaded (yet) — retried next growth pass
 
-            // Site: just beyond the current built ring, on dry loaded ground.
+            // Site: just beyond the current built ring, on dry loaded ground — on a LEVELED PAD
+            // with a blended skirt so the clearing reads as prepared ground, not a raw scar.
             boolean placed = false;
             for (int attempt = 0; attempt < 8 && !placed; attempt++) {
                 double ang = rand.nextDouble() * Math.PI * 2;
                 int dist = (state.currentGridRadius + 2) * spacing;
                 BlockPos probe = state.center.add((int) (Math.cos(ang) * dist), 0, (int) (Math.sin(ang) * dist));
                 if (!world.isBlockLoaded(probe, false)) continue;
-                BlockPos at = world.getTopSolidOrLiquidBlock(probe);
-                if (world.getBlockState(at.down()).getMaterial().isLiquid()) continue;
+                BlockPos at = prepareLandmarkPad(world, probe, 18);
+                if (at == null) continue; // watery / unusable site
                 placed = placeAW2TemplateSafe(world, tmpl, at,
                         EnumFacing.HORIZONTALS[rand.nextInt(4)], state);
                 if (placed) {
